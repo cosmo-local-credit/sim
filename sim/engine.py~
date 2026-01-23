@@ -1,0 +1,301 @@
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Dict, Set, Optional, Tuple
+import numpy as np
+import random
+
+from .config import ScenarioConfig
+from .core import Event, EventLog
+from .factory import PoolFactory, Agent
+from .router import Router, RoutePlan
+from .metrics import MetricsStore
+
+class SimulationEngine:
+    def __init__(self, cfg: ScenarioConfig, seed: int = 1) -> None:
+        self.cfg = cfg
+        self.rng = random.Random(seed)
+        np.random.seed(seed)
+
+        self.tick: int = 0
+        self.log = EventLog()
+        self.metrics = MetricsStore()
+
+        self.factory = PoolFactory(cfg)
+        self.router = Router(max_hops=cfg.max_hops)
+
+        self.agents: Dict[str, Agent] = {}
+        self.pools: Dict[str, "Pool"] = {}
+
+        # indexes
+        self.accept_index: Dict[str, Set[str]] = {}
+        self.offer_index: Dict[str, Set[str]] = {}
+
+        self._bootstrap()
+
+    def _bootstrap(self) -> None:
+        for _ in range(self.cfg.initial_pools):
+            self.add_pool()
+
+        self.snapshot_metrics()
+
+    def rebuild_indexes(self) -> None:
+        self.accept_index = {}
+        self.offer_index = {}
+        for pid, p in self.pools.items():
+            # accept: listed assets
+            for asset_id, pol in p.registry.listings.items():
+                if pol.enabled:
+                    self.accept_index.setdefault(asset_id, set()).add(pid)
+            # offer: inventory > 0
+            for asset_id, amt in p.vault.inventory.items():
+                if amt > 1e-9:
+                    self.offer_index.setdefault(asset_id, set()).add(pid)
+        self.log.add(Event(self.tick, "INDEX_UPDATED"))
+
+    def add_pool(self) -> None:
+        cfg = self.cfg
+        agent, pool = self.factory.create_agent_and_pool()
+
+        self.agents[agent.agent_id] = agent
+        self.pools[pool.pool_id] = pool
+
+        self.log.add(Event(self.tick, "POOL_CREATED", actor_id=agent.agent_id, pool_id=pool.pool_id))
+
+        # Always list stable in every pool (universal accept)
+        pool.list_asset_with_value_and_limit(cfg.stable_symbol, value=1.0, window_len=cfg.default_window_len, cap_in=cfg.default_cap_in)
+
+        # Sample wants (assets listed)
+        want_k = max(1, int(np.random.poisson(cfg.add_pool_want_assets_mean)))
+        wanted = self.factory.sample_assets(want_k, p_overlap=cfg.p_want_overlap)
+        for a in wanted:
+            if a == cfg.stable_symbol:
+                continue
+            # price: noisy around 1.0 for vouchers (you can make this richer later)
+            v = float(max(0.05, np.random.lognormal(mean=0.0, sigma=0.35)))  # median ~1
+            pool.list_asset_with_value_and_limit(a, value=v, window_len=cfg.default_window_len, cap_in=cfg.default_cap_in)
+
+        # Seed offers (inventory)
+        offer_k = max(1, int(np.random.poisson(cfg.add_pool_offer_assets_mean)))
+        offered = self.factory.sample_assets(offer_k, p_overlap=cfg.p_offer_overlap)
+
+        # seed stable
+        stable_seed = float(max(0.0, np.random.exponential(cfg.initial_stable_per_pool_mean)))
+        pool.vault.add(cfg.stable_symbol, stable_seed)
+
+        # seed some vouchers (including often its own)
+        # issue its own voucher into its own pool (simulates offering commitments)
+        own_v = self.agents[agent.agent_id].voucher_spec.voucher_id
+        own_amt = float(max(0.0, np.random.exponential(300.0)))
+        if own_amt > 0:
+            pool.vault.add(own_v, own_amt)
+            agent.issuer.issue(own_amt)
+
+        for a in offered:
+            if a == cfg.stable_symbol or a == own_v:
+                continue
+            amt = float(max(0.0, np.random.exponential(250.0)))
+            if amt <= 0:
+                continue
+            pool.vault.add(a, amt)
+            # if voucher, bump issuer outstanding
+            spec = self.factory.voucher_specs.get(a)
+            if spec:
+                self.agents[spec.issuer_id].issuer.issue(amt)
+
+        self.log.add(Event(self.tick, "POOL_CONFIGURED", actor_id=agent.agent_id, pool_id=pool.pool_id,
+                           meta={"mode": pool.policy.mode, "min_stable_reserve": pool.policy.min_stable_reserve}))
+        self.log.add(Event(self.tick, "POOL_SEEDED", pool_id=pool.pool_id,
+                           meta={"stable_seed": stable_seed, "offered": offered, "wanted": wanted}))
+
+        self.rebuild_indexes()
+
+    def step(self, n_ticks: int = 1) -> None:
+        for _ in range(n_ticks):
+            self.tick += 1
+
+            # exogenous stable inflow
+            if self.cfg.stable_inflow_per_tick != 0.0:
+                for p in self.pools.values():
+                    p.vault.add(self.cfg.stable_symbol, self.cfg.stable_inflow_per_tick)
+
+            # shock
+            if self.cfg.stable_shock_tick is not None and self.tick == self.cfg.stable_shock_tick:
+                shock = self.cfg.stable_shock_amount
+                for p in self.pools.values():
+                    p.vault.add(self.cfg.stable_symbol, shock)
+                self.log.add(Event(self.tick, "STABLE_SHOCK", amount=shock))
+
+            # random route requests (create activity)
+            for _req in range(self.cfg.random_route_requests_per_tick):
+                self._random_route_request()
+
+            self.snapshot_metrics()
+
+    def _random_route_request(self) -> None:
+        """
+        Choose a random source pool and try to swap some asset it holds into a different asset.
+        Executes via escrow so multi-hop can touch multiple pools.
+        """
+        if not self.pools:
+            return
+
+        source_pool = random.choice(list(self.pools.values()))
+        if not source_pool.vault.inventory:
+            return
+
+        # pick asset_in with positive inventory
+        asset_in = random.choice(list(source_pool.vault.inventory.keys()))
+        if source_pool.vault.get(asset_in) <= 1e-9:
+            return
+
+        # pick a target asset different from input, from global universe
+        universe = list(self.factory.asset_universe.keys())
+        if len(universe) < 2:
+            return
+        asset_out = random.choice(universe)
+        if asset_out == asset_in:
+            return
+
+        amount_in = float(max(1.0, np.random.exponential(self.cfg.random_request_amount_mean)))
+        amount_in = min(amount_in, source_pool.vault.get(asset_in))
+
+        self.log.add(Event(self.tick, "ROUTE_REQUESTED", pool_id=source_pool.pool_id,
+                           asset_id=asset_in, amount=amount_in, meta={"target_asset": asset_out}))
+
+        plan = self.router.find_route(
+            tick=self.tick,
+            start_asset=asset_in,
+            target_asset=asset_out,
+            amount_in=amount_in,
+            pools=self.pools,
+            accept_index=self.accept_index,
+        )
+
+        if not plan.ok:
+            self.log.add(Event(self.tick, "ROUTE_FAILED", pool_id=source_pool.pool_id,
+                               asset_id=asset_in, amount=amount_in, meta={"reason": plan.reason, "target": asset_out}))
+            return
+
+        self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
+                           meta={"hops": [h.__dict__ for h in plan.hops], "target": asset_out}))
+
+        # Execute with escrow:
+        self.execute_route_from_pool(source_pool.pool_id, plan, amount_in)
+
+    def execute_route_from_pool(self, source_pool_id: str, plan: RoutePlan, amount_in: float) -> None:
+        """
+        Withdraw asset_in from source pool into escrow, execute hop swaps, deposit output back to source.
+        If output is voucher, it may exit and redeem (your 'final settlement sink').
+        """
+        if not plan.hops:
+            return
+
+        source_pool = self.pools[source_pool_id]
+        asset_in = plan.hops[0].asset_in
+        if not source_pool.vault.sub(asset_in, amount_in):
+            self.log.add(Event(self.tick, "EXEC_ROUTE_FAILED", pool_id=source_pool_id, meta={"reason": "source_insufficient"}))
+            return
+
+        escrow: Dict[str, float] = {asset_in: amount_in}
+        actor = f"escrow:{source_pool_id}"
+
+        current_amount = amount_in
+        current_asset = asset_in
+
+        for hop in plan.hops:
+            pool = self.pools[hop.pool_id]
+            if escrow.get(current_asset, 0.0) <= 1e-9:
+                self.log.add(Event(self.tick, "EXEC_ROUTE_FAILED", pool_id=source_pool_id, meta={"reason": "escrow_empty"}))
+                return
+
+            amt_in = min(current_amount, escrow[current_asset])
+            receipt = pool.execute_swap(self.tick, actor=actor, asset_in=current_asset, amount_in=amt_in, asset_out=hop.asset_out)
+
+            if receipt.status != "executed":
+                # refund remaining escrow to source pool (best-effort)
+                for a, amt in list(escrow.items()):
+                    if amt > 1e-9:
+                        source_pool.vault.add(a, amt)
+                self.log.add(Event(self.tick, "SWAP_FAILED", pool_id=pool.pool_id, asset_id=current_asset, amount=amt_in,
+                                   meta={"reason": receipt.fail_reason, "hop": hop.__dict__}))
+                return
+
+            # update escrow balances
+            escrow[current_asset] = escrow.get(current_asset, 0.0) - amt_in
+            if escrow[current_asset] <= 1e-12:
+                escrow.pop(current_asset, None)
+            escrow[hop.asset_out] = escrow.get(hop.asset_out, 0.0) + receipt.amount_out
+
+            self.log.add(Event(self.tick, "SWAP_EXECUTED", pool_id=pool.pool_id,
+                   meta={"receipt": receipt.to_dict()}))
+
+            current_asset = hop.asset_out
+            current_amount = receipt.amount_out
+
+        # Decide: deposit back or redeem if voucher
+        out_asset = current_asset
+        out_amount = escrow.get(out_asset, 0.0)
+
+        if out_amount <= 1e-9:
+            return
+
+        if out_asset.startswith("VCHR:"):
+            # voucher exit
+            self.log.add(Event(self.tick, "VOUCHER_EXIT_NETWORK", pool_id=source_pool_id, asset_id=out_asset, amount=out_amount))
+
+            # redemption decision (high probability)
+            spec = self.factory.voucher_specs.get(out_asset)
+            issuer_id = spec.issuer_id if spec else None
+            p = self.cfg.base_redeem_prob + source_pool.policy.redemption_bias
+            p = max(0.0, min(1.0, p))
+            if random.random() < p and issuer_id in self.agents:
+                self.agents[issuer_id].issuer.redeem(out_amount)
+                escrow[out_asset] = 0.0
+                self.log.add(Event(self.tick, "VOUCHER_REDEEMED", actor_id=issuer_id, asset_id=out_asset, amount=out_amount,
+                                   meta={"p": p}))
+                return
+            else:
+                # recirculate back into source pool
+                source_pool.vault.add(out_asset, out_amount)
+                self.log.add(Event(self.tick, "VOUCHER_RECIRCULATED", pool_id=source_pool_id, asset_id=out_asset, amount=out_amount,
+                                   meta={"p": p}))
+                return
+
+        # normal asset: deposit back to source pool
+        source_pool.vault.add(out_asset, out_amount)
+
+    def snapshot_metrics(self) -> None:
+        cfg = self.cfg
+        # network-level
+        swap_receipts = sum(len(p.receipts.receipts) for p in self.pools.values())
+        stable_total = sum(p.vault.get(cfg.stable_symbol) for p in self.pools.values())
+        pools_under_reserve = sum(1 for p in self.pools.values() if p.vault.get(cfg.stable_symbol) < p.policy.min_stable_reserve)
+
+        redeemed_total = sum(a.issuer.redeemed_total for a in self.agents.values())
+        outstanding_total = sum(a.issuer.outstanding_supply for a in self.agents.values())
+
+        self.metrics.add_network({
+            "tick": self.tick,
+            "num_pools": len(self.pools),
+            "num_assets": len(self.factory.asset_universe),
+            "swap_receipts_total": swap_receipts,
+            "stable_total_in_pools": stable_total,
+            "pools_under_stable_reserve": pools_under_reserve,
+            "redeemed_total": redeemed_total,
+            "outstanding_voucher_supply_total": outstanding_total,
+        })
+
+        # per-pool
+        pool_rows = []
+        for pid, p in self.pools.items():
+            pool_rows.append({
+                "tick": self.tick,
+                "pool_id": pid,
+                "mode": p.policy.mode,
+                "stable": p.vault.get(cfg.stable_symbol),
+                "min_stable_reserve": p.policy.min_stable_reserve,
+                "fee_pool_USD": p.fee_ledger_pool.get(cfg.stable_symbol, 0.0),
+                "fee_clc_USD": p.fee_ledger_clc.get(cfg.stable_symbol, 0.0),
+                "inventory_assets_count": len(p.vault.inventory),
+            })
+        self.metrics.add_pool_rows(pool_rows)
