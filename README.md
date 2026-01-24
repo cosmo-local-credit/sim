@@ -337,11 +337,11 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | `noam_topk_refresh_ticks` | `50` | Refresh Top-K/Top-M. |
 | `noam_dynamic_caps_enabled` | `True` | Adaptive caps. |
 | `noam_dynamic_cap_reference_pools` | `50` | Reference pool count for scaling. |
-| `noam_dynamic_min_topk` | `2` | Min Top-K. |
-| `noam_dynamic_min_topm` | `2` | Min Top-M. |
-| `noam_dynamic_min_beam` | `8` | Min beam width. |
+| `noam_dynamic_min_topk` | `4` | Min Top-K. |
+| `noam_dynamic_min_topm` | `4` | Min Top-M. |
+| `noam_dynamic_min_beam` | `16` | Min beam width. |
 | `noam_edge_cap_per_state` | `30` | Edge expansion cap per state. |
-| `noam_dynamic_min_edge_cap` | `10` | Min edge cap. |
+| `noam_dynamic_min_edge_cap` | `20` | Min edge cap. |
 | `noam_overlay_enabled` | `True` | Enable overlay graph. |
 | `noam_hub_asset_count` | `60` | Hub asset count. |
 | `noam_hub_depth` | `2` | Hub depth. |
@@ -355,6 +355,7 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | `noam_clearing_max_cycles` | `200` | Max cycles per run. |
 | `noam_clearing_max_hops` | `4` | Max hops per cycle. |
 | `noam_clearing_edge_cap_per_asset` | `16` | Edge cap per asset in clearing. |
+| `noam_clearing_safety_factor` | `0.8` | Safety multiplier on clearing cycle sizes. |
 | `noam_clearing_budget_usd` | `25000.0` | Base clearing budget. |
 | `noam_clearing_budget_share` | `0.01` | Budget share of network value. |
 | `noam_clearing_min_cycle_value_usd` | `1.0` | Min cycle value. |

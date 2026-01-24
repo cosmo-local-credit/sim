@@ -328,7 +328,7 @@ class SimulationEngine:
         if pool_count <= ref:
             scale = 1.0
         else:
-            scale = ref / max(1, pool_count)
+            scale = math.sqrt(ref / max(1, pool_count))
         self._noam_cap_scale_cache_tick = self.tick
         self._noam_cap_scale_cache_value = scale
         return scale
@@ -810,6 +810,10 @@ class SimulationEngine:
         self._maybe_refresh_noam_working_set()
         min_value = float(self.cfg.noam_clearing_min_cycle_value_usd or 0.0)
         edge_cap = max(0, int(self.cfg.noam_clearing_edge_cap_per_asset or 0))
+        safety = float(self.cfg.noam_clearing_safety_factor or 1.0)
+        if safety <= 0.0:
+            safety = 1.0
+        safety = min(1.0, safety)
         p_min = float(self.cfg.noam_success_min or 1e-6)
         p_max = float(self.cfg.noam_success_max or 1.0)
         w_p = float(self.cfg.noam_weight_success or 0.0)
@@ -825,6 +829,8 @@ class SimulationEngine:
             pool = self.pools.get(pid)
             if pool is None:
                 continue
+            if pool.policy.paused or pool.policy.mode in ("none", "borrow_only"):
+                continue
             value_in = pool.values.get_value(asset_in)
             if value_in <= 0.0:
                 continue
@@ -835,16 +841,21 @@ class SimulationEngine:
                 value_out = pool.values.get_value(asset_out)
                 if value_out <= 0.0:
                     continue
-                if not self._noam_edge_allowed(pool, asset_in, asset_out, amount_in_nominal):
-                    continue
                 remaining = float("inf")
                 if pool.policy.limits_enabled:
                     remaining = pool.limiter.remaining(self.tick, asset_in)
                 inventory_out = pool.vault.get(asset_out)
                 if asset_out == self.cfg.stable_symbol:
                     inventory_out = max(0.0, inventory_out - pool.policy.min_stable_reserve)
-                cap_value = min(remaining * value_in, inventory_out * value_out)
+                cap_amount_in = min(remaining, (inventory_out * value_out) / max(1e-9, value_in))
+                cap_value = cap_amount_in * value_in
+                cap_value *= safety
                 if cap_value <= min_value + 1e-9:
+                    continue
+                amount_in_check = cap_value / value_in
+                if amount_in_check <= 1e-12:
+                    continue
+                if not self._noam_edge_allowed(pool, asset_in, asset_out, amount_in_check):
                     continue
                 state = self._noam_edge_state_for(pid, asset_in, asset_out)
                 if state is None:
@@ -870,7 +881,7 @@ class SimulationEngine:
 
         if edge_cap > 0:
             for asset_in, edges in list(edges_by_asset.items()):
-                edges.sort(key=lambda e: e.score, reverse=True)
+                edges.sort(key=lambda e: (e.score * e.cap_value), reverse=True)
                 edges_by_asset[asset_in] = edges[:edge_cap]
 
         return edges_by_asset
@@ -985,6 +996,10 @@ class SimulationEngine:
             self._update_pool_caches(pool, receipt.asset_in, float(receipt.amount_in))
             self._update_pool_caches(pool, receipt.asset_out, -float(gross_out))
             self._record_fee_cumulative(receipt)
+            if receipt.asset_in.startswith("VCHR:") and pool.policy.role in ("consumer", "producer"):
+                spec = self.factory.voucher_specs.get(receipt.asset_in)
+                if spec and spec.issuer_id != pool.steward_id:
+                    self._redeem_voucher_from_pool(pool, receipt.asset_in, float(receipt.amount_in), spec.issuer_id)
             self._noam_update_edge_after_swap(
                 pool,
                 receipt.asset_in,
@@ -2583,21 +2598,26 @@ class SimulationEngine:
             eligible = [p for p in eligible if p.policy.role == "lender"]
         if not eligible:
             return 0.0
+
         weights: Dict[str, float] = {}
+        deficits: Dict[str, float] = {}
+        stable_id = cfg.stable_symbol
+
         if cfg.liquidity_mandate_mode == "lender_liquidity":
-            stable_id = cfg.stable_symbol
             for p in eligible:
                 stable = p.vault.get(stable_id)
                 deficit = max(0.0, p.policy.min_stable_reserve - stable)
                 if deficit > 1e-9:
-                    weights[p.pool_id] = deficit
-            if not weights:
+                    deficits[p.pool_id] = deficit
+            if deficits:
+                weights = dict(deficits)
+            else:
                 for p in eligible:
                     stable = max(1.0, p.vault.get(stable_id))
                     weights[p.pool_id] = 1.0 / stable
         elif cfg.liquidity_mandate_mode == "deficit_weighted":
             for p in eligible:
-                deficit = max(0.0, p.policy.min_stable_reserve - p.vault.get(cfg.stable_symbol))
+                deficit = max(0.0, p.policy.min_stable_reserve - p.vault.get(stable_id))
                 if deficit > 1e-9:
                     weights[p.pool_id] = deficit
         elif cfg.liquidity_mandate_mode == "utilization_weighted":
@@ -2618,27 +2638,41 @@ class SimulationEngine:
         max_per_pool = float(cfg.liquidity_mandate_max_per_pool_usd or 0.0)
         if cfg.liquidity_mandate_mode == "lender_liquidity":
             max_per_pool = 0.0
-        for p in eligible:
-            weight = weights.get(p.pool_id, 0.0)
-            if weight <= 0.0:
-                continue
-            alloc = budget_usd * (weight / total_weight)
-            if max_per_pool > 0.0:
-                alloc = min(alloc, max_per_pool)
-            if alloc <= 1e-9:
-                continue
-            if not self._vault_sub(mandates_pool, cfg.stable_symbol, alloc, "mandate_out", p.pool_id):
-                continue
-            self._vault_add(p, cfg.stable_symbol, alloc, "mandate_in", mandates_pool.pool_id)
-            distributed += alloc
 
-        if cfg.liquidity_mandate_mode == "lender_liquidity":
-            remaining = budget_usd - distributed
-            if remaining > 1e-9 and eligible:
-                top_pool = max(eligible, key=lambda pool: weights.get(pool.pool_id, 0.0))
-                if self._vault_sub(mandates_pool, cfg.stable_symbol, remaining, "mandate_out", top_pool.pool_id):
-                    self._vault_add(top_pool, cfg.stable_symbol, remaining, "mandate_in", mandates_pool.pool_id)
-                    distributed += remaining
+        # If we have explicit deficits, fill them first (pro‑rata if budget is short).
+        if deficits:
+            total_deficit = sum(deficits.values())
+            if total_deficit > 1e-9:
+                fill_scale = min(1.0, budget_usd / total_deficit)
+                for p in eligible:
+                    deficit = deficits.get(p.pool_id, 0.0)
+                    if deficit <= 0.0:
+                        continue
+                    alloc = deficit * fill_scale
+                    if alloc <= 1e-9:
+                        continue
+                    if not self._vault_sub(mandates_pool, stable_id, alloc, "mandate_out", p.pool_id):
+                        continue
+                    self._vault_add(p, stable_id, alloc, "mandate_in", mandates_pool.pool_id)
+                    distributed += alloc
+
+        remaining_budget = budget_usd - distributed
+
+        # Distribute any remaining budget by weights (inverse stable, utilization, etc.).
+        if remaining_budget > 1e-9:
+            for p in eligible:
+                weight = weights.get(p.pool_id, 0.0)
+                if weight <= 0.0:
+                    continue
+                alloc = remaining_budget * (weight / total_weight)
+                if max_per_pool > 0.0:
+                    alloc = min(alloc, max_per_pool)
+                if alloc <= 1e-9:
+                    continue
+                if not self._vault_sub(mandates_pool, stable_id, alloc, "mandate_out", p.pool_id):
+                    continue
+                self._vault_add(p, stable_id, alloc, "mandate_in", mandates_pool.pool_id)
+                distributed += alloc
 
         if distributed > 0.0:
             self.log.add(Event(self.tick, "LIQUIDITY_MANDATE_DISTRIBUTED", amount=distributed,
@@ -2986,6 +3020,15 @@ class SimulationEngine:
                 if not p.policy.system_pool and p.policy.role != "liquidity_provider"
             ]
             max_active = int(self.cfg.max_active_pools_per_tick or 0)
+            if max_active > 0:
+                pool_count = len(pools)
+                if pool_count > 0:
+                    benchmark = int(self.cfg.max_pools or 500)
+                    if benchmark <= 0:
+                        benchmark = pool_count
+                    scale = math.sqrt(benchmark / max(1, pool_count))
+                    scaled_max = int(math.ceil(max_active * scale))
+                    max_active = min(pool_count, max(1, scaled_max))
             if max_active > 0 and max_active < len(pools):
                 pools = self.rng.sample(pools, k=max_active)
             if pools:
@@ -3370,7 +3413,7 @@ class SimulationEngine:
             )
             self._update_affinity(source_pool_id, pool.pool_id, swap_usd)
 
-            if pool.policy.role == "consumer" and current_asset.startswith("VCHR:"):
+            if pool.policy.role in ("consumer", "producer") and current_asset.startswith("VCHR:"):
                 spec = self.factory.voucher_specs.get(current_asset)
                 if spec and spec.issuer_id != pool.steward_id:
                     self._redeem_voucher_from_pool(pool, current_asset, amt_in, spec.issuer_id)

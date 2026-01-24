@@ -1,5 +1,6 @@
 import json
 import math
+import time
 import numpy as np
 import streamlit as st
 import pandas as pd
@@ -35,6 +36,13 @@ engine = get_engine()
 
 st.title("CLC Pool Network Simulator (MVP-1)")
 st.caption("Time model: 1 tick = 1 week (4 ticks = 1 month).")
+
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 0:
+        seconds = 0.0
+    mins = int(seconds // 60)
+    secs = seconds - (mins * 60)
+    return f"{mins}m {secs:0.1f}s"
 
 def _fmt(value: float) -> str:
     return f"{float(value):,.2f}"
@@ -368,7 +376,7 @@ with st.sidebar:
         key="seed",
     )
 
-    run_ticks = st.number_input("Ticks to run", min_value=1, max_value=1000, value=5)
+    run_ticks = st.slider("Ticks to run", min_value=1, max_value=500, value=100)
     c3, c4 = st.columns(2)
     run_one = c3.button("Step 1 tick")
     run_many = c4.button("Run N ticks")
@@ -377,19 +385,24 @@ with st.sidebar:
     progress_bar = st.progress(progress_value, text=progress_label)
     if run_one:
         progress_bar.progress(0.0, text="Run progress: 0%")
+        start_ts = time.time()
         engine.step(1)
-        progress_bar.progress(1.0, text="Run progress: 100%")
+        elapsed = time.time() - start_ts
+        progress_bar.progress(1.0, text=f"Run progress: 100% ({_fmt_duration(elapsed)})")
         st.session_state.run_progress = 1.0
-        st.session_state.run_progress_label = "Run progress: 100%"
+        st.session_state.run_progress_label = f"Run progress: 100% ({_fmt_duration(elapsed)})"
     if run_many:
         total = int(run_ticks)
         if total > 0:
+            start_ts = time.time()
             for idx in range(total):
                 engine.step(1)
                 progress = (idx + 1) / total
                 progress_bar.progress(progress, text=f"Run progress: {progress:.0%}")
+            elapsed = time.time() - start_ts
             st.session_state.run_progress = 1.0
-            st.session_state.run_progress_label = "Run progress: 100%"
+            st.session_state.run_progress_label = f"Run progress: 100% ({_fmt_duration(elapsed)})"
+            progress_bar.progress(1.0, text=st.session_state.run_progress_label)
     st.caption(f"Current tick: {engine.tick}")
 
     st.subheader("Growth")
@@ -1133,6 +1146,14 @@ with tab_noam_controls:
                 min_value=1,
                 value=int(engine.cfg.noam_clearing_edge_cap_per_asset),
                 step=1,
+            )
+            engine.cfg.noam_clearing_safety_factor = st.slider(
+                "Clearing safety factor",
+                0.1,
+                1.0,
+                float(engine.cfg.noam_clearing_safety_factor),
+                step=0.05,
+                help="Scales clearing cycle sizes to improve execution success.",
             )
             engine.cfg.noam_clearing_budget_usd = st.number_input(
                 "Clearing budget (USD)",

@@ -6,7 +6,7 @@ class ScenarioConfig:
     initial_pools: int = 10
     pool_growth_rate_per_tick: float = 0.02
     pool_growth_stride_ticks: int = 4
-    max_pools: int | None = 2000
+    max_pools: int | None = 500
     add_pool_offer_assets_mean: int = 4
     add_pool_want_assets_mean: int = 6
     p_offer_overlap: float = 0.75     # offered assets drawn from existing universe
@@ -76,11 +76,11 @@ class ScenarioConfig:
     noam_topk_refresh_ticks: int = 50
     noam_dynamic_caps_enabled: bool = True
     noam_dynamic_cap_reference_pools: int = 50
-    noam_dynamic_min_topk: int = 2
-    noam_dynamic_min_topm: int = 2
-    noam_dynamic_min_beam: int = 8
+    noam_dynamic_min_topk: int = 4
+    noam_dynamic_min_topm: int = 4
+    noam_dynamic_min_beam: int = 16
     noam_edge_cap_per_state: int = 30
-    noam_dynamic_min_edge_cap: int = 10
+    noam_dynamic_min_edge_cap: int = 20
     noam_overlay_enabled: bool = True
     noam_hub_asset_count: int = 60
     noam_hub_depth: int = 2
@@ -94,6 +94,7 @@ class ScenarioConfig:
     noam_clearing_max_cycles: int = 200
     noam_clearing_max_hops: int = 4
     noam_clearing_edge_cap_per_asset: int = 16
+    noam_clearing_safety_factor: float = 0.8
     noam_clearing_budget_usd: float = 25000.0
     noam_clearing_budget_share: float = 0.01
     noam_clearing_min_cycle_value_usd: float = 1.0
