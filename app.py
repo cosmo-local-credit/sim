@@ -1539,6 +1539,27 @@ with tab_network:
             y=["transactions_per_tick"],
         )
 
+        st.subheader("Swap Flow Breakdown (USD per tick)")
+        st.line_chart(
+            net_df,
+            x="tick",
+            y=[
+                "swap_volume_usd_to_vchr_tick",
+                "swap_volume_vchr_to_usd_tick",
+                "swap_volume_vchr_to_vchr_tick",
+            ],
+        )
+
+        st.subheader("Flow Multipliers (c and Beta)")
+        ratio_cols = st.columns(2)
+        ratio_cols[0].metric("c (V→USD / USD→V)", _fmt(latest.get("swap_c_ratio", 0.0)))
+        ratio_cols[1].metric("Beta (V→V / V→USD)", _fmt(latest.get("swap_beta_ratio", 0.0)))
+        st.line_chart(
+            net_df,
+            x="tick",
+            y=["swap_c_ratio", "swap_beta_ratio"],
+        )
+
         st.subheader("Fiat On/Off-Ramps (USD per tick)")
         st.line_chart(
             net_df,

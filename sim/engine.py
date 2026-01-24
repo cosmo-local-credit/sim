@@ -72,6 +72,12 @@ class SimulationEngine:
         self.accept_index: Dict[str, Set[str]] = {}
         self.offer_index: Dict[str, Set[str]] = {}
         self.pool_affinity: Dict[Tuple[str, str], float] = {}
+        self._sticky_target_by_pool: Dict[Tuple[str, str], str] = {}
+        self._sticky_plan_by_pool: Dict[Tuple[str, str, str], RoutePlan] = {}
+        self._sticky_failures: Dict[Tuple[str, str, str], int] = {}
+        self._noam_edge_cache_tick: int = -1
+        self._noam_edge_cache: Dict[Tuple[str, str, str, int], Tuple[bool, float]] = {}
+        self._noam_top_pools_active: Dict[str, list[str]] = {}
         self._swap_volume_usd_tick: float = 0.0
         self._swap_volume_usd_by_pool: Dict[str, float] = {}
         self._noam_routing_swaps_tick: int = 0
@@ -132,7 +138,18 @@ class SimulationEngine:
     def _bootstrap(self) -> None:
         if self.cfg.economics_enabled:
             self._bootstrap_system_pools()
-        initial_roles = ["producer", "producer", "lender", "liquidity_provider"]
+        initial_roles = [
+            "lender",
+            "liquidity_provider",
+            "producer",
+            "producer",
+            "producer",
+            "producer",
+            "producer",
+            "producer",
+            "producer",
+            "producer",
+        ]
         for idx in range(self.cfg.initial_pools):
             role = initial_roles[idx] if idx < len(initial_roles) else None
             self.add_pool(role=role)
@@ -311,7 +328,7 @@ class SimulationEngine:
         if pool_count <= ref:
             scale = 1.0
         else:
-            scale = math.sqrt(ref / max(1, pool_count))
+            scale = ref / max(1, pool_count)
         self._noam_cap_scale_cache_tick = self.tick
         self._noam_cap_scale_cache_value = scale
         return scale
@@ -434,6 +451,66 @@ class SimulationEngine:
         bucket_id = int(amount_usd / bucket)
         key = (source_pool_id, start_asset, target_asset, bucket_id)
         self._noam_route_cache[key] = (self.tick + ttl, plan)
+
+    def _noam_edge_cache_reset(self) -> None:
+        if self._noam_edge_cache_tick != self.tick:
+            self._noam_edge_cache_tick = self.tick
+            self._noam_edge_cache = {}
+            active: Dict[str, list[str]] = {}
+            for asset_id, pool_ids in self._noam_top_pools.items():
+                filtered: list[str] = []
+                for pid in pool_ids:
+                    pool = self.pools.get(pid)
+                    if pool is None:
+                        continue
+                    if pool.policy.paused:
+                        continue
+                    if pool.policy.mode in ("none", "borrow_only"):
+                        continue
+                    filtered.append(pid)
+                if filtered:
+                    active[asset_id] = filtered
+            self._noam_top_pools_active = active
+
+    def _noam_edge_cache_key(
+        self,
+        pool: "Pool",
+        asset_in: str,
+        asset_out: str,
+        amount_in: float,
+        cache: Optional[NoamRouteCache],
+    ) -> Tuple[str, str, str, int]:
+        bucket = float(self.cfg.noam_route_cache_bucket_usd or 0.0)
+        if bucket <= 0.0:
+            bucket = 1.0
+        value_in = self._noam_cached_value(pool, asset_in, cache)
+        if value_in <= 0.0:
+            value_in = 1.0
+        amount_usd = amount_in * value_in
+        bucket_id = int(amount_usd / bucket)
+        return (pool.pool_id, asset_in, asset_out, bucket_id)
+
+    def _validate_route_plan(self, plan: RoutePlan, amount_in: float, source_pool: "Pool") -> bool:
+        if not plan.hops:
+            return False
+        current_amount = amount_in
+        current_asset = plan.hops[0].asset_in
+        for hop in plan.hops:
+            if hop.asset_in != current_asset:
+                return False
+            pool = self.pools.get(hop.pool_id)
+            if pool is None or pool.policy.paused:
+                return False
+            okq, reasonq, amount_out, fee_amt = pool.quote_swap(current_asset, current_amount, hop.asset_out)
+            if not okq or amount_out <= 1e-9:
+                return False
+            gross_out = amount_out + fee_amt
+            ok, _ = pool.can_swap(self.tick, current_asset, current_amount, hop.asset_out, gross_out)
+            if not ok:
+                return False
+            current_asset = hop.asset_out
+            current_amount = amount_out
+        return True
 
     def _maybe_refresh_noam_working_set(self) -> None:
         if self.cfg.routing_mode != "noam":
@@ -1449,6 +1526,7 @@ class SimulationEngine:
             return RoutePlan(ok=True, reason="trivial", hops=[], expected_amount_out=amount_in)
 
         self._maybe_refresh_noam_working_set()
+        self._noam_edge_cache_reset()
         max_hops = max(1, int(self.cfg.noam_max_hops or self.cfg.max_hops))
         base_beam = max(1, int(self.cfg.noam_beam_width or 1))
         min_beam = max(1, int(self.cfg.noam_dynamic_min_beam or 1))
@@ -1457,6 +1535,8 @@ class SimulationEngine:
         min_edge_cap = max(1, int(self.cfg.noam_dynamic_min_edge_cap or 1))
         edge_cap = self._noam_scaled_cap(base_edge_cap, min_edge_cap) if base_edge_cap > 0 else 0
         route_cache = NoamRouteCache(remaining={}, inventory={}, value={})
+        edge_cache = self._noam_edge_cache
+        affinity_bias = float(self.cfg.sticky_route_bias or 0.0)
         dist_to_target = self._noam_distance_to_target(target_asset, max_hops)
         if start_asset not in dist_to_target:
             return RoutePlan(ok=False, reason="no_path_found", hops=[])
@@ -1474,7 +1554,9 @@ class SimulationEngine:
                 dist_here = dist_to_target.get(asset_in)
                 if dist_here is None or dist_here > remaining_hops:
                     continue
-                pool_ids = self._noam_top_pools.get(asset_in, [])
+                pool_ids = self._noam_top_pools_active.get(asset_in)
+                if not pool_ids:
+                    pool_ids = self._noam_top_pools.get(asset_in, [])
                 if not pool_ids:
                     continue
                 edges_scanned = 0
@@ -1497,10 +1579,31 @@ class SimulationEngine:
                         dist_out = dist_to_target.get(asset_out)
                         if dist_out is None or dist_out > (remaining_hops - 1):
                             continue
-                        if not self._noam_edge_allowed(pool, asset_in, asset_out, amount_in, route_cache):
-                            continue
+                        edge_key = self._noam_edge_cache_key(pool, asset_in, asset_out, amount_in, route_cache)
+                        cached_edge = edge_cache.get(edge_key)
+                        if cached_edge is None:
+                            allowed = self._noam_edge_allowed(pool, asset_in, asset_out, amount_in, route_cache)
+                            if not allowed:
+                                edge_cache[edge_key] = (False, -1e9)
+                                continue
+                            base_score = self._noam_edge_score(
+                                pool,
+                                asset_in,
+                                asset_out,
+                                amount_in,
+                                cache=route_cache,
+                            )
+                            edge_cache[edge_key] = (True, base_score)
+                        else:
+                            allowed, base_score = cached_edge
+                            if not allowed:
+                                continue
                         edges_scanned += 1
-                        edge_score = self._noam_edge_score(pool, asset_in, asset_out, amount_in, route_cache)
+                        edge_score = base_score
+                        if affinity_bias > 0.0:
+                            affinity = self._affinity_score(source_pool.pool_id, pid)
+                            if affinity > 0.0:
+                                edge_score += affinity_bias * affinity
                         if edge_score <= -1e8:
                             continue
                         hop = Hop(pool_id=pid, asset_in=asset_in, asset_out=asset_out, amount_in=amount_in)
@@ -1656,7 +1759,7 @@ class SimulationEngine:
                         self._noam_failure_active(hop.pool_id, hop.asset_in, hop.asset_out)
                         for hop in cached.hops
                     )
-                    if not blocked:
+                    if not blocked and self._validate_route_plan(cached, amount_in, source_pool):
                         return cached, amount_in, False
                     self._noam_route_cache.pop(cache_key, None)
         if self.cfg.routing_mode == "noam":
@@ -2973,14 +3076,22 @@ class SimulationEngine:
                     asset_candidates = random.sample(asset_candidates, k=max_assets)
 
         attempted = 0
+        sticky_bias = max(0.0, float(self.cfg.sticky_route_bias or 0.0))
+        sticky_fail_threshold = max(1, int(self.cfg.sticky_fail_threshold or 1))
 
         for asset_in in asset_candidates:
             max_targets = max(1, int(self.cfg.swap_target_retry_count or 1))
             targets_tried: Set[str] = set()
+            sticky_target = None
+            if sticky_bias > 0.0:
+                sticky_target = self._sticky_target_by_pool.get((source_pool.pool_id, asset_in))
             for _ in range(max_targets):
                 if max_assets is not None and max_assets > 0 and attempted >= max_assets:
                     break
-                asset_out = self._choose_target_asset(asset_in, source_pool, exclude=targets_tried)
+                if sticky_target and sticky_target not in targets_tried and sticky_target != asset_in and self.rng.random() < sticky_bias:
+                    asset_out = sticky_target
+                else:
+                    asset_out = self._choose_target_asset(asset_in, source_pool, exclude=targets_tried)
                 if not asset_out or asset_out == asset_in:
                     break
                 targets_tried.add(asset_out)
@@ -2992,6 +3103,32 @@ class SimulationEngine:
                 attempted += 1
                 self.log.add(Event(self.tick, "ROUTE_REQUESTED", pool_id=source_pool.pool_id,
                                    asset_id=asset_in, amount=amount_in, meta={"target_asset": asset_out}))
+                sticky_key = (source_pool.pool_id, asset_in, asset_out)
+                sticky_plan = self._sticky_plan_by_pool.get(sticky_key)
+                if sticky_plan:
+                    failures = self._sticky_failures.get(sticky_key, 0)
+                    if self._validate_route_plan(sticky_plan, amount_in, source_pool):
+                        self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
+                                           meta={"hops": [h.__dict__ for h in sticky_plan.hops], "target": asset_out, "sticky": True}))
+                        ok = self.execute_route_from_pool(source_pool.pool_id, sticky_plan, amount_in)
+                        self._record_swap_attempt(source_pool.pool_id, success=ok)
+                        if ok:
+                            self._sticky_target_by_pool[(source_pool.pool_id, asset_in)] = asset_out
+                            self._sticky_plan_by_pool[sticky_key] = sticky_plan
+                            self._sticky_failures.pop(sticky_key, None)
+                            break
+                        failures += 1
+                    else:
+                        failures += 1
+
+                    if failures >= sticky_fail_threshold:
+                        self._sticky_plan_by_pool.pop(sticky_key, None)
+                        self._sticky_target_by_pool.pop((source_pool.pool_id, asset_in), None)
+                        self._sticky_failures.pop(sticky_key, None)
+                        continue
+
+                    self._sticky_failures[sticky_key] = failures
+
                 plan, amount_used, used_fallback = self._find_route_with_fallback(
                     tick=self.tick,
                     start_asset=asset_in,
@@ -3017,6 +3154,8 @@ class SimulationEngine:
                 ok = self.execute_route_from_pool(source_pool.pool_id, plan, amount_used)
                 self._record_swap_attempt(source_pool.pool_id, success=ok)
                 if ok:
+                    self._sticky_target_by_pool[(source_pool.pool_id, asset_in)] = asset_out
+                    self._sticky_plan_by_pool[(source_pool.pool_id, asset_in, asset_out)] = plan
                     break
 
         return attempted
@@ -3399,6 +3538,9 @@ class SimulationEngine:
             route_requested = 0
             route_found = 0
             route_failed = 0
+            vol_usd_to_vchr = 0.0
+            vol_vchr_to_usd = 0.0
+            vol_vchr_to_vchr = 0.0
             for e in reversed(self.log.events):
                 if e.tick != self.tick:
                     if e.tick < self.tick:
@@ -3412,6 +3554,23 @@ class SimulationEngine:
                     redeemed_total += float(e.amount or 0.0)
                 elif e.event_type == "SWAP_EXECUTED":
                     transactions_per_tick += 1
+                    receipt = (e.meta or {}).get("receipt") or {}
+                    asset_in = receipt.get("asset_in")
+                    asset_out = receipt.get("asset_out")
+                    amount_in = float(receipt.get("amount_in") or 0.0)
+                    if amount_in > 0.0 and asset_in and asset_out:
+                        pool_id = receipt.get("pool_id") or e.pool_id
+                        pool = self.pools.get(pool_id)
+                        value_in = pool.values.get_value(asset_in) if pool is not None else 1.0
+                        if value_in <= 0.0:
+                            value_in = 1.0
+                        usd = amount_in * value_in
+                        if asset_in == cfg.stable_symbol and asset_out.startswith("VCHR:"):
+                            vol_usd_to_vchr += usd
+                        elif asset_out == cfg.stable_symbol and asset_in.startswith("VCHR:"):
+                            vol_vchr_to_usd += usd
+                        elif asset_in.startswith("VCHR:") and asset_out.startswith("VCHR:"):
+                            vol_vchr_to_vchr += usd
                 elif e.event_type == "ROUTE_REQUESTED":
                     route_requested += 1
                 elif e.event_type == "ROUTE_FOUND":
@@ -3421,6 +3580,8 @@ class SimulationEngine:
 
             swap_volume_usd_tick = float(self._swap_volume_usd_tick or 0.0)
             utilization_rate = swap_volume_usd_tick / max(1e-9, total_pool_value)
+            c_ratio = vol_vchr_to_usd / vol_usd_to_vchr if vol_usd_to_vchr > 1e-9 else 0.0
+            beta_ratio = vol_vchr_to_vchr / vol_vchr_to_usd if vol_vchr_to_usd > 1e-9 else 0.0
 
             num_system = sum(1 for p in self.pools.values() if p.policy.system_pool)
             num_active = len(self.pools) - num_system
@@ -3457,6 +3618,11 @@ class SimulationEngine:
                 "repayment_volume_usd": repayment_volume_usd,
                 "loan_issuance_volume_usd": loan_issuance_usd,
                 "swap_volume_usd_tick": swap_volume_usd_tick,
+                "swap_volume_usd_to_vchr_tick": vol_usd_to_vchr,
+                "swap_volume_vchr_to_usd_tick": vol_vchr_to_usd,
+                "swap_volume_vchr_to_vchr_tick": vol_vchr_to_vchr,
+                "swap_c_ratio": c_ratio,
+                "swap_beta_ratio": beta_ratio,
                 "utilization_rate": utilization_rate,
                 "transactions_per_tick": transactions_per_tick,
                 "route_requested_tick": int(route_requested),

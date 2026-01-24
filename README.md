@@ -28,11 +28,18 @@ Time model: **1 tick = 1 week** (4 ticks = 1 month). Many rates are defined "per
 ## Running the app
 
 ```bash
+git clone https://github.com/cosmo-local-credit/sim.git
+cd sim
+```
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+
 
 Enable debug inventory logs:
 

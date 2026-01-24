@@ -205,3 +205,10 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+sim/__pycache__/__init__.cpython-312.pyc
+sim/__pycache__/__init__.cpython-312.pyc
+sim/__pycache__/config.cpython-312.pyc
+sim/__pycache__/router.cpython-312.pyc
+sim/__pycache__/metrics.cpython-312.pyc
+.gitignore
+sim/__pycache__/__init__.cpython-312.pyc

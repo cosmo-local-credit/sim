@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 @dataclass
 class ScenarioConfig:
     # Network growth
-    initial_pools: int = 4
+    initial_pools: int = 10
     pool_growth_rate_per_tick: float = 0.02
     pool_growth_stride_ticks: int = 4
     max_pools: int | None = 2000
@@ -68,6 +68,7 @@ class ScenarioConfig:
     sticky_affinity_decay: float = 0.02  # per tick
     sticky_affinity_gain: float = 0.15  # scale on log1p(USD) per successful swap
     sticky_affinity_cap: float = 50.0
+    sticky_fail_threshold: int = 2  # consecutive sticky failures before falling back
     noam_topk_pools_per_asset: int = 16
     noam_topm_out_per_pool: int = 16
     noam_beam_width: int = 40
