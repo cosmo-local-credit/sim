@@ -1,4 +1,4 @@
-# CLC Pool Network Simulator (MVP-1)
+# CLC Pool Network Simulator (MVP-1.1)
 
 This repo simulates a network of agent-owned liquidity pools exchanging a stablecoin and agent-issued vouchers.
 It includes multi-hop routing, loan issuance/repayment via voucher swaps, stable supply growth, NOAM routing,
