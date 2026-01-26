@@ -310,6 +310,10 @@ class Pool:
         if self.policy.role == "lender":
             if asset_in != self.stable_id and asset_out != self.stable_id:
                 return False, "lender_requires_stable_leg"
+        if self.policy.role == "liquidity_provider":
+            if asset_in.startswith("VCHR:") or asset_out.startswith("VCHR:"):
+                return False, "lp_no_voucher_swaps"
+        # Producers/consumers do not allow others to swap out their stables.
         if self.policy.role == "consumer":
             if asset_out == self.stable_id:
                 return False, "consumer_no_stable_outflow"

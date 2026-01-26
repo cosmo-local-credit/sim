@@ -229,12 +229,14 @@ Other modes (configurable):
 - `activity_weighted`, `deficit_weighted`, `utilization_weighted`.
 
 ### CLC pool behavior
-- **Always open** for swaps when `clc_pool_always_open=True` (pool is unpaused and `min_stable_reserve=0`).
+- **Always open** for swaps (pool is unpaused and `min_stable_reserve=0`).
 - **Preferred in routing/clearing** via `noam_clc_edge_bonus` + Top-K inclusion.
-- **Rebalancing**: periodically swaps vouchers → stable to maintain target ratio.
+- **Accepts stable for vouchers** when it holds in-kind fee assets (vouchers deposited to CLC via the waterfall);
+  routing/clearing can use CLC as the stable->voucher venue when inventory exists.
+- **Rebalancing**: periodically swaps vouchers -> stable to maintain target ratio.
 
 ### sCLC fee access
-- sCLC access budget depends on ops/insurance targets unless `clc_pool_always_open` is used.
+- sCLC can swap into CLC at any time (always-open pool); eligibility and fee-access budgeting are still tracked.
 - Controlled by `sclc_fee_access_*` parameters.
 
 ---

@@ -376,7 +376,7 @@ with st.sidebar:
         key="seed",
     )
 
-    run_ticks = st.slider("Ticks to run", min_value=1, max_value=500, value=100)
+    run_ticks = st.slider("Ticks to run", min_value=1, max_value=500, value=25)
     c3, c4 = st.columns(2)
     run_one = c3.button("Step 1 tick")
     run_many = c4.button("Run N ticks")
@@ -1589,29 +1589,61 @@ with tab_network:
         )
 
 with tab_clc:
-        st.subheader("CLC KPIs")
-        if net_df.empty:
-            st.info("No metrics yet. Add pools or run ticks.")
-        else:
-            latest = net_df.iloc[-1].to_dict()
-            fee_cols = st.columns(4)
-            fee_cols[0].metric("Total pool fees (USD)", _fmt(latest.get("fee_pool_cumulative_usd", 0.0)))
-            fee_cols[1].metric("Total pool fees (Vouchers)", _fmt(latest.get("fee_pool_cumulative_voucher", 0.0)))
-            fee_cols[2].metric("Total CLC fees (USD)", _fmt(latest.get("fee_clc_cumulative_usd", 0.0)))
-            fee_cols[3].metric("Total CLC fees (Vouchers)", _fmt(latest.get("fee_clc_cumulative_voucher", 0.0)))
-            kpis = [
-                ("Insurance fund (USD)", _fmt(latest.get("insurance_fund_usd", 0.0))),
-                ("Insurance target (USD)", _fmt(latest.get("insurance_target_usd", 0.0))),
-                ("Insurance coverage", _fmt(latest.get("insurance_coverage_ratio", 0.0))),
-                ("Fee chi", _fmt(latest.get("fee_chi", 0.0))),
+    st.subheader("CLC KPIs")
+    if net_df.empty:
+        st.info("No metrics yet. Add pools or run ticks.")
+    else:
+        latest = net_df.iloc[-1].to_dict()
+        st.caption(
+            "CLC is routable and holds in-kind fee assets (including vouchers). When inventory exists, "
+            "routing/clearing can use CLC as a stable->voucher venue."
+        )
+        fee_cols = st.columns(4)
+        fee_cols[0].metric("Total pool fees (USD)", _fmt(latest.get("fee_pool_cumulative_usd", 0.0)))
+        fee_cols[1].metric("Total pool fees (Vouchers)", _fmt(latest.get("fee_pool_cumulative_voucher", 0.0)))
+        fee_cols[2].metric("Total CLC fees (USD)", _fmt(latest.get("fee_clc_cumulative_usd", 0.0)))
+        fee_cols[3].metric("Total CLC fees (Vouchers)", _fmt(latest.get("fee_clc_cumulative_voucher", 0.0)))
+        kpis = [
+            ("Insurance fund (USD)", _fmt(latest.get("insurance_fund_usd", 0.0))),
+            ("Insurance target (USD)", _fmt(latest.get("insurance_target_usd", 0.0))),
+            ("Insurance coverage", _fmt(latest.get("insurance_coverage_ratio", 0.0))),
+            ("Fee chi", _fmt(latest.get("fee_chi", 0.0))),
             ("Ops pool (USD)", _fmt(latest.get("ops_pool_usd", 0.0))),
-            ("Mandates pool (USD)", _fmt(latest.get("mandates_pool_usd", 0.0))),
-            ("CLC pool (USD)", _fmt(latest.get("clc_pool_usd", 0.0))),
+            ("Mandates pool (USD, cumulative)", _fmt(latest.get("mandates_allocated_usd_total", 0.0))),
+            ("CLC pool (USD) injection cumulative", _fmt(latest.get("clc_pool_injected_usd_total", 0.0))),
             ("Fee access budget (USD)", _fmt(latest.get("fee_access_budget_usd", 0.0))),
-            ("Mandates distributed (USD)", _fmt(latest.get("mandates_distributed_usd_epoch", 0.0))),
+            ("Mandates distributed (USD, cumulative)", _fmt(latest.get("mandates_distributed_usd_total", 0.0))),
+            ("CLC pool swapped out stables (cumulative)", _fmt(latest.get("clc_pool_swapped_out_stable_total", 0.0))),
+            ("CLC vouchers swapped out (cumulative)", _fmt(latest.get("clc_pool_swapped_out_voucher_total", 0.0))),
             ("Conversion used (USD)", _fmt(latest.get("fee_conversion_used_usd_epoch", 0.0))),
         ]
-        _render_kpi_grid(kpis, columns=5)
+        _render_kpi_grid(kpis, columns=4)
+
+        st.subheader("LP (sCLC -> USD)")
+        lp_injected = float(latest.get("lp_injected_usd_total", 0.0))
+        lp_returned = float(latest.get("lp_returned_usd_total", 0.0))
+        lp_net = lp_returned - lp_injected
+        lp_roi = lp_returned / lp_injected if lp_injected > 1e-9 else 0.0
+        total_ticks = max(1, int(latest.get("tick", 0)))
+        years_elapsed = total_ticks / 52.0
+        lp_net_roi = lp_net / lp_injected if lp_injected > 1e-9 else 0.0
+        lp_apr = lp_net_roi / years_elapsed if years_elapsed > 0 else 0.0
+        lp_cagr = 0.0
+        if lp_injected > 1e-9 and years_elapsed > 0.0:
+            ratio = lp_returned / lp_injected
+            if ratio > 0.0:
+                lp_cagr = (ratio ** (1.0 / years_elapsed)) - 1.0
+        kpis = [
+            ("LP sCLC supply", _fmt(latest.get("lp_sclc_supply_total", 0.0))),
+            ("LP injected (USD)", _fmt(lp_injected)),
+            ("LP returned (USD)", _fmt(lp_returned)),
+            ("LP net (USD)", _fmt(lp_net)),
+            ("LP ROI", _fmt(lp_roi)),
+            ("LP APR (est.)", f"{lp_apr * 100:.2f}%"),
+            ("LP CAGR (est.)", f"{lp_cagr * 100:.2f}%"),
+            ("Years elapsed", f"{years_elapsed:.2f}"),
+        ]
+        _render_kpi_grid(kpis, columns=4)
 
         st.subheader("Cumulative Fees (USD)")
         st.line_chart(

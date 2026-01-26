@@ -36,6 +36,7 @@ class Router:
         accept_index: Dict[str, Set[str]],
         source_pool_id: Optional[str] = None,
         target_pools: Optional[Set[str]] = None,
+        pool_whitelist: Optional[Set[str]] = None,
         pool_affinity: Optional[Dict[Tuple[str, str], float]] = None,
         affinity_bias: float = 0.0,
         max_candidate_pools: Optional[int] = None,
@@ -60,6 +61,10 @@ class Router:
                 continue
 
             candidate_pools = list(accept_index.get(asset, set()))
+            if pool_whitelist is not None:
+                candidate_pools = [pid for pid in candidate_pools if pid in pool_whitelist]
+                if not candidate_pools:
+                    continue
             if pool_affinity and source_pool_id and affinity_bias > 0.0 and len(candidate_pools) > 1:
                 bias = min(1.0, max(0.0, affinity_bias))
                 scored = []

@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 class ScenarioConfig:
     # Network growth
     initial_pools: int = 10
+    initial_lenders: int = 5
+    initial_producers: int = 100
+    initial_consumers: int = 20
+    initial_liquidity_providers: int = 1
     pool_growth_rate_per_tick: float = 0.02
     pool_growth_stride_ticks: int = 4
     max_pools: int | None = 500
@@ -18,7 +22,7 @@ class ScenarioConfig:
     desired_assets_stride_ticks: int = 4
 
     # Agent role mix
-    p_liquidity_provider: float = 0.02
+    p_liquidity_provider: float = 0.0
     p_lender: float = 0.25
     p_producer: float = 0.50
     p_consumer: float = 0.25
@@ -26,7 +30,7 @@ class ScenarioConfig:
     # Stablecoin scarcity regime
     stable_symbol: str = "USD"
     initial_stable_per_pool_mean: float = 2000.0
-    lender_initial_stable_mean: float = 100000.0
+    lender_initial_stable_mean: float = 0.0
     lp_initial_stable_mean: float = 100000.0
     stable_inflow_per_tick: float = 0.0
     producer_inflow_per_tick: float | None = None  # rate of current stable per month
@@ -69,11 +73,12 @@ class ScenarioConfig:
     sticky_affinity_gain: float = 0.15  # scale on log1p(USD) per successful swap
     sticky_affinity_cap: float = 50.0
     sticky_fail_threshold: int = 2  # consecutive sticky failures before falling back
+    affinity_buddy_count: int = 6  # producer sticks to top N affinity buddies once reached
     noam_topk_pools_per_asset: int = 16
     noam_topm_out_per_pool: int = 16
     noam_beam_width: int = 40
     noam_max_hops: int = 5
-    noam_topk_refresh_ticks: int = 50
+    noam_topk_refresh_ticks: int = 4
     noam_dynamic_caps_enabled: bool = True
     noam_dynamic_cap_reference_pools: int = 50
     noam_dynamic_min_topk: int = 4
@@ -119,6 +124,7 @@ class ScenarioConfig:
     default_window_len: int = 10
     default_cap_in: float = 10_000.0
     lender_voucher_cap_in: float = 2_000.0
+    lender_voucher_cap_supply_fraction: float = 0.5
     lender_stable_cap_in: float = 25_000.0
     producer_voucher_cap_in: float = 15_000.0
     producer_stable_cap_in: float = 1_000_000_000.0
@@ -196,7 +202,7 @@ class ScenarioConfig:
     swap_size_min_usd: float = 1.0
     swap_size_max_usd: float | None = None
     swap_asset_selection_mode: str = "value_weighted"  # "uniform" or "value_weighted"
-    swap_limits_enabled: bool = False
+    swap_limits_enabled: bool = True
     swap_target_selection_mode: str = "liquidity_weighted"  # "uniform" or "liquidity_weighted"
     swap_target_retry_count: int = 2
     swap_attempts_value_scale_usd: float = 500_000.0
