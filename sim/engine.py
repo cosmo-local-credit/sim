@@ -3435,6 +3435,14 @@ class SimulationEngine:
         if not asset_candidates:
             return 0
 
+        if source_pool.policy.role == "lender":
+            asset_candidates = [a for a in asset_candidates if a != self.cfg.stable_symbol]
+        elif source_pool.policy.role == "producer":
+            if self._producer_debt_outstanding(source_pool) > 1e-9:
+                asset_candidates = [a for a in asset_candidates if a != self.cfg.stable_symbol]
+        if not asset_candidates:
+            return 0
+
         if max_assets is not None and max_assets > 0:
             if len(asset_candidates) > max_assets:
                 mode = self.cfg.swap_asset_selection_mode
@@ -3621,6 +3629,22 @@ class SimulationEngine:
                                asset_id=self.cfg.stable_symbol, amount=amount_usd,
                                meta={"asset_in": asset_in, "amount_in": amount_used}))
         return True
+
+    def _producer_debt_outstanding(self, source_pool: "Pool") -> float:
+        if source_pool.policy.role != "producer":
+            return 0.0
+        agent = self.agents.get(source_pool.steward_id)
+        if agent is None:
+            return 0.0
+        voucher_id = agent.voucher_spec.voucher_id
+        debt = 0.0
+        for p in self.pools.values():
+            if p.policy.role != "lender":
+                continue
+            if not p.registry.is_listed(voucher_id):
+                continue
+            debt += p.vault.get(voucher_id)
+        return debt
 
     def _attempt_new_loan(self, source_pool: "Pool", voucher_id: str) -> bool:
         lenders = {
