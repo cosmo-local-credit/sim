@@ -92,6 +92,8 @@ class PoolFactory:
             paused=False,
             limits_enabled=cfg.swap_limits_enabled,
         )
+        if role == "lender":
+            policy.min_stable_reserve = 0.0
         fees = FeeRegistry(pool_fee_rate=cfg.pool_fee_rate, clc_rake_rate=cfg.clc_rake_rate)
         pool = Pool(pool_id=pool_id, steward_id=agent_id, stable_id=cfg.stable_symbol, policy=policy, fees=fees)
         pool.debug_inventory = cfg.debug_inventory

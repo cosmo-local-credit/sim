@@ -4,11 +4,11 @@ from dataclasses import dataclass, field
 class ScenarioConfig:
     # Network growth
     initial_pools: int = 10
-    initial_lenders: int = 5
+    initial_lenders: int = 4
     initial_producers: int = 100
     initial_consumers: int = 20
     initial_liquidity_providers: int = 1
-    pool_growth_rate_per_tick: float = 0.02
+    pool_growth_rate_per_tick: float = 0.0
     pool_growth_stride_ticks: int = 4
     max_pools: int | None = 500
     add_pool_offer_assets_mean: int = 4
@@ -31,11 +31,11 @@ class ScenarioConfig:
     stable_symbol: str = "USD"
     initial_stable_per_pool_mean: float = 2000.0
     lender_initial_stable_mean: float = 0.0
-    lp_initial_stable_mean: float = 100000.0
+    lp_initial_stable_mean: float = 400_000.0
     stable_inflow_per_tick: float = 0.0
-    producer_inflow_per_tick: float | None = None  # rate of current stable per month
-    consumer_inflow_per_tick: float | None = None  # rate of current stable per month
-    lender_inflow_per_tick: float = 0.0  # rate of current stable per month
+    producer_inflow_per_tick: float | None = 0.05  # rate of current stable per month
+    consumer_inflow_per_tick: float | None = 0.05  # rate of current stable per month
+    lender_inflow_per_tick: float = 0.05  # rate of current stable per month
     liquidity_provider_inflow_per_tick: float = 0.0  # rate of current stable per month
     stable_shock_tick: int | None = None
     stable_shock_amount: float = 0.0  # negative drains, positive adds
@@ -59,9 +59,9 @@ class ScenarioConfig:
     offramp_rate_max_per_tick: float = 0.02
     offramp_success_ema_alpha: float = 0.2
     offramp_min_attempts: int = 2
-    metrics_stride: int = 5
-    pool_metrics_stride: int = 10
-    max_active_pools_per_tick: int | None = 100
+    metrics_stride: int = 1
+    pool_metrics_stride: int = 1
+    max_active_pools_per_tick: int | None = None
     max_candidate_pools_per_hop: int | None = None
     event_log_maxlen: int | None = None
 
@@ -74,6 +74,8 @@ class ScenarioConfig:
     sticky_affinity_cap: float = 50.0
     sticky_fail_threshold: int = 2  # consecutive sticky failures before falling back
     affinity_buddy_count: int = 6  # producer sticks to top N affinity buddies once reached
+    affinity_buddy_direct_only: bool = True  # once buddies reached, skip routing and trade directly
+    producer_voucher_single_lender: bool = True
     noam_topk_pools_per_asset: int = 16
     noam_topm_out_per_pool: int = 16
     noam_beam_width: int = 40
@@ -95,7 +97,7 @@ class ScenarioConfig:
     noam_overlay_refresh_ticks: int = 200
     noam_overlay_min_pools: int = 200
     noam_clearing_enabled: bool = True
-    noam_clearing_stride_ticks: int = 2
+    noam_clearing_stride_ticks: int = 4
     noam_clearing_max_cycles: int = 200
     noam_clearing_max_hops: int = 4
     noam_clearing_edge_cap_per_asset: int = 16
@@ -103,6 +105,9 @@ class ScenarioConfig:
     noam_clearing_budget_usd: float = 25000.0
     noam_clearing_budget_share: float = 0.01
     noam_clearing_min_cycle_value_usd: float = 1.0
+    noam_clearing_lenders_only: bool = True
+    noam_clearing_include_clc: bool = True
+    noam_clearing_budget_scale_by_stride: bool = True
     noam_success_ema_alpha: float = 0.2
     noam_success_min: float = 0.05
     noam_success_max: float = 0.98
@@ -123,9 +128,10 @@ class ScenarioConfig:
     # Limits & fees
     default_window_len: int = 10
     default_cap_in: float = 10_000.0
-    lender_voucher_cap_in: float = 2_000.0
-    lender_voucher_cap_supply_fraction: float = 0.5
-    lender_stable_cap_in: float = 25_000.0
+    lender_voucher_cap_in: float = 10_000.0
+    lender_voucher_cap_supply_fraction: float = 0.25
+    lender_voucher_cap_stable_fraction: float = 0.0
+    lender_stable_cap_in: float = 100_000.0
     producer_voucher_cap_in: float = 15_000.0
     producer_stable_cap_in: float = 1_000_000_000.0
     pool_fee_rate: float = 0.02       # 2.0%
@@ -138,9 +144,11 @@ class ScenarioConfig:
     cash_eligible_assets: list[str] = field(default_factory=lambda: ["USD"])
     cash_conversion_slippage_bps: float = 25.0
     cash_conversion_max_usd_per_epoch: float | None = None
-    core_ops_budget_usd: float = 2000.0
-    insurance_max_topup_usd: float = 10000.0
+    core_ops_budget_usd: float = 20000.0
+    insurance_max_topup_usd: float = 100000.0
     liquidity_mandate_share: float = 0.50
+    liquidity_mandate_bootstrap_share: float = 1.0
+    liquidity_mandate_bootstrap_epochs: int = 1
     liquidity_mandate_max_usd: float = 0.0
     liquidity_mandate_mode: str = "lender_liquidity"
     liquidity_mandate_activity_window_ticks: int = 12
@@ -153,7 +161,7 @@ class ScenarioConfig:
     sclc_symbol: str = "sCLC"
     sclc_fee_access_enabled: bool = True
     sclc_fee_access_share: float = 0.50
-    sclc_emission_cap_usd: float = 2000.0
+    sclc_emission_cap_usd: float = 1_000_000_000.0
     sclc_requires_insurance_target: bool = True
     sclc_requires_core_ops: bool = True
     sclc_swap_window_ticks: int = 4
@@ -163,13 +171,13 @@ class ScenarioConfig:
     # CLC pool rebalancing (voucher -> stable)
     clc_rebalance_enabled: bool = True
     clc_rebalance_interval_ticks: int = 1
-    clc_rebalance_max_swaps_per_tick: int = 2
-    clc_rebalance_target_stable_ratio: float = 0.50
-    clc_rebalance_swap_size_frac: float = 0.05
-    clc_rebalance_min_usd: float = 25.0
+    clc_rebalance_max_swaps_per_tick: int = 10
+    clc_rebalance_target_stable_ratio: float = 1.0
+    clc_rebalance_swap_size_frac: float = 0.25
+    clc_rebalance_min_usd: float = 1.0
 
     # Insurance / incidents
-    insurance_target_multiplier: float = 0.02
+    insurance_target_multiplier: float = 0.05
     insurance_risk_weight_base: float = 1.0
     insurance_risk_weight_reserve_scale: float = 1.0
     insurance_risk_weight_min: float = 0.5
@@ -192,10 +200,15 @@ class ScenarioConfig:
     random_route_requests_per_tick: int = 4
     swap_requests_budget_per_tick: int | None = 100
     random_request_amount_mean: float = 200.0
+    swap_sustain_enabled: bool = True
+    swap_sustain_window_ticks: int = 12
+    swap_sustain_floor_per_tick: int = 0
+    swap_sustain_max_extra_attempts: int = 200
+    swap_sustain_max_rounds: int = 2
 
     # Loan repayment (weeks)
-    loan_term_weeks: int = 12
-    loan_activity_period_ticks: int = 12  # spread loan issuance/repayment across ticks
+    loan_term_weeks: int = 4
+    loan_activity_period_ticks: int = 4  # spread loan issuance/repayment across ticks
 
     # Swap sizing (share of pool value, per attempt)
     swap_size_mean_frac: float = 0.02

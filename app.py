@@ -64,6 +64,17 @@ def _format_table_numbers(df: pd.DataFrame) -> pd.DataFrame:
     )
     return formatted
 
+def _metrics_has_tick(rows: list[dict], tick: int) -> bool:
+    if not rows:
+        return False
+    return rows[-1].get("tick") == tick
+
+def _ensure_metrics_snapshot(engine: SimulationEngine) -> None:
+    need_network = not _metrics_has_tick(engine.metrics.network_rows, engine.tick)
+    need_pool = not _metrics_has_tick(engine.metrics.pool_rows, engine.tick)
+    if need_network or need_pool:
+        engine.snapshot_metrics(force_network=need_network, force_pool=need_pool)
+
 def _fee_total_usd(pool, ledger: dict) -> float:
     total = 0.0
     for asset_id, amt in ledger.items():
@@ -387,6 +398,7 @@ with st.sidebar:
         progress_bar.progress(0.0, text="Run progress: 0%")
         start_ts = time.time()
         engine.step(1)
+        _ensure_metrics_snapshot(engine)
         elapsed = time.time() - start_ts
         progress_bar.progress(1.0, text=f"Run progress: 100% ({_fmt_duration(elapsed)})")
         st.session_state.run_progress = 1.0
@@ -400,6 +412,7 @@ with st.sidebar:
                 progress = (idx + 1) / total
                 progress_bar.progress(progress, text=f"Run progress: {progress:.0%}")
             elapsed = time.time() - start_ts
+            _ensure_metrics_snapshot(engine)
             st.session_state.run_progress = 1.0
             st.session_state.run_progress_label = f"Run progress: 100% ({_fmt_duration(elapsed)})"
             progress_bar.progress(1.0, text=st.session_state.run_progress_label)
@@ -1243,6 +1256,18 @@ with tab_clc_controls:
             float(engine.cfg.liquidity_mandate_share),
             step=0.05,
         )
+        engine.cfg.liquidity_mandate_bootstrap_share = st.slider(
+            "Liquidity mandate bootstrap share",
+            0.0,
+            1.0,
+            float(engine.cfg.liquidity_mandate_bootstrap_share),
+            step=0.05,
+        )
+        engine.cfg.liquidity_mandate_bootstrap_epochs = st.number_input(
+            "Liquidity mandate bootstrap epochs",
+            min_value=0,
+            value=int(engine.cfg.liquidity_mandate_bootstrap_epochs),
+        )
         engine.cfg.liquidity_mandate_max_usd = st.number_input(
             "Liquidity mandate cap (USD / epoch, 0 = no cap)",
             min_value=0.0,
@@ -1644,6 +1669,25 @@ with tab_clc:
             ("Years elapsed", f"{years_elapsed:.2f}"),
         ]
         _render_kpi_grid(kpis, columns=4)
+
+        ticks_per_month = 4.0
+        avg_return_per_tick = lp_returned / total_ticks if total_ticks > 0 else 0.0
+        if lp_injected > 1e-9 and avg_return_per_tick > 1e-9:
+            remaining = max(0.0, lp_injected - lp_returned)
+            est_payback_tick = total_ticks + (remaining / avg_return_per_tick)
+            est_payback_months = est_payback_tick / ticks_per_month
+            next_year_ticks = int(12 * ticks_per_month)
+            next_year_profit = avg_return_per_tick * next_year_ticks
+            next_year_apr = next_year_profit / lp_injected
+            est_kpis = [
+                ("Estimate LP payback (tick)", f"{est_payback_tick:.1f}"),
+                ("Estimate LP payback (months)", f"{est_payback_months:.2f}"),
+                ("Estimated next-year profit (USD)", _fmt(next_year_profit)),
+                ("Estimated next-year APR", f"{next_year_apr * 100:.2f}%"),
+            ]
+            _render_kpi_grid(est_kpis, columns=4)
+        else:
+            st.info("Not enough LP return history to estimate payback/APR.")
 
         st.subheader("Cumulative Fees (USD)")
         st.line_chart(

@@ -96,7 +96,7 @@ streamlit run app.py --logger.level=debug
 - **Goal**: contribute stable to the waterfall in exchange for sCLC.
 - **Listings**: stable only.
 - **Inventory**: stable seed only.
-- **Starts with**: **fixed** `lp_initial_stable_mean` (default `100000`).
+- **Starts with**: **fixed** `lp_initial_stable_mean` (default `1000000`).
 - **Contribution**: each tick contributes `lp_waterfall_contribution_rate` of its stable to the waterfall, minting sCLC
   until `lp_sclc_supply_cap` is exhausted.
 
@@ -285,11 +285,11 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | `stable_symbol` | `USD` | Stablecoin asset id. |
 | `initial_stable_per_pool_mean` | `2000.0` | Baseline for consumer stable seed (exp mean * 0.25). |
 | `lender_initial_stable_mean` | `100000.0` | Fixed stable seed for lenders. |
-| `lp_initial_stable_mean` | `100000.0` | Fixed stable seed for LPs. |
+| `lp_initial_stable_mean` | `1000000.0` | Fixed stable seed for LPs. |
 | `stable_inflow_per_tick` | `0.0` | Generic per-pool inflow (per month). |
 | `producer_inflow_per_tick` | `0.05` | Producer inflow rate (per month). |
 | `consumer_inflow_per_tick` | `0.05` | Consumer inflow rate (per month). |
-| `lender_inflow_per_tick` | `0.0` | Lender inflow rate (per month). |
+| `lender_inflow_per_tick` | `0.05` | Lender inflow rate (per month). |
 | `liquidity_provider_inflow_per_tick` | `0.0` | LP inflow rate (per month). |
 | `stable_shock_tick` | `None` | One-time shock tick. |
 | `stable_shock_amount` | `0.0` | Shock amount (positive adds, negative drains). |
@@ -383,8 +383,8 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | --- | --- | --- |
 | `default_window_len` | `10` | Default cap window length. |
 | `default_cap_in` | `10000.0` | Default cap-in per window. |
-| `lender_voucher_cap_in` | `2000.0` | Cap-in for lender vouchers. |
-| `lender_stable_cap_in` | `25000.0` | Cap-in for lender stable. |
+| `lender_voucher_cap_in` | `10000.0` | Cap-in for lender vouchers. |
+| `lender_stable_cap_in` | `100000.0` | Cap-in for lender stable. |
 | `producer_voucher_cap_in` | `15000.0` | Cap-in for producer vouchers. |
 | `producer_stable_cap_in` | `1000000000.0` | Cap-in for producer stable. |
 | `pool_fee_rate` | `0.02` | Pool fee rate. |
@@ -399,9 +399,11 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | `cash_eligible_assets` | `["USD"]` | Assets eligible for cash conversion. |
 | `cash_conversion_slippage_bps` | `25.0` | Conversion slippage. |
 | `cash_conversion_max_usd_per_epoch` | `None` | Max conversion per epoch. |
-| `core_ops_budget_usd` | `2000.0` | Ops cap per epoch. |
-| `insurance_max_topup_usd` | `10000.0` | Insurance cap per epoch. |
+| `core_ops_budget_usd` | `20000.0` | Ops cap per epoch. |
+| `insurance_max_topup_usd` | `100000.0` | Insurance cap per epoch. |
 | `liquidity_mandate_share` | `0.50` | Share of remaining cash to mandates. |
+| `liquidity_mandate_bootstrap_share` | `1.0` | Bootstrap mandate share before normal waterfall. |
+| `liquidity_mandate_bootstrap_epochs` | `1` | Bootstrap epochs for full mandate routing. |
 | `liquidity_mandate_max_usd` | `0.0` | Mandate cap per epoch (0 = no cap). |
 | `liquidity_mandate_mode` | `lender_liquidity` | Mandate distribution mode. |
 | `liquidity_mandate_activity_window_ticks` | `12` | Activity window for mandates. |
@@ -414,7 +416,7 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | `sclc_symbol` | `sCLC` | sCLC asset id. |
 | `sclc_fee_access_enabled` | `True` | Enable fee access for sCLC. |
 | `sclc_fee_access_share` | `0.50` | Share of CLC stable eligible for sCLC. |
-| `sclc_emission_cap_usd` | `2000.0` | sCLC emission cap per epoch. |
+| `sclc_emission_cap_usd` | `1_000_000_000.0` | sCLC emission cap per epoch. |
 | `sclc_requires_insurance_target` | `True` | Require insurance target. |
 | `sclc_requires_core_ops` | `True` | Require ops target. |
 | `sclc_swap_window_ticks` | `4` | sCLC access cadence. |
@@ -426,15 +428,15 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | --- | --- | --- |
 | `clc_rebalance_enabled` | `True` | Enable CLC rebalancing. |
 | `clc_rebalance_interval_ticks` | `1` | Rebalance cadence. |
-| `clc_rebalance_max_swaps_per_tick` | `2` | Max rebalance swaps per tick. |
-| `clc_rebalance_target_stable_ratio` | `0.50` | Target stable ratio. |
-| `clc_rebalance_swap_size_frac` | `0.05` | Swap size as share of CLC value. |
-| `clc_rebalance_min_usd` | `25.0` | Minimum rebalance size. |
+| `clc_rebalance_max_swaps_per_tick` | `10` | Max rebalance swaps per tick. |
+| `clc_rebalance_target_stable_ratio` | `1.0` | Target stable ratio. |
+| `clc_rebalance_swap_size_frac` | `0.25` | Swap size as share of CLC value. |
+| `clc_rebalance_min_usd` | `1.0` | Minimum rebalance size. |
 
 ### Insurance & incidents
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `insurance_target_multiplier` | `0.02` | Insurance target vs voucher value. |
+| `insurance_target_multiplier` | `0.05` | Insurance target vs voucher value. |
 | `insurance_risk_weight_base` | `1.0` | Risk weight base. |
 | `insurance_risk_weight_reserve_scale` | `1.0` | Reserve shortfall scale. |
 | `insurance_risk_weight_min` | `0.5` | Minimum risk weight. |
@@ -461,8 +463,8 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | `random_route_requests_per_tick` | `4` | Base attempts per pool per tick. |
 | `swap_requests_budget_per_tick` | `100` | Global request budget per tick. |
 | `random_request_amount_mean` | `200.0` | Legacy (unused). |
-| `loan_term_weeks` | `12` | Loan term. |
-| `loan_activity_period_ticks` | `12` | Spread loan activity over period. |
+| `loan_term_weeks` | `4` | Loan term. |
+| `loan_activity_period_ticks` | `4` | Spread loan activity over period. |
 
 ### Swap sizing & targeting
 | Parameter | Default | Meaning |
