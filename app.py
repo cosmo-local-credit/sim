@@ -104,6 +104,8 @@ BATCH_PARAM_SPECS = [
     ("stable_flow_swap_scale", "Swap flow scale", float),
     ("stable_flow_swap_target_usd", "Swap volume target (USD)", float),
     ("random_route_requests_per_tick", "Max swaps per pool / tick", int),
+    ("producer_offramp_rate_per_month", "Producer offramp rate (per month)", float),
+    ("consumer_offramp_rate_per_month", "Consumer offramp rate (per month)", float),
     ("max_hops", "Max hops", int),
     ("swap_size_mean_frac", "Swap size mean frac", float),
     ("swap_size_min_usd", "Swap size min USD", float),
@@ -678,6 +680,20 @@ with tab_network_controls:
             )
 
         st.subheader("Offramping")
+        engine.cfg.producer_offramp_rate_per_month = st.number_input(
+            "Producer offramp rate (per month)",
+            min_value=0.0,
+            value=float(engine.cfg.producer_offramp_rate_per_month),
+            step=0.01,
+            help="Monthly fraction of producer stable cashed out to fiat.",
+        )
+        engine.cfg.consumer_offramp_rate_per_month = st.number_input(
+            "Consumer offramp rate (per month)",
+            min_value=0.0,
+            value=float(engine.cfg.consumer_offramp_rate_per_month),
+            step=0.01,
+            help="Monthly fraction of consumer stable cashed out to fiat.",
+        )
         engine.cfg.offramps_enabled = st.checkbox(
             "Enable swap-driven offramping",
             value=bool(engine.cfg.offramps_enabled),
@@ -1536,6 +1552,38 @@ with tab_network:
         ]
         _render_kpi_grid(kpis, columns=4)
 
+        st.subheader("Swap Flow Breakdown (USD per tick)")
+        st.line_chart(
+            net_df,
+            x="tick",
+            y=[
+                "swap_volume_usd_to_vchr_tick",
+                "swap_volume_vchr_to_usd_tick",
+                "swap_volume_vchr_to_vchr_tick",
+            ],
+        )
+
+        st.subheader("Transactions per tick (swaps)")
+        st.line_chart(
+            net_df,
+            x="tick",
+            y=["transactions_per_tick"],
+        )
+
+        st.subheader("Repayment vs Loan Issuance vs Debt Outstanding (USD)")
+        st.line_chart(
+            net_df,
+            x="tick",
+            y=["repayment_volume_usd", "loan_issuance_volume_usd", "debt_outstanding_usd"],
+        )
+
+        st.subheader("Pool Utilization (swap volume / pool value)")
+        st.line_chart(
+            net_df,
+            x="tick",
+            y=["utilization_rate"],
+        )
+
         st.subheader("Pools vs Vouchers (count)")
         voucher_offset = 1 + (1 if engine.cfg.sclc_symbol else 0)
         counts_df = net_df.copy()
@@ -1562,38 +1610,6 @@ with tab_network:
             net_df,
             x="tick",
             y=["redeemed_total", "outstanding_voucher_value_usd"],
-        )
-
-        st.subheader("Repayment vs Loan Issuance vs Debt Outstanding (USD)")
-        st.line_chart(
-            net_df,
-            x="tick",
-            y=["repayment_volume_usd", "loan_issuance_volume_usd", "debt_outstanding_usd"],
-        )
-
-        st.subheader("Pool Utilization (swap volume / pool value)")
-        st.line_chart(
-            net_df,
-            x="tick",
-            y=["utilization_rate"],
-        )
-
-        st.subheader("Transactions per tick (swaps)")
-        st.line_chart(
-            net_df,
-            x="tick",
-            y=["transactions_per_tick"],
-        )
-
-        st.subheader("Swap Flow Breakdown (USD per tick)")
-        st.line_chart(
-            net_df,
-            x="tick",
-            y=[
-                "swap_volume_usd_to_vchr_tick",
-                "swap_volume_vchr_to_usd_tick",
-                "swap_volume_vchr_to_vchr_tick",
-            ],
         )
 
         st.subheader("Flow Multipliers (c and Beta)")
@@ -1633,7 +1649,7 @@ with tab_clc:
             ("Insurance target (USD)", _fmt(latest.get("insurance_target_usd", 0.0))),
             ("Insurance coverage", _fmt(latest.get("insurance_coverage_ratio", 0.0))),
             ("Fee chi", _fmt(latest.get("fee_chi", 0.0))),
-            ("Ops pool (USD)", _fmt(latest.get("ops_pool_usd", 0.0))),
+            ("Ops pool (USD) cumulative", _fmt(latest.get("ops_pool_usd", 0.0))),
             ("Mandates pool (USD, cumulative)", _fmt(latest.get("mandates_allocated_usd_total", 0.0))),
             ("CLC pool (USD) injection cumulative", _fmt(latest.get("clc_pool_injected_usd_total", 0.0))),
             ("Fee access budget (USD)", _fmt(latest.get("fee_access_budget_usd", 0.0))),

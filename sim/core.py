@@ -71,8 +71,7 @@ class IssuerLedger:
         self.outstanding_supply += amount
 
     def redeem(self, amount: float) -> None:
-        amt = min(amount, self.outstanding_supply)
-        self.outstanding_supply -= amt
+        amt = min(amount, self.outstanding_supply) if self.outstanding_supply > 0.0 else amount
         self.redeemed_total += amt
 
 
@@ -307,9 +306,6 @@ class Pool:
         if asset_out == self.stable_id and self.vault.get(self.stable_id) - amount_out < self.policy.min_stable_reserve - 1e-9:
             return False, "reserve_guardrail"
         # policy mode: stable outflow via swaps allowed?
-        if self.policy.role == "lender":
-            if asset_in != self.stable_id and asset_out != self.stable_id:
-                return False, "lender_requires_stable_leg"
         if self.policy.role == "liquidity_provider":
             if asset_in.startswith("VCHR:") or asset_out.startswith("VCHR:"):
                 return False, "lp_no_voucher_swaps"
@@ -326,6 +322,8 @@ class Pool:
                 allowed.add(self.policy.clc_liquidity_symbol)
             if asset_in not in allowed and asset_out not in allowed:
                 return False, "clc_requires_stable_leg"
+            if asset_out == self.stable_id and asset_in != self.policy.clc_liquidity_symbol:
+                return False, "clc_stable_outflow_requires_sclc"
         if asset_out == self.stable_id and self.policy.mode == "borrow_only":
             return False, "stable_outflow_not_allowed"
         if asset_out == self.stable_id and self.policy.mode == "none":
