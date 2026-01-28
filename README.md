@@ -5,6 +5,8 @@ It includes multi-hop routing, loan issuance/repayment via voucher swaps, stable
 NOAM clearing, and a CLC economics layer (fees + waterfall). A Streamlit UI (`app.py`) lets you run ticks,
 inspect metrics, and sweep parameters.
 
+Defaults are calibrated for a **town‑scale network (~100 shops)**: 100 producers, 20 consumers, 4 lenders, and 1 LP.
+
 **NOAM Routing (online, per request)**
 1) Build/refresh the **working set** (Top‑K pools per asset, Top‑M outs per pool/asset).
 2) (Optional) **Overlay**: find hub paths when enabled and the network is large enough.
@@ -59,8 +61,9 @@ streamlit run app.py --logger.level=debug
 
 ### Bootstrap (initial network)
 - If `economics_enabled=True`, **system pools** are created first: ops, insurance, mandates, CLC.
-- Initial agent pools are created in this order (up to `initial_pools`):
-  **producer, producer, lender, liquidity_provider**. Additional pools follow role mix probabilities.
+- If any `initial_*` counts are set (default), those exact counts are created:
+  `initial_producers`, `initial_consumers`, `initial_lenders`, `initial_liquidity_providers`.
+  Otherwise, `initial_pools` is used with the role mix probabilities.
 
 ### Roles and policies
 **Producer pools**
@@ -68,6 +71,8 @@ streamlit run app.py --logger.level=debug
 - **Listings (wants)**: stable + own voucher + random wanted assets (Poisson mean `add_pool_want_assets_mean`).
 - **Inventory (offers)**: own voucher seed + offered assets seed.
 - **Restrictions**: cannot swap out stable (`producer_no_stable_outflow`).
+- **Redemption**: auto‑redeem any **foreign** voucher received (keeps only own voucher + stable).
+- **Stable usage**: can use stable in swaps **after debt is cleared**.
 - **Starts with**:
   - Stable seed: `0`
   - Own voucher seed: `exp(mean=10000)`
@@ -77,16 +82,20 @@ streamlit run app.py --logger.level=debug
 - **Goal**: provide stable loans; hold voucher collateral.
 - **Listings (wants)**: stable + random wanted assets.
 - **Inventory (offers)**: stable + offered assets seed.
-- **Restrictions**: swaps must include a stable leg (`lender_requires_stable_leg`).
+- **Restrictions**: none on voucher↔voucher; stable can flow in/out.
+- **No mint/off‑ramp**: lenders do **not** mint or burn stables/vouchers.
 - **Starts with**:
-  - Stable seed: **fixed** `lender_initial_stable_mean` (default `100000`)
+  - Stable seed: **fixed** `lender_initial_stable_mean` (default `0`).
   - Offered asset seeds: `exp(mean=250)` per offered asset
+- **Liquidity**: lenders only gain stable via **liquidity mandates** and **repayment swaps**;
+  vouchers via **borrowing swaps** and **voucher↔voucher** swaps.
 
 **Consumer pools**
 - **Goal**: spend stable to acquire vouchers and redeem.
 - **Listings (wants)**: stable + own voucher + random wanted assets.
 - **Inventory (offers)**: stable + own voucher + offered assets seed.
 - **Restrictions**: cannot swap out stable (`consumer_no_stable_outflow`).
+- **Redemption**: auto‑redeem any **foreign** voucher received (keeps only own voucher + stable).
 - **Starts with** (current implementation constants in `sim/engine.py`):
   - Stable seed: `exp(mean=initial_stable_per_pool_mean * 0.25)`
   - Own voucher seed: `exp(mean=200)`
@@ -96,14 +105,15 @@ streamlit run app.py --logger.level=debug
 - **Goal**: contribute stable to the waterfall in exchange for sCLC.
 - **Listings**: stable only.
 - **Inventory**: stable seed only.
-- **Starts with**: **fixed** `lp_initial_stable_mean` (default `1000000`).
-- **Contribution**: each tick contributes `lp_waterfall_contribution_rate` of its stable to the waterfall, minting sCLC
-  until `lp_sclc_supply_cap` is exhausted.
+- **Starts with**: **fixed** `lp_initial_stable_mean` (default `400000`).
+- **Contribution**: **one‑shot** (all stable) on the first waterfall tick after creation, minting sCLC
+  until `lp_sclc_supply_cap` is exhausted. `lp_waterfall_contribution_rate` is ignored in current behavior.
 
 **System pools**
 - **ops**, **insurance**, **mandates**, **clc**. These are non-agent pools controlled by policy:
   - System pools are **paused** by default and do not trade.
   - **CLC pool** is special (see CLC section), and is **always open** when `clc_pool_always_open=True`.
+  - **CLC stable outflow** is only allowed when the input is **sCLC**.
 
 ### Swap rules and limits
 - **All pools list USD**; each listing has a cap-in per rolling window (`default_window_len`).
@@ -111,13 +121,14 @@ streamlit run app.py --logger.level=debug
 - **Stable cap-in** uses role-specific caps (`lender_stable_cap_in`, `producer_stable_cap_in`, else `default_cap_in`).
 - **Stable reserve guardrail**: swaps that take stable below `min_stable_reserve` are blocked.
 - **Role constraints**:
-  - Lenders require a stable leg.
+  - Lenders allow stable in/out and voucher↔voucher swaps.
   - Producers/Consumers cannot swap out stable.
-  - CLC pool requires a stable/sCLC leg.
+  - CLC pool requires a stable/sCLC leg, and stable outflow requires **sCLC** in.
 
 ### Redemption
-- **Consumers** auto-redeem vouchers they receive (if issued by someone else).
-- **Final hop vouchers** are redeemed to the issuer when the route completes.
+- **Producers/Consumers** auto‑redeem any **foreign** voucher they receive (keeps only own voucher + stable).
+- **Final hop vouchers** are redeemed to the issuer **only** for producer/consumer source pools.
+- Redemptions **return vouchers to the issuer’s pool** and **do not burn supply** (issuer ledgers track `redeemed_total`).
 
 ---
 
@@ -134,12 +145,12 @@ streamlit run app.py --logger.level=debug
   (capped by `utilization_boost_max`).
 - Producers also attempt **loan repayments** and **new loan issuance** according to `loan_activity_period_ticks`.
 - Target assets are chosen by `swap_target_selection_mode` and retried up to `swap_target_retry_count` times.
-  Producers/consumers **will not target stable**.
+- Producers avoid spending stable until debt is cleared; consumers prefer stable as input.
 - If a route fails at the chosen amount, the engine retries once with a smaller **fallback amount** before giving up.
 
 ### Loan mechanics (producer ↔ lender)
-- **Issuance**: producers mint their voucher as needed and route it to lenders to receive USD stable.
-- **Repayment**: producers route USD (or another asset) to acquire their voucher from lenders.
+- **Issuance**: producers **do not mint**; they route **existing** vouchers to lenders to receive USD stable.
+- **Repayment**: producers route **stable only** to acquire their voucher from lenders.
   The repayment amount amortizes `loan_term_weeks` and is spread by `loan_activity_period_ticks`.
 
 ### NOAM Routing (default)
@@ -180,6 +191,7 @@ NOAM Clearing runs periodically to clear feasible cycles and rebalance the netwo
 - **Minimum cycle value**: `noam_clearing_min_cycle_value_usd`.
 - **Execution**: quotes are validated live; fees and edge states update on success/failure.
 - **Scoring**: uses the same success/fee/scarcity/benefit/dead-end weights as NOAM routing.
+- **Priority**: lenders and CLC receive edge bonuses; clearing can still touch producer/consumer pools.
 
 ---
 
@@ -192,17 +204,18 @@ NOAM Clearing runs periodically to clear feasible cycles and rebalance the netwo
 - System pools have zero fees by default; agent pools use the configured pool fee + CLC rake.
 - Fee ledgers are swept into the waterfall each epoch.
 - Cumulative fee totals are tracked separately in metrics.
-  - If `waterfall_include_pool_fees=False`, pool fees stay in their pool (only CLC fees flow to the waterfall).
+  - If `waterfall_include_pool_fees=False`, **CLC fees** flow to the waterfall; otherwise **pool fees** do.
 
 ### Waterfall inflows
-- **CLC fee ledger + pool fee ledger** (if `waterfall_include_pool_fees=True`)
+- **Either pool fee ledger or CLC fee ledger** (controlled by `waterfall_include_pool_fees`; not both)
 - **LP contributions** (stable inflow + sCLC mint)
 - **External inflows** (used for mandates / policy injections)
 
 Before allocation, fee assets are **converted to cash** when eligible:
 - Assets in `cash_eligible_assets` are converted to USD using the pool’s value index,
   with `cash_conversion_slippage_bps` and optional `cash_conversion_max_usd_per_epoch`.
-- Non-convertible assets are deposited to the CLC pool **in-kind**.
+- Converted **vouchers remain in-system** (deposited to CLC); non‑convertible assets are deposited to CLC **in‑kind**.
+- Converted cash is treated as a **fiat on‑ramp** for KPI accounting.
 
 ### Waterfall order (current implementation)
 1) **Insurance top-up**
@@ -234,9 +247,11 @@ Other modes (configurable):
 - **Accepts stable for vouchers** when it holds in-kind fee assets (vouchers deposited to CLC via the waterfall);
   routing/clearing can use CLC as the stable->voucher venue when inventory exists.
 - **Rebalancing**: periodically swaps vouchers -> stable to maintain target ratio.
+- **Stable outflow**: only allowed when the input asset is **sCLC**.
 
 ### sCLC fee access
-- sCLC can swap into CLC at any time (always-open pool); eligibility and fee-access budgeting are still tracked.
+- sCLC can swap into CLC at any time (always-open pool); eligibility and fee-access budgeting are tracked.
+- Fee‑access minting targets **all available CLC stable** (subject to cap).
 - Controlled by `sclc_fee_access_*` parameters.
 
 ---
@@ -257,10 +272,14 @@ All parameters live in `sim/config.py`. Defaults shown below.
 ### Network growth
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `initial_pools` | `4` | Initial pool count at boot. |
-| `pool_growth_rate_per_tick` | `0.02` | Pool growth rate per tick. |
+| `initial_pools` | `10` | Initial pool count (used only when `initial_*` counts are unset). |
+| `initial_lenders` | `4` | Initial lender count. |
+| `initial_producers` | `100` | Initial producer count (town‑scale default). |
+| `initial_consumers` | `20` | Initial consumer count. |
+| `initial_liquidity_providers` | `1` | Initial LP count. |
+| `pool_growth_rate_per_tick` | `0.0` | Pool growth rate per tick. |
 | `pool_growth_stride_ticks` | `4` | Stride for pool growth. |
-| `max_pools` | `2000` | Hard cap on active pools. |
+| `max_pools` | `500` | Hard cap on active pools. |
 | `add_pool_offer_assets_mean` | `4` | Mean offered assets per new pool. |
 | `add_pool_want_assets_mean` | `6` | Mean wanted assets per new pool. |
 | `p_offer_overlap` | `0.75` | Offered assets sampled from existing universe. |
@@ -274,7 +293,7 @@ All parameters live in `sim/config.py`. Defaults shown below.
 ### Agent role mix
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `p_liquidity_provider` | `0.02` | Probability a new agent is an LP. |
+| `p_liquidity_provider` | `0.0` | Probability a new agent is an LP. |
 | `p_lender` | `0.25` | Probability a new agent is a lender. |
 | `p_producer` | `0.50` | Probability a new agent is a producer. |
 | `p_consumer` | `0.25` | Probability a new agent is a consumer. |
@@ -284,12 +303,12 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | --- | --- | --- |
 | `stable_symbol` | `USD` | Stablecoin asset id. |
 | `initial_stable_per_pool_mean` | `2000.0` | Baseline for consumer stable seed (exp mean * 0.25). |
-| `lender_initial_stable_mean` | `100000.0` | Fixed stable seed for lenders. |
-| `lp_initial_stable_mean` | `1000000.0` | Fixed stable seed for LPs. |
+| `lender_initial_stable_mean` | `0.0` | Fixed stable seed for lenders (lenders get stable via mandates/repayments). |
+| `lp_initial_stable_mean` | `400000.0` | Fixed stable seed for LPs. |
 | `stable_inflow_per_tick` | `0.0` | Generic per-pool inflow (per month). |
 | `producer_inflow_per_tick` | `0.05` | Producer inflow rate (per month). |
 | `consumer_inflow_per_tick` | `0.05` | Consumer inflow rate (per month). |
-| `lender_inflow_per_tick` | `0.05` | Lender inflow rate (per month). |
+| `lender_inflow_per_tick` | `0.05` | Lender inflow rate (ignored; lenders do not mint). |
 | `liquidity_provider_inflow_per_tick` | `0.0` | LP inflow rate (per month). |
 | `stable_shock_tick` | `None` | One-time shock tick. |
 | `stable_shock_amount` | `0.0` | Shock amount (positive adds, negative drains). |
@@ -307,19 +326,26 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | `stable_flow_window_ticks` | `4` | Flow window length (ticks). |
 | `stable_inflow_activity_share` | `0.6` | Blend of activity vs deficit weights. |
 | `stable_inflow_activity_window_ticks` | `12` | Activity window. |
-| `voucher_inflow_share` | `0.5` | Voucher USD minted per USD stable inflow. |
+| `voucher_inflow_share` | `0.5` | Unused (voucher inflow minting is disabled). |
 | `offramps_enabled` | `True` | Enable stable offramps. |
 | `offramp_rate_min_per_tick` | `0.0` | Min offramp rate. |
 | `offramp_rate_max_per_tick` | `0.02` | Max offramp rate. |
 | `offramp_success_ema_alpha` | `0.2` | EMA alpha for success/failure. |
 | `offramp_min_attempts` | `2` | Min attempts before offramps apply. |
+| `producer_offramp_rate_per_month` | `0.05` | Monthly stable cash‑out fraction (producers). |
+| `consumer_offramp_rate_per_month` | `0.05` | Monthly stable cash‑out fraction (consumers). |
+
+Notes:
+- Monthly off‑ramping is **auto‑balanced** against net on‑ramping at the end of each month to stabilize total stable supply.
+- Stable on‑ramps are treated as **fiat inflows**; off‑ramps (including ops burns) are treated as **fiat cash‑outs**.
+- Lenders and system pools do **not** mint or off‑ramp stables or vouchers.
 
 ### Metrics & performance
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `metrics_stride` | `5` | Network metrics stride. |
-| `pool_metrics_stride` | `10` | Pool metrics stride. |
-| `max_active_pools_per_tick` | `100` | Cap active pools sampled per tick. |
+| `metrics_stride` | `1` | Network metrics stride. |
+| `pool_metrics_stride` | `1` | Pool metrics stride. |
+| `max_active_pools_per_tick` | `None` | Cap active pools sampled per tick (None = no cap). |
 | `max_candidate_pools_per_hop` | `None` | Cap candidate pools per hop. |
 | `event_log_maxlen` | `None` | Event log max length. |
 
@@ -336,7 +362,7 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | `noam_topm_out_per_pool` | `16` | Top-M outs per pool/asset. |
 | `noam_beam_width` | `40` | Beam width. |
 | `noam_max_hops` | `5` | Max hops in NOAM. |
-| `noam_topk_refresh_ticks` | `50` | Refresh Top-K/Top-M. |
+| `noam_topk_refresh_ticks` | `4` | Refresh Top-K/Top-M. |
 | `noam_dynamic_caps_enabled` | `True` | Adaptive caps. |
 | `noam_dynamic_cap_reference_pools` | `50` | Reference pool count for scaling. |
 | `noam_dynamic_min_topk` | `4` | Min Top-K. |
@@ -353,7 +379,7 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | `noam_overlay_refresh_ticks` | `200` | Overlay refresh stride. |
 | `noam_overlay_min_pools` | `200` | Overlay min pools. |
 | `noam_clearing_enabled` | `True` | Enable NOAM clearing. |
-| `noam_clearing_stride_ticks` | `2` | Clearing cadence. |
+| `noam_clearing_stride_ticks` | `4` | Clearing cadence. |
 | `noam_clearing_max_cycles` | `200` | Max cycles per run. |
 | `noam_clearing_max_hops` | `4` | Max hops per cycle. |
 | `noam_clearing_edge_cap_per_asset` | `16` | Edge cap per asset in clearing. |
@@ -361,6 +387,9 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | `noam_clearing_budget_usd` | `25000.0` | Base clearing budget. |
 | `noam_clearing_budget_share` | `0.01` | Budget share of network value. |
 | `noam_clearing_min_cycle_value_usd` | `1.0` | Min cycle value. |
+| `noam_clearing_lenders_only` | `False` | If true, restricts clearing to lenders (and optionally CLC). |
+| `noam_clearing_include_clc` | `True` | Include CLC in clearing edge set. |
+| `noam_clearing_lender_edge_bonus` | `0.5` | Bonus to lender edges in clearing scoring. |
 | `noam_success_ema_alpha` | `0.2` | EMA alpha for success. |
 | `noam_success_min` | `0.05` | Min success. |
 | `noam_success_max` | `0.98` | Max success. |
@@ -411,7 +440,7 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | `waterfall_alpha_ops_share` | `0.20` | Legacy remainder share (ops). |
 | `waterfall_beta_liquidity_share` | `0.40` | Legacy remainder share (liquidity). |
 | `waterfall_gamma_insurance_share` | `0.40` | Legacy remainder share (insurance). |
-| `lp_waterfall_contribution_rate` | `1.0` | LP contribution rate per tick. |
+| `lp_waterfall_contribution_rate` | `1.0` | LP contribution rate (ignored; LP contributes once). |
 | `lp_sclc_supply_cap` | `100000000.0` | sCLC supply cap for LPs. |
 | `sclc_symbol` | `sCLC` | sCLC asset id. |
 | `sclc_fee_access_enabled` | `True` | Enable fee access for sCLC. |
@@ -473,7 +502,7 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | `swap_size_min_usd` | `1.0` | Minimum swap size. |
 | `swap_size_max_usd` | `None` | Max swap size. |
 | `swap_asset_selection_mode` | `value_weighted` | Asset_in selection. |
-| `swap_limits_enabled` | `False` | Enforce cap limits. |
+| `swap_limits_enabled` | `True` | Enforce cap limits. |
 | `swap_target_selection_mode` | `liquidity_weighted` | Asset_out selection. |
 | `swap_target_retry_count` | `2` | Target retries per asset. |
 | `swap_attempts_value_scale_usd` | `500000.0` | Value-scaled attempts. |
