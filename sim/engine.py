@@ -56,6 +56,7 @@ class SimulationEngine:
     def __init__(self, cfg: ScenarioConfig, seed: int = 1) -> None:
         self.cfg = cfg
         self.rng = random.Random(seed)
+        random.seed(seed)
         np.random.seed(seed)
 
         self.tick: int = 0

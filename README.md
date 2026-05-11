@@ -51,6 +51,30 @@ streamlit run app.py --logger.level=debug
 
 ---
 
+## Regenerative-bond Monte Carlo runner
+
+The paper-facing Monte Carlo workflow treats LPs as bond purchasers/funders:
+LP stable contributions are bond-like principal, and sCLC/stable fee access is
+the simulated bondholder cash return.
+
+From the `sim` repo root:
+
+```bash
+python scripts/run_regenbond_monte_carlo.py \
+  --scenario regenbond_lp_injection \
+  --runs 100 \
+  --ticks 260 \
+  --seed 1 \
+  --output ../RegenBonds/analysis/monte_carlo
+```
+
+The runner consumes aggregate Sarafu calibration artifacts from
+`../RegenBonds/analysis/` and writes manuscript-ready CSV and LaTeX snippets
+under the output directory. Use `--scenario all` for the full baseline,
+regenerative-bond, and stress-test suite.
+
+---
+
 ## Core model (agentic logic)
 
 ### Agents and pools

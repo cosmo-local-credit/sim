@@ -179,6 +179,13 @@ class ScenarioConfig:
     clc_rebalance_swap_size_frac: float = 0.25
     clc_rebalance_min_usd: float = 1.0
 
+    # Regenerative-bond Monte Carlo layer
+    bond_coupon_target_annual: float = 0.0
+    bond_term_ticks: int = 260
+    bond_fee_service_share: float = 1.0
+    bond_return_mode: str = "lp_sclc"
+    calibration_profile: str = "sarafu_empirical"
+
     # Insurance / incidents
     insurance_target_multiplier: float = 0.05
     insurance_risk_weight_base: float = 1.0
