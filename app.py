@@ -1,5 +1,8 @@
 import json
 import math
+from pathlib import Path
+import subprocess
+import sys
 import time
 import numpy as np
 import streamlit as st
@@ -9,6 +12,22 @@ from sim.config import ScenarioConfig
 from sim.engine import SimulationEngine
 
 st.set_page_config(page_title="CLC Pool Network Simulator", layout="wide")
+
+APP_ROOT = Path(__file__).resolve().parent
+DEFAULT_REGENBOND_MC_OUTPUT = APP_ROOT.parent / "RegenBonds" / "analysis" / "monte_carlo"
+REGENBOND_MC_SCRIPT = APP_ROOT / "scripts" / "run_regenbond_monte_carlo.py"
+REGENBOND_MC_SCENARIOS = [
+    "regenbond_lp_injection",
+    "sarafu_like_pools",
+    "mutual_aid_only",
+    "stress_weak_pool_repayment",
+    "stress_cash_stable_leakage",
+    "stress_high_coupon",
+    "stress_low_fee_conversion",
+    "stress_governance_diversion",
+    "stress_liquidity_concentration",
+    "all",
+]
 
 
 def get_engine() -> SimulationEngine:
@@ -59,7 +78,7 @@ def _format_table_numbers(df: pd.DataFrame) -> pd.DataFrame:
     numeric_cols = formatted.select_dtypes(include=["number"]).columns
     if len(numeric_cols) == 0:
         return formatted
-    formatted[numeric_cols] = formatted[numeric_cols].applymap(
+    formatted[numeric_cols] = formatted[numeric_cols].map(
         lambda value: f"{value:,.2f}" if pd.notnull(value) else ""
     )
     return formatted
@@ -136,6 +155,44 @@ def _parse_sweep_values(text: str, value_type: type) -> list:
         except ValueError:
             continue
     return values
+
+def _short_command(cmd: list[str]) -> str:
+    parts = []
+    for item in cmd:
+        text = str(item)
+        if " " in text:
+            text = f'"{text}"'
+        parts.append(text)
+    return " ".join(parts)
+
+def _read_csv_if_exists(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path)
+
+def _render_mc_metric_chart(
+    qdf: pd.DataFrame,
+    title: str,
+    metric: str,
+    scenario: str | None = None,
+    coupon: float | None = None,
+    term: int | None = None,
+) -> None:
+    if qdf.empty:
+        return
+    chart_df = qdf[qdf["metric"] == metric].copy()
+    if scenario is not None and scenario != "all":
+        chart_df = chart_df[chart_df["scenario"] == scenario]
+    if coupon is not None and "coupon_target_annual" in chart_df:
+        chart_df = chart_df[chart_df["coupon_target_annual"].round(10) == round(float(coupon), 10)]
+    if term is not None and "bond_term_ticks" in chart_df:
+        chart_df = chart_df[chart_df["bond_term_ticks"] == int(term)]
+    if chart_df.empty:
+        st.info(f"No Monte Carlo quantile rows for {metric}.")
+        return
+    chart_df = chart_df.sort_values("tick")
+    st.subheader(title)
+    st.line_chart(chart_df, x="tick", y=["p05", "p50", "p95"])
 
 def _pool_balances(engine: SimulationEngine) -> dict:
     balances = {}
@@ -521,10 +578,11 @@ with st.sidebar:
                         })
             st.session_state.batch_results = results
 
-tab_network, tab_clc, tab_noam_overview, tab2, tab3, tab4, tab_network_controls, tab_noam_controls, tab_clc_controls = st.tabs(
+tab_network, tab_clc, tab_monte_carlo, tab_noam_overview, tab2, tab3, tab4, tab_network_controls, tab_noam_controls, tab_clc_controls = st.tabs(
     [
         "Network Overview",
         "CLC Overview",
+        "RegenBond MC",
         "NOAM Overview",
         "Pools",
         "Events",
@@ -534,6 +592,182 @@ tab_network, tab_clc, tab_noam_overview, tab2, tab3, tab4, tab_network_controls,
         "CLC Controls",
     ]
 )
+
+with tab_monte_carlo:
+    st.subheader("Regenerative Bond Monte Carlo")
+    st.caption(
+        "This panel invokes the same CLI runner used for paper artifacts, so fixed-seed results match terminal runs for the displayed command."
+    )
+
+    if not REGENBOND_MC_SCRIPT.exists():
+        st.error(f"Monte Carlo runner not found: {REGENBOND_MC_SCRIPT}")
+    else:
+        c1, c2, c3 = st.columns(3)
+        mc_scenario = c1.selectbox(
+            "Scenario",
+            REGENBOND_MC_SCENARIOS,
+            index=REGENBOND_MC_SCENARIOS.index("regenbond_lp_injection"),
+        )
+        mc_runs = c2.number_input("Runs", min_value=1, max_value=1000, value=2, step=1)
+        mc_ticks = c3.number_input("Ticks", min_value=1, max_value=2000, value=52, step=1)
+
+        c4, c5, c6 = st.columns(3)
+        mc_seed = c4.number_input("Seed", min_value=1, max_value=10_000_000, value=1, step=1)
+        mc_coupons = c5.text_input("Coupon targets", value="0,0.03,0.06,0.09,0.12")
+        mc_terms = c6.text_input("Terms (ticks)", value="52,156,260")
+
+        c7, c8 = st.columns(2)
+        mc_output = c7.text_input(
+            "Output directory",
+            value=str(DEFAULT_REGENBOND_MC_OUTPUT),
+            help="Use the same path as the CLI when comparing exact output files.",
+        )
+        mc_max_active = c8.number_input(
+            "Max active pools per tick (0 = all)",
+            min_value=0,
+            max_value=100000,
+            value=0,
+            step=25,
+            help="Optional performance cap. Keep this identical to the CLI command for exact comparisons.",
+        )
+
+        mc_pool_stride = st.number_input(
+            "Pool metrics stride",
+            min_value=1,
+            max_value=1000,
+            value=1,
+            step=1,
+            help="Passed directly to the CLI runner.",
+        )
+
+        cmd = [
+            sys.executable,
+            str(REGENBOND_MC_SCRIPT),
+            "--scenario",
+            str(mc_scenario),
+            "--runs",
+            str(int(mc_runs)),
+            "--ticks",
+            str(int(mc_ticks)),
+            "--seed",
+            str(int(mc_seed)),
+            "--coupon-targets",
+            str(mc_coupons),
+            "--terms",
+            str(mc_terms),
+            "--output",
+            str(mc_output),
+            "--pool-metrics-stride",
+            str(int(mc_pool_stride)),
+        ]
+        if int(mc_max_active) > 0:
+            cmd.extend(["--max-active-pools-per-tick", str(int(mc_max_active))])
+
+        st.text_area("Exact CLI-equivalent command", _short_command(cmd), height=92)
+
+        if st.button("Run RegenBond Monte Carlo"):
+            start_ts = time.time()
+            with st.spinner("Running the CLI-equivalent Monte Carlo command..."):
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(APP_ROOT),
+                    text=True,
+                    capture_output=True,
+                )
+            elapsed = time.time() - start_ts
+            st.session_state.regenbond_mc_last = {
+                "returncode": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "cmd": _short_command(cmd),
+                "output": str(mc_output),
+                "elapsed": elapsed,
+                "scenario": mc_scenario,
+            }
+            if proc.returncode == 0:
+                st.success(f"Monte Carlo completed in {_fmt_duration(elapsed)}.")
+            else:
+                st.error(f"Monte Carlo failed with exit code {proc.returncode}.")
+
+        last = st.session_state.get("regenbond_mc_last")
+        if last:
+            st.caption(f"Last command completed in {_fmt_duration(float(last.get('elapsed', 0.0)))}")
+            with st.expander("Runner stdout", expanded=False):
+                st.code(last.get("stdout", "") or "(empty)")
+            if last.get("stderr"):
+                with st.expander("Runner stderr", expanded=True):
+                    st.code(last.get("stderr", ""))
+
+        output_dir = Path(mc_output)
+        summary_df = _read_csv_if_exists(output_dir / "mc_run_summary.csv")
+        failure_df = _read_csv_if_exists(output_dir / "mc_failure_summary.csv")
+        quantile_df = _read_csv_if_exists(output_dir / "mc_timeseries_quantiles.csv")
+        network_df_mc = _read_csv_if_exists(output_dir / "mc_network_scaling_timeseries.csv")
+
+        if summary_df.empty:
+            st.info("No Monte Carlo output found at the selected output directory yet.")
+        else:
+            st.subheader("Run Summary")
+            latest_summary = summary_df.copy()
+            if mc_scenario != "all" and "scenario" in latest_summary:
+                latest_summary = latest_summary[latest_summary["scenario"] == mc_scenario]
+            st.dataframe(_format_table_numbers(latest_summary), use_container_width=True)
+
+            if not failure_df.empty:
+                st.subheader("Failure Summary")
+                st.dataframe(_format_table_numbers(failure_df), use_container_width=True)
+
+            selected_coupon = None
+            selected_term = None
+            if not quantile_df.empty:
+                scenario_values = sorted(quantile_df["scenario"].dropna().unique().tolist())
+                coupon_values = sorted(quantile_df["coupon_target_annual"].dropna().unique().tolist())
+                term_values = sorted(quantile_df["bond_term_ticks"].dropna().unique().tolist())
+                c9, c10, c11 = st.columns(3)
+                if mc_scenario == "all":
+                    chart_scenario = c9.selectbox("Chart scenario", scenario_values, index=0)
+                else:
+                    chart_scenario = mc_scenario
+                    c9.caption(f"Chart scenario: {chart_scenario}")
+                selected_coupon = c10.selectbox("Chart coupon", coupon_values, index=0)
+                selected_term = c11.selectbox("Chart term", term_values, index=0)
+
+                _render_mc_metric_chart(
+                    quantile_df,
+                    "Bond Annualized Fee Yield",
+                    "bond_annualized_fee_yield",
+                    scenario=chart_scenario,
+                    coupon=float(selected_coupon),
+                    term=int(selected_term),
+                )
+                _render_mc_metric_chart(
+                    quantile_df,
+                    "Coupon Coverage Ratio",
+                    "bond_coupon_coverage_ratio",
+                    scenario=chart_scenario,
+                    coupon=float(selected_coupon),
+                    term=int(selected_term),
+                )
+                _render_mc_metric_chart(
+                    quantile_df,
+                    "Potential Network Connectivity",
+                    "potential_largest_component_share",
+                    scenario=chart_scenario,
+                    coupon=float(selected_coupon),
+                    term=int(selected_term),
+                )
+                _render_mc_metric_chart(
+                    quantile_df,
+                    "Realized Swap Connectivity",
+                    "realized_largest_component_share",
+                    scenario=chart_scenario,
+                    coupon=float(selected_coupon),
+                    term=int(selected_term),
+                )
+
+            if not network_df_mc.empty:
+                st.subheader("Raw Network Scaling Rows")
+                st.dataframe(_format_table_numbers(network_df_mc.tail(50)), use_container_width=True)
 
 with tab_network_controls:
     right = st.container()

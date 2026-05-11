@@ -73,6 +73,11 @@ The runner consumes aggregate Sarafu calibration artifacts from
 under the output directory. Use `--scenario all` for the full baseline,
 regenerative-bond, and stress-test suite.
 
+The Streamlit app includes a **RegenBond MC** tab that runs this same script as
+a subprocess and displays the exact CLI-equivalent command. For identical
+results between terminal and UI, keep the scenario, runs, ticks, seed, coupon
+targets, terms, output directory, and optional performance caps identical.
+
 ---
 
 ## Core model (agentic logic)
