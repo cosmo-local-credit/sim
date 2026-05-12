@@ -70,13 +70,17 @@ python scripts/run_regenbond_monte_carlo.py \
 
 The runner consumes aggregate Sarafu calibration artifacts from
 `../RegenBonds/analysis/` and writes manuscript-ready CSV and LaTeX snippets
-under the output directory. Use `--scenario all` for the full baseline,
-regenerative-bond, and stress-test suite.
+under the output directory. It also writes PNG figures under `figures/` unless
+`--no-png` is supplied. Use `--scenario all` for the full baseline,
+regenerative-bond, and stress-test suite. For quick inspection inside this repo,
+use `--output analysis`; for longer runs, `--analysis-stride N` records the
+expensive paper diagnostics every `N` ticks while still simulating every tick.
 
 The Streamlit app includes a **RegenBond MC** tab that runs this same script as
 a subprocess and displays the exact CLI-equivalent command. For identical
 results between terminal and UI, keep the scenario, runs, ticks, seed, coupon
-targets, terms, output directory, and optional performance caps identical.
+targets, terms, output directory, analysis stride, and optional performance caps
+identical.
 
 ---
 

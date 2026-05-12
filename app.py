@@ -631,7 +631,8 @@ with tab_monte_carlo:
             help="Optional performance cap. Keep this identical to the CLI command for exact comparisons.",
         )
 
-        mc_pool_stride = st.number_input(
+        c9, c10 = st.columns(2)
+        mc_pool_stride = c9.number_input(
             "Pool metrics stride",
             min_value=1,
             max_value=1000,
@@ -639,6 +640,15 @@ with tab_monte_carlo:
             step=1,
             help="Passed directly to the CLI runner.",
         )
+        mc_analysis_stride = c10.number_input(
+            "Analysis stride",
+            min_value=1,
+            max_value=1000,
+            value=1,
+            step=1,
+            help="Records heavy paper diagnostics every N ticks while simulating every tick.",
+        )
+        mc_write_png = st.checkbox("Write PNG figures", value=True)
 
         cmd = [
             sys.executable,
@@ -659,9 +669,13 @@ with tab_monte_carlo:
             str(mc_output),
             "--pool-metrics-stride",
             str(int(mc_pool_stride)),
+            "--analysis-stride",
+            str(int(mc_analysis_stride)),
         ]
         if int(mc_max_active) > 0:
             cmd.extend(["--max-active-pools-per-tick", str(int(mc_max_active))])
+        if not mc_write_png:
+            cmd.append("--no-png")
 
         st.text_area("Exact CLI-equivalent command", _short_command(cmd), height=92)
 

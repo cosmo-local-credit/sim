@@ -1,0 +1,19 @@
+calibration_item,empirical_value,simulator_use
+strong_cash_return,0.229553,stable repayment prior
+strong_voucher_return,0.6613548332253504,voucher settlement prior
+moderate_cash_return,0.201495,stable repayment prior
+moderate_voucher_return,0.7639075076763479,voucher settlement prior
+weak_cash_return,0.070677,stable repayment prior
+weak_voucher_return,0.5019761216551396,voucher settlement prior
+Regenerative Agriculture_report_elasticity,0.331015,report-arrival projection
+Construction_report_elasticity,0.279636,report-arrival projection
+Cleaning_report_elasticity,0.258,report-arrival projection
+Permaculture_report_elasticity,0.144487,report-arrival projection
+Training_report_elasticity,0.238617,report-arrival projection
+Education_report_elasticity,0.16873,report-arrival projection
+Housekeeping_report_elasticity,0.165738,report-arrival projection
+Volunteer_report_elasticity,0.106258,report-arrival projection
+Soil_report_elasticity,0.096906,report-arrival projection
+production_report_elasticity,0.120393,report-arrival projection
+building_report_elasticity,0.137555,report-arrival projection
+Common Spaces_report_elasticity,0.041736,report-arrival projection

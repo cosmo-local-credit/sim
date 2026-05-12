@@ -1,0 +1,2 @@
+scenario,coupon_target_annual,bond_term_ticks,runs,coupon_shortfall_rate,median_coupon_shortfall_usd,unpaid_claims_rate,liquidity_leakage_rate,household_cash_stress_rate,concentration_rate,median_realized_largest_component_share
+regenbond_lp_injection,0.06,260,3,0.0,0.0,0.0,0.3333333333333333,1.0,0.0,0.992

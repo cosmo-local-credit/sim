@@ -129,6 +129,34 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Pool metric stride. Keep 1 for pool-tier and stress diagnostics.",
     )
+    parser.add_argument(
+        "--analysis-stride",
+        type=int,
+        default=1,
+        help="Record Monte Carlo paper diagnostics every N ticks while still simulating every tick.",
+    )
+    parser.add_argument(
+        "--no-png",
+        action="store_true",
+        help="Skip PNG figure generation.",
+    )
+    parser.add_argument(
+        "--plot-scenario",
+        default="regenbond_lp_injection",
+        help="Scenario used for headline PNG figures when present in the output.",
+    )
+    parser.add_argument(
+        "--plot-coupon",
+        type=float,
+        default=0.06,
+        help="Annual coupon target used for headline PNG figures when present in the output.",
+    )
+    parser.add_argument(
+        "--plot-term",
+        type=int,
+        default=260,
+        help="Bond term in ticks used for headline PNG figures when present in the output.",
+    )
     return parser.parse_args()
 
 
@@ -571,6 +599,9 @@ def run_one(
         event_idx = update_realized_edges(engine, realized_edges, pool_swap_counts, event_idx)
         latest = engine.metrics.network_rows[-1]
         tick = int(latest["tick"])
+        analysis_stride = max(1, int(args.analysis_stride))
+        if tick % analysis_stride != 0 and tick != int(args.ticks):
+            continue
         nodes = active_pool_ids(engine)
         potential = potential_edges(engine, nodes)
         potential_metrics = graph_metrics(nodes, potential, "potential")
@@ -824,6 +855,461 @@ def write_latex_tables(
     )
 
 
+def write_csv_tables(
+    output_dir: Path,
+    calibration: Calibration,
+    summary_rows: list[dict[str, object]],
+    failure_summary_rows: list[dict[str, object]],
+) -> None:
+    calibration_rows = []
+    for tier in ("strong", "moderate", "weak"):
+        calibration_rows.append(
+            {
+                "calibration_item": f"{tier}_cash_return",
+                "empirical_value": calibration.repayment_by_tier_asset.get((tier, "cash"), 0.0),
+                "simulator_use": "stable repayment prior",
+            }
+        )
+        calibration_rows.append(
+            {
+                "calibration_item": f"{tier}_voucher_return",
+                "empirical_value": calibration.voucher_coverage_by_tier.get(tier, 0.0),
+                "simulator_use": "voucher settlement prior",
+            }
+        )
+    for row in calibration.impact_rows[:12]:
+        calibration_rows.append(
+            {
+                "calibration_item": f"{row.activity}_report_elasticity",
+                "empirical_value": row.slope,
+                "simulator_use": "report-arrival projection",
+            }
+        )
+    write_csv(
+        output_dir / "mc_calibration_table.csv",
+        ["calibration_item", "empirical_value", "simulator_use"],
+        calibration_rows,
+    )
+
+    grouped: dict[tuple[object, ...], list[dict[str, object]]] = defaultdict(list)
+    for row in summary_rows:
+        grouped[(row["scenario"], row["coupon_target_annual"], row["bond_term_ticks"])].append(row)
+
+    bond_table_rows = []
+    for (scenario, coupon, term), rows in sorted(grouped.items()):
+        bond_table_rows.append(
+            {
+                "scenario": scenario,
+                "coupon_target_annual": coupon,
+                "bond_term_ticks": term,
+                "runs": len(rows),
+                "median_bond_annualized_fee_yield": percentile(
+                    [safe_float(r["bond_annualized_fee_yield"]) for r in rows], 0.50
+                ),
+                "p05_bond_annualized_fee_yield": percentile(
+                    [safe_float(r["bond_annualized_fee_yield"]) for r in rows], 0.05
+                ),
+                "p95_bond_annualized_fee_yield": percentile(
+                    [safe_float(r["bond_annualized_fee_yield"]) for r in rows], 0.95
+                ),
+                "median_coupon_coverage_ratio": percentile(
+                    [safe_float(r["bond_coupon_coverage_ratio"]) for r in rows], 0.50
+                ),
+                "median_cumulative_fee_return_usd": percentile(
+                    [safe_float(r["bond_cumulative_fee_return_usd"]) for r in rows], 0.50
+                ),
+                "median_coupon_shortfall_usd": percentile(
+                    [safe_float(r["bond_coupon_shortfall_usd"]) for r in rows], 0.50
+                ),
+                "median_realized_largest_component_share": percentile(
+                    [safe_float(r.get("realized_largest_component_share")) for r in rows], 0.50
+                ),
+                "median_expected_verified_report_exposure": percentile(
+                    [safe_float(r["expected_verified_report_exposure"]) for r in rows], 0.50
+                ),
+            }
+        )
+    write_csv(
+        output_dir / "mc_bond_return_table.csv",
+        [
+            "scenario",
+            "coupon_target_annual",
+            "bond_term_ticks",
+            "runs",
+            "median_bond_annualized_fee_yield",
+            "p05_bond_annualized_fee_yield",
+            "p95_bond_annualized_fee_yield",
+            "median_coupon_coverage_ratio",
+            "median_cumulative_fee_return_usd",
+            "median_coupon_shortfall_usd",
+            "median_realized_largest_component_share",
+            "median_expected_verified_report_exposure",
+        ],
+        bond_table_rows,
+    )
+    write_csv(
+        output_dir / "mc_failure_table.csv",
+        list(failure_summary_rows[0].keys()) if failure_summary_rows else [],
+        failure_summary_rows,
+    )
+
+
+def _load_font(size: int):
+    from PIL import ImageFont
+
+    for name in ("DejaVuSans.ttf", "Arial.ttf"):
+        try:
+            return ImageFont.truetype(name, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _draw_text(draw, xy: tuple[int, int], text: str, font, fill=(25, 25, 25), anchor: str | None = None) -> None:
+    kwargs = {"font": font, "fill": fill}
+    if anchor is not None:
+        kwargs["anchor"] = anchor
+    draw.text(xy, text, **kwargs)
+
+
+def _fmt_plot_value(value: float, *, percent: bool = False) -> str:
+    if percent:
+        return f"{value:.0f}%"
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if abs(value) >= 1_000:
+        return f"{value / 1_000:.0f}k"
+    if abs(value) < 10:
+        return f"{value:.2f}"
+    return f"{value:.0f}"
+
+
+def _select_plot_key(
+    quantiles: list[dict[str, object]],
+    scenario: str,
+    coupon: float,
+    term: int,
+) -> tuple[str, float, int] | None:
+    keys = sorted(
+        {
+            (
+                str(row["scenario"]),
+                safe_float(row["coupon_target_annual"]),
+                int(safe_float(row["bond_term_ticks"])),
+            )
+            for row in quantiles
+        }
+    )
+    if not keys:
+        return None
+    exact = (scenario, float(coupon), int(term))
+    if exact in keys:
+        return exact
+    scenario_keys = [key for key in keys if key[0] == scenario]
+    if scenario_keys:
+        return min(
+            scenario_keys,
+            key=lambda key: abs(key[1] - float(coupon)) + abs(key[2] - int(term)) / YEAR_TICKS,
+        )
+    return keys[0]
+
+
+def _metric_rows(
+    quantiles: list[dict[str, object]],
+    metric: str,
+    key: tuple[str, float, int],
+) -> list[dict[str, float]]:
+    scenario, coupon, term = key
+    rows = []
+    for row in quantiles:
+        if row["metric"] != metric:
+            continue
+        if str(row["scenario"]) != scenario:
+            continue
+        if abs(safe_float(row["coupon_target_annual"]) - coupon) > 1e-9:
+            continue
+        if int(safe_float(row["bond_term_ticks"])) != term:
+            continue
+        rows.append(
+            {
+                "tick": safe_float(row["tick"]),
+                "p05": safe_float(row["p05"]),
+                "p50": safe_float(row["p50"]),
+                "p95": safe_float(row["p95"]),
+                "mean": safe_float(row["mean"]),
+            }
+        )
+    return sorted(rows, key=lambda item: item["tick"])
+
+
+def _draw_line_chart(
+    path: Path,
+    title: str,
+    subtitle: str,
+    series: list[dict[str, object]],
+    *,
+    percent: bool = False,
+    y_label: str = "",
+) -> None:
+    from PIL import Image, ImageDraw
+
+    width, height = 1200, 720
+    left, right, top, bottom = 105, 55, 88, 92
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    image = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(image, "RGBA")
+    title_font = _load_font(28)
+    subtitle_font = _load_font(17)
+    axis_font = _load_font(15)
+    label_font = _load_font(16)
+
+    all_ticks: list[float] = []
+    all_values: list[float] = []
+    for item in series:
+        rows = item.get("rows", [])
+        for row in rows:
+            all_ticks.append(float(row["tick"]))
+            for col in ("p05", "p50", "p95"):
+                if col in row:
+                    all_values.append(float(row[col]) * (100.0 if percent else 1.0))
+    if not all_ticks or not all_values:
+        return
+    x_min, x_max = min(all_ticks), max(all_ticks)
+    if x_min == x_max:
+        x_max = x_min + 1.0
+    y_min = min(0.0, min(all_values))
+    y_max = max(all_values)
+    if y_max <= y_min:
+        y_max = y_min + 1.0
+    pad = (y_max - y_min) * 0.08
+    y_max += pad
+    if percent and 80.0 <= max(all_values) <= 100.0 and y_min >= 0.0:
+        y_max = min(max(y_max, 100.0), 100.0)
+
+    def sx(value: float) -> float:
+        return left + ((value - x_min) / (x_max - x_min)) * plot_w
+
+    def sy(value: float) -> float:
+        scaled = value * (100.0 if percent else 1.0)
+        return top + plot_h - ((scaled - y_min) / (y_max - y_min)) * plot_h
+
+    _draw_text(draw, (left, 30), title, title_font)
+    _draw_text(draw, (left, 64), subtitle, subtitle_font, fill=(80, 80, 80))
+    draw.rectangle((left, top, left + plot_w, top + plot_h), outline=(70, 70, 70), width=1)
+
+    for i in range(6):
+        frac = i / 5
+        y = top + plot_h - frac * plot_h
+        value = y_min + frac * (y_max - y_min)
+        draw.line((left, y, left + plot_w, y), fill=(220, 220, 220), width=1)
+        _draw_text(draw, (left - 10, int(y)), _fmt_plot_value(value, percent=percent), axis_font, fill=(70, 70, 70), anchor="rm")
+    for i in range(6):
+        frac = i / 5
+        x = left + frac * plot_w
+        value = x_min + frac * (x_max - x_min)
+        draw.line((x, top, x, top + plot_h), fill=(235, 235, 235), width=1)
+        _draw_text(draw, (int(x), top + plot_h + 13), f"{value:.0f}", axis_font, fill=(70, 70, 70), anchor="ma")
+
+    colors = [
+        (40, 91, 214, 255),
+        (215, 76, 53, 255),
+        (36, 150, 97, 255),
+        (130, 82, 190, 255),
+    ]
+    for idx, item in enumerate(series):
+        rows = item.get("rows", [])
+        if not rows:
+            continue
+        color = colors[idx % len(colors)]
+        if item.get("band", False):
+            upper = [(sx(row["tick"]), sy(row["p95"])) for row in rows]
+            lower = [(sx(row["tick"]), sy(row["p05"])) for row in reversed(rows)]
+            band = Image.new("RGBA", (width, height), (255, 255, 255, 0))
+            band_draw = ImageDraw.Draw(band, "RGBA")
+            band_draw.polygon(upper + lower, fill=(color[0], color[1], color[2], 32))
+            image.alpha_composite(band)
+            draw = ImageDraw.Draw(image, "RGBA")
+        points = [(sx(row["tick"]), sy(row["p50"])) for row in rows]
+        if len(points) >= 2:
+            draw.line(points, fill=color, width=2, joint="curve")
+        for x, y in points[:: max(1, len(points) // 12)]:
+            draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=color)
+        legend_x = left + 16 + idx * 260
+        legend_y = height - 38
+        draw.line((legend_x, legend_y, legend_x + 32, legend_y), fill=color, width=2)
+        _draw_text(draw, (legend_x + 42, legend_y - 9), str(item["label"]), label_font)
+
+    _draw_text(draw, (left + plot_w // 2, height - 24), "tick (weeks)", label_font, fill=(50, 50, 50), anchor="ma")
+    if y_label:
+        _draw_text(draw, (left + plot_w, top - 20), y_label, label_font, fill=(50, 50, 50), anchor="ra")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.convert("RGB").save(path)
+
+
+def _draw_failure_bars(
+    path: Path,
+    rows: list[dict[str, object]],
+    *,
+    coupon: float,
+    term: int,
+) -> None:
+    from PIL import Image, ImageDraw
+
+    filtered = [
+        row
+        for row in rows
+        if abs(safe_float(row.get("coupon_target_annual")) - coupon) <= 1e-9
+        and int(safe_float(row.get("bond_term_ticks"))) == term
+    ]
+    if not filtered:
+        filtered = rows[:]
+    filtered = filtered[:12]
+    if not filtered:
+        return
+
+    width = 1200
+    row_h = 58
+    height = 160 + row_h * len(filtered)
+    left, top, right = 300, 102, 55
+    bar_w = width - left - right
+    image = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(image, "RGBA")
+    title_font = _load_font(28)
+    subtitle_font = _load_font(17)
+    axis_font = _load_font(15)
+    label_font = _load_font(15)
+    _draw_text(draw, (left, 30), "Monte Carlo Failure Rates", title_font)
+    _draw_text(
+        draw,
+        (left, 64),
+        f"Coupon {coupon * 100:.1f}%, term {term} ticks; each bar is share of runs ending with the failure condition.",
+        subtitle_font,
+        fill=(80, 80, 80),
+    )
+    metrics = [
+        ("coupon_shortfall_rate", "shortfall", (210, 74, 58, 255)),
+        ("liquidity_leakage_rate", "leakage", (238, 157, 52, 255)),
+        ("household_cash_stress_rate", "cash stress", (82, 125, 206, 255)),
+    ]
+    for i in range(6):
+        x = left + (i / 5) * bar_w
+        draw.line((x, top - 10, x, height - 56), fill=(230, 230, 230), width=1)
+        _draw_text(draw, (int(x), height - 38), f"{i * 20}%", axis_font, fill=(75, 75, 75), anchor="ma")
+    for row_idx, row in enumerate(filtered):
+        y0 = top + row_idx * row_h
+        name = str(row.get("scenario", ""))[:34]
+        _draw_text(draw, (left - 12, y0 + 22), name, label_font, fill=(40, 40, 40), anchor="rm")
+        for metric_idx, (metric, _label, color) in enumerate(metrics):
+            value = max(0.0, min(1.0, safe_float(row.get(metric))))
+            y = y0 + 8 + metric_idx * 15
+            draw.rectangle((left, y, left + value * bar_w, y + 10), fill=color)
+    legend_y = height - 22
+    x = left
+    for metric, label, color in metrics:
+        draw.rectangle((x, legend_y - 10, x + 18, legend_y + 2), fill=color)
+        _draw_text(draw, (x + 26, legend_y - 13), label, label_font)
+        x += 160
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.convert("RGB").save(path)
+
+
+def write_png_figures(
+    output_dir: Path,
+    quantiles: list[dict[str, object]],
+    failure_summary_rows: list[dict[str, object]],
+    args: argparse.Namespace,
+) -> None:
+    key = _select_plot_key(quantiles, args.plot_scenario, args.plot_coupon, args.plot_term)
+    if key is None:
+        return
+    scenario, coupon, term = key
+    suffix = f"{scenario}, coupon {coupon * 100:.1f}%, term {term} ticks"
+    figures = output_dir / "figures"
+
+    _draw_line_chart(
+        figures / "fig_bond_apr_over_time.png",
+        "Projected Bond Fee Yield Over Time",
+        suffix,
+        [
+            {
+                "label": "median; band = 5th-95th percentile",
+                "rows": _metric_rows(quantiles, "bond_annualized_fee_yield", key),
+                "band": True,
+            }
+        ],
+        percent=True,
+        y_label="annualized yield",
+    )
+    _draw_line_chart(
+        figures / "fig_coupon_coverage_over_time.png",
+        "Coupon Coverage Over Time",
+        suffix,
+        [
+            {
+                "label": "median; band = 5th-95th percentile",
+                "rows": _metric_rows(quantiles, "bond_coupon_coverage_ratio", key),
+                "band": True,
+            }
+        ],
+        percent=False,
+        y_label="coverage ratio",
+    )
+    _draw_line_chart(
+        figures / "fig_cumulative_fee_return_over_time.png",
+        "Cumulative Fee Return to LP/Bond Funders",
+        suffix,
+        [
+            {
+                "label": "median; band = 5th-95th percentile",
+                "rows": _metric_rows(quantiles, "bond_cumulative_fee_return_usd", key),
+                "band": True,
+            }
+        ],
+        percent=False,
+        y_label="USD",
+    )
+    _draw_line_chart(
+        figures / "fig_network_connectivity_over_time.png",
+        "Scaling Connected Networks of Pools",
+        suffix,
+        [
+            {
+                "label": "potential listings graph",
+                "rows": _metric_rows(quantiles, "potential_largest_component_share", key),
+                "band": False,
+            },
+            {
+                "label": "realized swap graph",
+                "rows": _metric_rows(quantiles, "realized_largest_component_share", key),
+                "band": False,
+            },
+        ],
+        percent=True,
+        y_label="largest component share",
+    )
+    _draw_line_chart(
+        figures / "fig_report_exposure_over_time.png",
+        "Projected Verified Report Exposure",
+        suffix,
+        [
+            {
+                "label": "median; band = 5th-95th percentile",
+                "rows": _metric_rows(quantiles, "expected_verified_report_exposure", key),
+                "band": True,
+            }
+        ],
+        percent=False,
+        y_label="expected reports",
+    )
+    _draw_failure_bars(
+        figures / "fig_failure_rates.png",
+        failure_summary_rows,
+        coupon=coupon,
+        term=term,
+    )
+
+
 def public_output_privacy_check(output_dir: Path) -> None:
     bad_patterns = ("0x", "[redacted-name", "@")
     for path in output_dir.glob("mc_*"):
@@ -935,6 +1421,9 @@ def main() -> int:
         quantiles,
     )
     write_latex_tables(output_dir, calibration, summary_rows, failure_summary_rows)
+    write_csv_tables(output_dir, calibration, summary_rows, failure_summary_rows)
+    if not args.no_png:
+        write_png_figures(output_dir, quantiles, failure_summary_rows, args)
     public_output_privacy_check(output_dir)
     print(f"Wrote Monte Carlo artifacts to {output_dir}")
     return 0

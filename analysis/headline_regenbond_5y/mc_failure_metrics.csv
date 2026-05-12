@@ -1,0 +1,4 @@
+scenario,run,seed,coupon_target_annual,bond_term_ticks,tick,coupon_shortfall_usd,coupon_shortfall_flag,unpaid_claims_usd,unpaid_claims_flag,liquidity_leakage_ratio,liquidity_leakage_flag,household_cash_stress_ratio,household_cash_stress_flag,realized_edge_top_share,concentration_flag,realized_largest_component_share,potential_largest_component_share
+regenbond_lp_injection,1,502,0.06,260,260,0.0,0,0.0,0,0.040200353530243316,0,0.264,1,0.01472653756118323,0,0.992,0.992
+regenbond_lp_injection,2,503,0.06,260,260,0.0,0,0.0,0,0.0493370862993467,0,0.224,1,0.016999805398793474,0,0.992,0.992
+regenbond_lp_injection,3,504,0.06,260,260,0.0,0,0.0,0,0.05760684276879012,1,0.232,1,0.0217079664140897,0,0.992,0.992
