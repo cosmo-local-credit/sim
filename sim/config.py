@@ -184,6 +184,10 @@ class ScenarioConfig:
     bond_term_ticks: int = 260
     bond_fee_service_share: float = 1.0
     bond_return_mode: str = "lp_sclc"
+    bond_gross_principal_usd: float = 0.0
+    bond_deployed_principal_usd: float = 0.0
+    issuer_reserve_share: float = 0.10
+    issuer_payment_stride_ticks: int = 13
     calibration_profile: str = "sarafu_empirical"
 
     # Insurance / incidents
