@@ -82,6 +82,40 @@ results between terminal and UI, keep the scenario, runs, ticks, seed, coupon
 targets, terms, output directory, analysis stride, and optional performance caps
 identical.
 
+## Sarafu-calibrated paper workflow
+
+The default Streamlit tab is **Sarafu Calibrated**. It starts from the
+privacy-safe Sarafu pool calibration outputs in `../RegenBonds/analysis/`,
+validates a Sarafu-like baseline, separates observed aid/grant liquidity from
+counterfactual LP/bond-purchaser liquidity, and writes manuscript-ready tables,
+LaTeX snippets, PNG figures, and captions. In this research workspace the
+authoritative paper output is:
+
+```text
+../RegenBonds/analysis/monte_carlo/sarafu_calibrated/
+```
+
+When the simulator is cloned standalone without a sibling `RegenBonds` repo,
+the runner falls back to local `analysis/sarafu_calibrated/` output and expects
+`--calibration-dir` to point at a directory containing the aggregate calibration
+CSVs.
+
+CLI equivalent:
+
+```bash
+python scripts/run_sarafu_calibrated_monte_carlo.py \
+  --runs 100 \
+  --ticks 52 \
+  --seed 1 \
+  --policies aid_baseline,broad_equal,strong_activity,weak_capacity \
+  --coupon-targets 0,0.03,0.06,0.09,0.12 \
+  --term 260 \
+  --output ../RegenBonds/analysis/monte_carlo/sarafu_calibrated
+```
+
+The UX step buttons rerun this same command with a longer tick horizon, so
+terminal and Streamlit outputs match when the displayed command is identical.
+
 ---
 
 ## Core model (agentic logic)

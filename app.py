@@ -16,6 +16,16 @@ st.set_page_config(page_title="CLC Pool Network Simulator", layout="wide")
 APP_ROOT = Path(__file__).resolve().parent
 DEFAULT_REGENBOND_MC_OUTPUT = APP_ROOT.parent / "RegenBonds" / "analysis" / "monte_carlo"
 REGENBOND_MC_SCRIPT = APP_ROOT / "scripts" / "run_regenbond_monte_carlo.py"
+PAPER_SARAFU_CALIBRATED_OUTPUT = (
+    APP_ROOT.parent / "RegenBonds" / "analysis" / "monte_carlo" / "sarafu_calibrated"
+)
+LOCAL_SARAFU_CALIBRATED_OUTPUT = APP_ROOT / "analysis" / "sarafu_calibrated"
+DEFAULT_SARAFU_CALIBRATED_OUTPUT = (
+    PAPER_SARAFU_CALIBRATED_OUTPUT
+    if (APP_ROOT.parent / "RegenBonds" / "analysis").exists()
+    else LOCAL_SARAFU_CALIBRATED_OUTPUT
+)
+SARAFU_CALIBRATED_SCRIPT = APP_ROOT / "scripts" / "run_sarafu_calibrated_monte_carlo.py"
 REGENBOND_MC_SCENARIOS = [
     "regenbond_lp_injection",
     "sarafu_like_pools",
@@ -27,6 +37,19 @@ REGENBOND_MC_SCENARIOS = [
     "stress_governance_diversion",
     "stress_liquidity_concentration",
     "all",
+]
+SARAFU_CALIBRATED_POLICIES = [
+    "aid_baseline",
+    "broad_equal",
+    "strong_activity",
+    "weak_capacity",
+    "mixed_aid_plus_bond",
+]
+SARAFU_CALIBRATED_DEFAULT_POLICIES = [
+    "aid_baseline",
+    "broad_equal",
+    "strong_activity",
+    "weak_capacity",
 ]
 
 
@@ -54,7 +77,7 @@ def reset_engine(reset_config: bool = False) -> None:
 engine = get_engine()
 
 st.title("CLC Pool Network Simulator (MVP-1)")
-st.caption("Time model: 1 tick = 1 week (4 ticks = 1 month).")
+st.caption("Time model: 1 tick = 1 week. The first tab is the Sarafu-calibrated paper workflow.")
 
 def _fmt_duration(seconds: float) -> str:
     if seconds < 0:
@@ -189,6 +212,30 @@ def _render_mc_metric_chart(
         chart_df = chart_df[chart_df["bond_term_ticks"] == int(term)]
     if chart_df.empty:
         st.info(f"No Monte Carlo quantile rows for {metric}.")
+        return
+    chart_df = chart_df.sort_values("tick")
+    st.subheader(title)
+    st.line_chart(chart_df, x="tick", y=["p05", "p50", "p95"])
+
+def _render_sarafu_quantile_chart(
+    qdf: pd.DataFrame,
+    title: str,
+    metric: str,
+    policy: str,
+    coupon: float | None,
+    term: int | None,
+) -> None:
+    if qdf.empty:
+        return
+    chart_df = qdf[qdf["metric"] == metric].copy()
+    if "policy" in chart_df:
+        chart_df = chart_df[chart_df["policy"] == policy]
+    if coupon is not None and "coupon_target_annual" in chart_df:
+        chart_df = chart_df[chart_df["coupon_target_annual"].round(10) == round(float(coupon), 10)]
+    if term is not None and "bond_term_ticks" in chart_df:
+        chart_df = chart_df[chart_df["bond_term_ticks"] == int(term)]
+    if chart_df.empty:
+        st.info(f"No Sarafu-calibrated quantile rows for {metric}.")
         return
     chart_df = chart_df.sort_values("tick")
     st.subheader(title)
@@ -428,6 +475,7 @@ def _render_swaps_svg(positions, edges, balances, tooltips, width: int, height: 
 
 with st.sidebar:
     st.header("Sim Controls")
+    st.caption("These controls affect the live engine tabs. The Sarafu-calibrated paper workflow uses the controls in the first tab.")
 
     st.subheader("Run")
     if st.button("Restart simulation"):
@@ -578,8 +626,9 @@ with st.sidebar:
                         })
             st.session_state.batch_results = results
 
-tab_network, tab_clc, tab_monte_carlo, tab_noam_overview, tab2, tab3, tab4, tab_network_controls, tab_noam_controls, tab_clc_controls = st.tabs(
+tab_sarafu_calibrated, tab_network, tab_clc, tab_monte_carlo, tab_noam_overview, tab2, tab3, tab4, tab_network_controls, tab_noam_controls, tab_clc_controls = st.tabs(
     [
+        "Sarafu Calibrated",
         "Network Overview",
         "CLC Overview",
         "RegenBond MC",
@@ -592,6 +641,211 @@ tab_network, tab_clc, tab_monte_carlo, tab_noam_overview, tab2, tab3, tab4, tab_
         "CLC Controls",
     ]
 )
+
+with tab_sarafu_calibrated:
+    st.subheader("Sarafu-Calibrated RegenBond Workflow")
+    st.caption(
+        "This is the default paper workflow: Sarafu implementation evidence, calibrated baseline, aid/grant liquidity, then LP/bond counterfactuals. "
+        "The command shown here is the exact CLI-equivalent run."
+    )
+
+    if "sarafu_calibrated_ticks" not in st.session_state:
+        st.session_state.sarafu_calibrated_ticks = 13
+
+    if not SARAFU_CALIBRATED_SCRIPT.exists():
+        st.error(f"Sarafu-calibrated runner not found: {SARAFU_CALIBRATED_SCRIPT}")
+    else:
+        c1, c2, c3 = st.columns(3)
+        sarafu_runs = c1.number_input("Runs per policy/coupon", min_value=1, max_value=1000, value=10, step=1)
+        sarafu_seed = c2.number_input("Seed", min_value=1, max_value=10_000_000, value=1, step=1, key="sarafu_seed")
+        tick_input = c3.number_input(
+            "Current horizon (ticks)",
+            min_value=1,
+            max_value=2000,
+            value=int(st.session_state.sarafu_calibrated_ticks),
+            step=1,
+            key="sarafu_tick_input",
+            help="One tick is one week. Use the step buttons to rerun the CLI with a longer horizon.",
+        )
+        st.session_state.sarafu_calibrated_ticks = int(tick_input)
+
+        c4, c5, c6 = st.columns(3)
+        sarafu_coupons = c4.text_input("Coupon targets", value="0,0.03,0.06,0.09,0.12", key="sarafu_coupons")
+        sarafu_term = c5.number_input("Bond term (ticks)", min_value=1, max_value=2600, value=260, step=13)
+        sarafu_principal = c6.number_input("LP/bond principal", min_value=0.0, value=400_000.0, step=25_000.0)
+
+        c7, c8, c9 = st.columns(3)
+        sarafu_fee_rate = c7.number_input("Pool fee rate", min_value=0.0, max_value=1.0, value=0.02, step=0.005, format="%.4f")
+        sarafu_service_share = c8.number_input(
+            "Fee-service share",
+            min_value=0.0,
+            max_value=1.0,
+            value=1.0,
+            step=0.05,
+            help="Share of modeled fees explicitly routed to bond-service support.",
+        )
+        sarafu_stride = c9.number_input("Analysis stride", min_value=1, max_value=1000, value=1, step=1)
+
+        sarafu_policies = st.multiselect(
+            "Policies",
+            SARAFU_CALIBRATED_POLICIES,
+            default=SARAFU_CALIBRATED_DEFAULT_POLICIES,
+            help="Aid baseline is historical grant-like liquidity; the other policies are LP/bond counterfactuals.",
+        )
+        if not sarafu_policies:
+            st.warning("Select at least one policy.")
+            sarafu_policies = SARAFU_CALIBRATED_DEFAULT_POLICIES
+
+        c10, c11 = st.columns(2)
+        sarafu_output = c10.text_input(
+            "Output directory",
+            value=str(DEFAULT_SARAFU_CALIBRATED_OUTPUT),
+            help="Paper artifacts are written under tables/, figures/, and latex/ in this directory.",
+        )
+        sarafu_write_png = c11.checkbox("Write PNG figures", value=True)
+
+        step_run_requested = False
+        b1, b2, b3, b4 = st.columns(4)
+        if b1.button("Step +1 week"):
+            st.session_state.sarafu_calibrated_ticks = int(st.session_state.sarafu_calibrated_ticks) + 1
+            step_run_requested = True
+        if b2.button("Step +4 weeks"):
+            st.session_state.sarafu_calibrated_ticks = int(st.session_state.sarafu_calibrated_ticks) + 4
+            step_run_requested = True
+        if b3.button("Reset to 13 weeks"):
+            st.session_state.sarafu_calibrated_ticks = 13
+            st.rerun()
+        current_sarafu_ticks = int(st.session_state.sarafu_calibrated_ticks)
+
+        sarafu_cmd = [
+            sys.executable,
+            str(SARAFU_CALIBRATED_SCRIPT),
+            "--runs",
+            str(int(sarafu_runs)),
+            "--ticks",
+            str(current_sarafu_ticks),
+            "--seed",
+            str(int(sarafu_seed)),
+            "--policies",
+            ",".join(sarafu_policies),
+            "--coupon-targets",
+            str(sarafu_coupons),
+            "--term",
+            str(int(sarafu_term)),
+            "--principal",
+            str(float(sarafu_principal)),
+            "--fee-rate",
+            str(float(sarafu_fee_rate)),
+            "--bond-fee-service-share",
+            str(float(sarafu_service_share)),
+            "--analysis-stride",
+            str(int(sarafu_stride)),
+            "--progress-every",
+            "25",
+            "--output",
+            str(sarafu_output),
+        ]
+        if not sarafu_write_png:
+            sarafu_cmd.append("--no-png")
+
+        st.text_area("Exact CLI-equivalent command", _short_command(sarafu_cmd), height=92)
+        run_requested = b4.button("Run / refresh")
+        if step_run_requested or run_requested:
+            start_ts = time.time()
+            with st.spinner("Running Sarafu-calibrated CLI-equivalent command..."):
+                proc = subprocess.run(
+                    sarafu_cmd,
+                    cwd=str(APP_ROOT),
+                    text=True,
+                    capture_output=True,
+                )
+            elapsed = time.time() - start_ts
+            st.session_state.sarafu_calibrated_last = {
+                "returncode": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "cmd": _short_command(sarafu_cmd),
+                "output": str(sarafu_output),
+                "elapsed": elapsed,
+            }
+            if proc.returncode == 0:
+                st.success(f"Sarafu-calibrated artifacts completed in {_fmt_duration(elapsed)}.")
+            else:
+                st.error(f"Sarafu-calibrated runner failed with exit code {proc.returncode}.")
+
+        last_sarafu = st.session_state.get("sarafu_calibrated_last")
+        if last_sarafu:
+            st.caption(f"Last Sarafu-calibrated command completed in {_fmt_duration(float(last_sarafu.get('elapsed', 0.0)))}")
+            with st.expander("Runner stdout", expanded=False):
+                st.code(last_sarafu.get("stdout", "") or "(empty)")
+            if last_sarafu.get("stderr"):
+                with st.expander("Runner stderr", expanded=True):
+                    st.code(last_sarafu.get("stderr", ""))
+
+        sarafu_dir = Path(sarafu_output)
+        validation_df = _read_csv_if_exists(sarafu_dir / "tables" / "baseline_validation_table.csv")
+        counterfactual_df = _read_csv_if_exists(sarafu_dir / "tables" / "counterfactual_results_table.csv")
+        empirical_df = _read_csv_if_exists(sarafu_dir / "tables" / "empirical_tier_summary.csv")
+        sarafu_qdf = _read_csv_if_exists(sarafu_dir / "tables" / "counterfactual_timeseries_quantiles.csv")
+
+        if validation_df.empty:
+            st.info("No Sarafu-calibrated output found at the selected directory yet.")
+        else:
+            kpi_cols = st.columns(4)
+            review_count = int((validation_df["pass_fail"] != "pass").sum()) if "pass_fail" in validation_df else 0
+            kpi_cols[0].metric("Validation rows for review", review_count)
+            if not empirical_df.empty and "pool_count" in empirical_df:
+                kpi_cols[1].metric("Sarafu pool templates", int(empirical_df["pool_count"].sum()))
+            if not counterfactual_df.empty and "policy" in counterfactual_df:
+                kpi_cols[2].metric("Policies reported", counterfactual_df["policy"].nunique())
+            kpi_cols[3].metric("Current horizon", f"{current_sarafu_ticks} weeks")
+
+            st.subheader("Baseline Validation")
+            st.dataframe(_format_table_numbers(validation_df), use_container_width=True)
+
+            if not counterfactual_df.empty:
+                st.subheader("Counterfactual Results")
+                st.dataframe(_format_table_numbers(counterfactual_df), use_container_width=True)
+
+            if not sarafu_qdf.empty:
+                chart_policies = sorted(sarafu_qdf["policy"].dropna().unique().tolist())
+                chart_coupons = sorted(sarafu_qdf["coupon_target_annual"].dropna().unique().tolist())
+                chart_terms = sorted(sarafu_qdf["bond_term_ticks"].dropna().unique().tolist())
+                c12, c13, c14 = st.columns(3)
+                default_policy_idx = chart_policies.index("weak_capacity") if "weak_capacity" in chart_policies else 0
+                chart_policy = c12.selectbox("Chart policy", chart_policies, index=default_policy_idx)
+                chart_coupon = c13.selectbox("Chart coupon", chart_coupons, index=0)
+                chart_term = c14.selectbox("Chart term", chart_terms, index=0)
+                _render_sarafu_quantile_chart(
+                    sarafu_qdf,
+                    "Fee Return to LP/Bond Purchaser",
+                    "fee_return_to_bond_lp",
+                    chart_policy,
+                    float(chart_coupon),
+                    int(chart_term),
+                )
+                _render_sarafu_quantile_chart(
+                    sarafu_qdf,
+                    "Coupon Coverage",
+                    "coupon_coverage",
+                    chart_policy,
+                    float(chart_coupon),
+                    int(chart_term),
+                )
+                _render_sarafu_quantile_chart(
+                    sarafu_qdf,
+                    "Repayment Closure",
+                    "repayment_closure",
+                    chart_policy,
+                    float(chart_coupon),
+                    int(chart_term),
+                )
+
+            figure_paths = sorted((sarafu_dir / "figures").glob("fig_*.png"))
+            if figure_paths:
+                st.subheader("Paper Figures")
+                for fig_path in figure_paths:
+                    st.image(str(fig_path), caption=fig_path.name, use_container_width=True)
 
 with tab_monte_carlo:
     st.subheader("Regenerative Bond Monte Carlo")

@@ -205,6 +205,10 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Local Sarafu-calibrated paper workflow outputs. Authoritative paper outputs
+# live under ../RegenBonds/analysis/monte_carlo/sarafu_calibrated/.
+analysis/sarafu_calibrated*/
 sim/__pycache__/__init__.cpython-312.pyc
 sim/__pycache__/__init__.cpython-312.pyc
 sim/__pycache__/config.cpython-312.pyc
