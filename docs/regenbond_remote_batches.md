@@ -46,6 +46,17 @@ Run this on your local computer after the full validation finishes:
 ```bash
 mkdir -p /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo
 
+scp -i ~/.ssh/id_ed25519 -r root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/
+
+scp -i ~/.ssh/id_ed25519 root@128.140.120.36:~/sim/analysis/monte_carlo/validation-full.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation/
+```
+
+If you have the `wor-testing` SSH alias configured, the same pull can be written
+as:
+
+```bash
 scp -r root@wor-testing:~/sim/analysis/monte_carlo/engine_validation \
   /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/
 
@@ -53,15 +64,50 @@ scp root@wor-testing:~/sim/analysis/monte_carlo/validation-full.log \
   /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation/
 ```
 
-If you do not have the `wor-testing` SSH alias configured, use the explicit
-host and key:
+After copying, check the local artifacts:
 
 ```bash
-scp -i ~/.ssh/id_ed25519 -r root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation \
+cat /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation/engine_validation_summary.csv
+wc -l /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation/engine_validation_errors.csv
+ls -lh /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation
+```
+
+After full validation passes, run the bond-issuer frontier smoke:
+
+```bash
+./scripts/start_regenbond_batch_tmux.sh frontier-smoke
+tail -f analysis/monte_carlo/frontier-smoke.log
+```
+
+Pull the smoke output back locally:
+
+```bash
+mkdir -p /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo
+
+scp -i ~/.ssh/id_ed25519 -r root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier_smoke \
   /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/
 
-scp -i ~/.ssh/id_ed25519 root@128.140.120.36:~/sim/analysis/monte_carlo/validation-full.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation/
+scp -i ~/.ssh/id_ed25519 root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-smoke.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_smoke/
+```
+
+If the smoke output looks structurally correct, run the pilot:
+
+```bash
+./scripts/start_regenbond_batch_tmux.sh frontier-pilot
+tail -f analysis/monte_carlo/frontier-pilot.log
+```
+
+Pull the pilot output back locally:
+
+```bash
+mkdir -p /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo
+
+scp -i ~/.ssh/id_ed25519 -r root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier_pilot \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/
+
+scp -i ~/.ssh/id_ed25519 root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-pilot.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
 ```
 
 ## Server Setup
@@ -101,22 +147,25 @@ PYTHON_BIN=/opt/venvs/sim/bin/python ./scripts/run_regenbond_remote_batch.sh val
 
 ## Start Detached
 
-Start the full validation already detached:
+Start any batch already detached:
 
 ```bash
 ./scripts/start_regenbond_batch_tmux.sh validation-full
 ```
 
-The launcher starts a detached `tmux` session named `regenbond` and writes:
+The launcher starts a detached `tmux` session named `regenbond` and writes a log
+named after the job:
 
 ```text
-analysis/monte_carlo/validation-full.log
+analysis/monte_carlo/<job>.log
 ```
 
 Check progress:
 
 ```bash
 tail -f analysis/monte_carlo/validation-full.log
+tail -f analysis/monte_carlo/frontier-smoke.log
+tail -f analysis/monte_carlo/frontier-pilot.log
 ```
 
 Attach only if you want an interactive view:
@@ -183,10 +232,12 @@ tail -f analysis/monte_carlo/validation-full.log
 2. If the pilot passes, run `validation-full`.
 3. Confirm `analysis/monte_carlo/engine_validation/engine_validation_summary.csv`
    has `status=pass`.
-4. Run `frontier-pilot`.
-5. Inspect `bond_issuer_frontier_safety.csv`, `safe_injection_frontier.csv`, and
+4. Run `frontier-smoke` and inspect issuer accounting, reserve draw, unpaid claims,
+   and matched-baseline guardrail deltas.
+5. Run `frontier-pilot`.
+6. Inspect `bond_issuer_frontier_safety.csv`, `safe_injection_frontier.csv`, and
    `paper_integration_notes.md`.
-6. Run `frontier-publication` only after the validation gate and pilot outputs
+7. Run `frontier-publication` only after the validation gate and pilot outputs
    look correct.
 
 ## Expected Validation Outputs

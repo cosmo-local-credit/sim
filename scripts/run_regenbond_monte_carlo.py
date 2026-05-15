@@ -569,6 +569,22 @@ def apply_network_context(
     args._current_initial_consumers = role_counts["consumers"]
 
 
+def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Calibration, ticks: int, prefix: str) -> None:
+    empirical_targets = empirical_tier_targets(calibration, int(ticks))
+    empirical_total_swaps = sum(safe_float(row["total_swap_events_horizon"]) for row in empirical_targets)
+    empirical_total_backing = sum(safe_float(row["backing_liquidity_inflow"]) for row in empirical_targets)
+    base_pool_count = max(1, len(calibration.pool_rows))
+    swap_floor = int(math.ceil((empirical_total_swaps / max(1, int(ticks))) * 0.90))
+    setattr(args, f"_{prefix}_swap_floor_per_tick", swap_floor)
+    setattr(args, f"_{prefix}_route_requests_per_tick", 1)
+    setattr(args, f"_{prefix}_swap_budget_per_tick", max(60, int(math.ceil(swap_floor * 0.25))))
+    setattr(args, f"_{prefix}_swap_attempts_max_per_pool", 2)
+    setattr(args, f"_{prefix}_swap_sustain_max_extra_attempts", max(600, int(math.ceil(swap_floor * 1.50))))
+    setattr(args, f"_{prefix}_swap_sustain_max_rounds", 2)
+    setattr(args, f"_{prefix}_historical_backing_total_usd", empirical_total_backing)
+    setattr(args, f"_{prefix}_backing_shock_per_pool", empirical_total_backing / base_pool_count)
+
+
 def certified_pool_capacity(calibration: Calibration, network_scale: str, policy: str) -> dict[str, float]:
     factor = NETWORK_SCALE_FACTORS.get(network_scale, 1.0)
     strong_allocations = [
@@ -705,16 +721,47 @@ def scenario_config(
             + cfg.initial_consumers
             + cfg.initial_liquidity_providers
         )
-        cfg.random_route_requests_per_tick = max(4, int(round(4 * math.sqrt(factor))))
-        cfg.swap_requests_budget_per_tick = max(100, int(round(100 * factor)))
+        cfg.producer_inflow_per_tick = 0.0
+        cfg.consumer_inflow_per_tick = 0.0
+        cfg.lender_inflow_per_tick = 0.0
+        cfg.stable_inflow_per_tick = 0.0
+        cfg.stable_supply_growth_rate = 0.0
+        cfg.stable_supply_noise = 0.0
+        route_request_base = int(getattr(args, "_frontier_route_requests_per_tick", 1))
+        cfg.random_route_requests_per_tick = max(1, int(round(route_request_base * math.sqrt(factor))))
+        frontier_floor = int(math.ceil(int(getattr(args, "_frontier_swap_floor_per_tick", 0)) * factor))
+        if frontier_floor > 0:
+            cfg.swap_requests_budget_per_tick = max(
+                int(round(100 * factor)),
+                int(math.ceil(frontier_floor * 0.25)),
+            )
+            cfg.swap_attempts_max_per_pool = int(getattr(args, "_frontier_swap_attempts_max_per_pool", 2))
+            cfg.swap_sustain_window_ticks = 0
+            cfg.swap_sustain_floor_per_tick = frontier_floor
+            cfg.swap_sustain_max_extra_attempts = max(
+                int(math.ceil(int(getattr(args, "_frontier_swap_sustain_max_extra_attempts", 600)) * factor)),
+                int(math.ceil(frontier_floor * 1.50)),
+            )
+            cfg.swap_sustain_max_rounds = int(getattr(args, "_frontier_swap_sustain_max_rounds", 2))
+        else:
+            cfg.swap_requests_budget_per_tick = max(100, int(round(100 * factor)))
         cfg.noam_topk_pools_per_asset = max(cfg.noam_topk_pools_per_asset, int(round(16 * math.sqrt(factor))))
         cfg.noam_topm_out_per_pool = max(cfg.noam_topm_out_per_pool, int(round(16 * math.sqrt(factor))))
         cfg.noam_beam_width = max(cfg.noam_beam_width, int(round(40 * math.sqrt(factor))))
         cfg.noam_clearing_budget_usd = float(cfg.noam_clearing_budget_usd) * factor
-        if factor > 1.0:
+        if factor <= 1.0 + 1e-9:
+            cfg.max_hops = 2
+            cfg.noam_max_hops = 2
+            cfg.noam_overlay_enabled = False
+            cfg.noam_clearing_enabled = False
+        else:
             cfg.p_offer_overlap = min(0.95, cfg.p_offer_overlap + 0.06 * math.log2(factor))
             cfg.p_want_overlap = min(0.97, cfg.p_want_overlap + 0.04 * math.log2(factor))
             cfg.desired_assets_growth_per_asset = min(0.50, cfg.desired_assets_growth_per_asset + 0.05 * math.log2(factor))
+        historical_backing_total = float(getattr(args, "_frontier_historical_backing_total_usd", 0.0))
+        if historical_backing_total > 0.0:
+            cfg.stable_shock_tick = 1
+            cfg.stable_shock_amount = (historical_backing_total * factor) / max(1, int(cfg.max_pools or 1))
         cfg.calibration_profile = "bond_issuer_frontier"
     elif scenario == "stress_weak_pool_repayment":
         cfg.initial_liquidity_providers = 1
@@ -2511,28 +2558,14 @@ def run_sarafu_engine_validation(args: argparse.Namespace, calibration: Calibrat
     )
     args._current_certified_pool_count = 0.0
     args._current_certified_capacity_usd = 0.0
-    empirical_targets = empirical_tier_targets(calibration, int(args.ticks))
-    empirical_total_swaps = sum(safe_float(row["total_swap_events_horizon"]) for row in empirical_targets)
-    empirical_total_backing = sum(safe_float(row["backing_liquidity_inflow"]) for row in empirical_targets)
-    target_pool_count = sum(int(count) for count in getattr(args, "_target_tier_counts", {}).values()) or 1
     # Validation should target current Sarafu activity rather than ratcheting
     # upward from recent engine activity. The scenario uses shallow pool swaps,
     # disables NOAM overlay/clearing, and disables recurring stable growth.
     # Denser NOAM routing/clearing is reserved for scaled frontier networks
     # after this current-network gate passes.
-    args._validation_swap_floor_per_tick = int(
-        math.ceil((empirical_total_swaps / max(1, int(args.ticks))) * 0.90)
-    )
-    args._validation_route_requests_per_tick = 1
-    args._validation_swap_budget_per_tick = max(60, int(math.ceil(args._validation_swap_floor_per_tick * 0.25)))
-    args._validation_swap_attempts_max_per_pool = 2
-    args._validation_swap_sustain_max_extra_attempts = max(
-        600, int(math.ceil(args._validation_swap_floor_per_tick * 1.50))
-    )
-    args._validation_swap_sustain_max_rounds = 2
+    configure_sarafu_activity_controls(args, calibration, int(args.ticks), "validation")
     # Sarafu had substantial historical backing/liquidity inflow. This shock is
     # validation-only historical backing, not a bond/LP injection.
-    args._validation_backing_shock_per_pool = empirical_total_backing / max(1, target_pool_count)
     term_ticks = selected_terms(args)[0] if selected_terms(args) else int(args.ticks)
     bond_rows: list[dict[str, object]] = []
     network_rows: list[dict[str, object]] = []
@@ -2629,10 +2662,20 @@ def summarize_frontier_cell(
     route_p50 = percentile(route_values, 0.50)
     swap_p50 = percentile(swap_values, 0.50)
     stress_p50 = percentile(stress_values, 0.50)
+    stress_p95 = percentile(stress_values, 0.95)
+    leakage_p50 = percentile(leakage_values, 0.50)
+    leakage_p95 = percentile(leakage_values, 0.95)
+    baseline_stress_p50 = baseline.get("household_cash_stress_p50", 0.0)
+    baseline_stress_p95 = baseline.get("household_cash_stress_p95", baseline_stress_p50)
+    baseline_leakage_p50 = baseline.get("liquidity_leakage_p50", 0.0)
+    baseline_leakage_p95 = baseline.get("liquidity_leakage_p95", baseline_leakage_p50)
+    stress_delta_p95 = max(0.0, stress_p95 - baseline_stress_p95)
+    leakage_delta_p95 = max(0.0, leakage_p95 - baseline_leakage_p95)
     material_decline = (
         route_p50 < baseline.get("route_success_p50", 0.0) - 0.05
         or swap_p50 < baseline.get("swap_volume_p50", 0.0) * 0.85
-        or stress_p50 > baseline.get("household_cash_stress_p50", 0.0) + 0.05
+        or stress_p50 > baseline_stress_p50 + 0.05
+        or leakage_p50 > baseline_leakage_p50 + 0.05
     )
     constraints = []
     if percentile(service_values, 0.50) < 1.25:
@@ -2641,10 +2684,10 @@ def summarize_frontier_cell(
         constraints.append("p05_service_coverage")
     if percentile(route_values, 0.05) < 0.85:
         constraints.append("p05_route_success")
-    if percentile(stress_values, 0.95) > 0.20:
-        constraints.append("p95_household_cash_stress")
-    if percentile(leakage_values, 0.95) > 0.15:
-        constraints.append("p95_liquidity_leakage")
+    if stress_delta_p95 > 0.20:
+        constraints.append("p95_household_cash_stress_delta")
+    if leakage_delta_p95 > 0.15:
+        constraints.append("p95_liquidity_leakage_delta")
     if percentile(claims_ratios, 0.95) > 0.01:
         constraints.append("p95_unpaid_claims")
     if percentile(concentration_values, 0.95) > 0.25:
@@ -2668,14 +2711,19 @@ def summarize_frontier_cell(
         "issuer_reserve_draw_p95": percentile(reserve_draw_values, 0.95),
         "issuer_unpaid_scheduled_claim_p95": percentile(unpaid_values, 0.95),
         "route_success_p05": percentile(route_values, 0.05),
-        "household_cash_stress_p95": percentile(stress_values, 0.95),
-        "liquidity_leakage_p95": percentile(leakage_values, 0.95),
+        "household_cash_stress_p95": stress_p95,
+        "household_cash_stress_delta_p95": stress_delta_p95,
+        "liquidity_leakage_p95": leakage_p95,
+        "liquidity_leakage_delta_p95": leakage_delta_p95,
         "unpaid_claims_ratio_p95": percentile(claims_ratios, 0.95),
         "realized_edge_concentration_p95": percentile(concentration_values, 0.95),
         "swap_volume_usd_total_p50": swap_p50,
         "baseline_route_success_p50": baseline.get("route_success_p50", 0.0),
         "baseline_swap_volume_p50": baseline.get("swap_volume_p50", 0.0),
-        "baseline_household_cash_stress_p50": baseline.get("household_cash_stress_p50", 0.0),
+        "baseline_household_cash_stress_p50": baseline_stress_p50,
+        "baseline_household_cash_stress_p95": baseline_stress_p95,
+        "baseline_liquidity_leakage_p50": baseline_leakage_p50,
+        "baseline_liquidity_leakage_p95": baseline_leakage_p95,
         "material_decline_vs_no_bond": int(material_decline),
         "safe": int(not constraints),
         "binding_constraint": ";".join(constraints),
@@ -2709,19 +2757,20 @@ def write_frontier_tables(output_dir: Path, safety_rows: list[dict[str, object]]
         r"\begingroup",
         r"\small",
         r"\setlength{\tabcolsep}{3pt}",
-        r"\begin{tabular}{lrrrrl}",
+        r"\begin{tabular}{lrrrrrl}",
         r"\toprule",
-        r"Scale & Principal ratio & Service p05 & Route p05 & Stress p95 & Binding \\",
+        r"Scale & Principal ratio & Service p05 & Route p05 & Stress $\Delta$ p95 & Leak $\Delta$ p95 & Binding \\",
         r"\midrule",
     ]
     for row in safety_rows[:24]:
         guardrail_lines.append(
-            "{scale} & {ratio:.2f} & {service:.2f} & {route} & {stress} & {binding} \\\\".format(
+            "{scale} & {ratio:.2f} & {service:.2f} & {route} & {stress} & {leakage} & {binding} \\\\".format(
                 scale=latex_escape(row["network_scale"]),
                 ratio=safe_float(row["principal_ratio"]),
                 service=safe_float(row["service_coverage_p05"]),
                 route=fmt_pct(row["route_success_p05"]),
-                stress=fmt_pct(row["household_cash_stress_p95"]),
+                stress=fmt_pct(row.get("household_cash_stress_delta_p95", 0.0)),
+                leakage=fmt_pct(row.get("liquidity_leakage_delta_p95", 0.0)),
                 binding=latex_escape(row["binding_constraint"] or "safe"),
             )
         )
@@ -2883,7 +2932,8 @@ def write_frontier_notes(output_dir: Path, args: argparse.Namespace, summary_row
         "",
         "## Non-Extraction Gate",
         "",
-        "A cell is safe only when service coverage, route success, household cash stress, liquidity leakage, unpaid claims, edge concentration, and matched no-bond degradation tests all pass.",
+        "A cell is safe only when service coverage, route success, incremental household cash stress, incremental liquidity leakage, unpaid claims, edge concentration, and matched no-bond degradation tests all pass.",
+        "Cash-stress and liquidity-leakage guardrails are evaluated as deltas against the matched no-bond baseline for the same network scale and seeds.",
         "",
         "## Headline Frontier",
         "",
@@ -3004,6 +3054,7 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
             f"Validation gate status for frontier is {validation_status}; outputs should be treated as non-final.",
             flush=True,
         )
+    configure_sarafu_activity_controls(args, calibration, int(args.ticks), "frontier")
     network_scales = parse_str_list(args.network_scales)
     for scale in network_scales:
         if scale not in NETWORK_SCALE_FACTORS:
@@ -3040,6 +3091,15 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
             ),
             "household_cash_stress_p50": percentile(
                 [safe_float(row.get("household_cash_stress_ratio")) for row in baseline_rows], 0.50
+            ),
+            "household_cash_stress_p95": percentile(
+                [safe_float(row.get("household_cash_stress_ratio")) for row in baseline_rows], 0.95
+            ),
+            "liquidity_leakage_p50": percentile(
+                [safe_float(row.get("stable_liquidity_leakage_ratio_cumulative")) for row in baseline_rows], 0.50
+            ),
+            "liquidity_leakage_p95": percentile(
+                [safe_float(row.get("stable_liquidity_leakage_ratio_cumulative")) for row in baseline_rows], 0.95
             ),
         }
 
@@ -3130,7 +3190,9 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
                 "issuer_unpaid_scheduled_claim_p95": safe_float(best.get("issuer_unpaid_scheduled_claim_p95")),
                 "route_success_p05": safe_float(best.get("route_success_p05")),
                 "household_cash_stress_p95": safe_float(best.get("household_cash_stress_p95")),
+                "household_cash_stress_delta_p95": safe_float(best.get("household_cash_stress_delta_p95")),
                 "liquidity_leakage_p95": safe_float(best.get("liquidity_leakage_p95")),
+                "liquidity_leakage_delta_p95": safe_float(best.get("liquidity_leakage_delta_p95")),
                 "unpaid_claims_ratio_p95": safe_float(best.get("unpaid_claims_ratio_p95")),
                 "realized_edge_concentration_p95": safe_float(best.get("realized_edge_concentration_p95")),
             }
@@ -3153,7 +3215,9 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
                 "issuer_unpaid_scheduled_claim_p95": safe_float(best.get("issuer_unpaid_scheduled_claim_p95")),
                 "route_success_p05": safe_float(best.get("route_success_p05")),
                 "household_cash_stress_p95": safe_float(best.get("household_cash_stress_p95")),
+                "household_cash_stress_delta_p95": safe_float(best.get("household_cash_stress_delta_p95")),
                 "liquidity_leakage_p95": safe_float(best.get("liquidity_leakage_p95")),
+                "liquidity_leakage_delta_p95": safe_float(best.get("liquidity_leakage_delta_p95")),
                 "unpaid_claims_ratio_p95": safe_float(best.get("unpaid_claims_ratio_p95")),
                 "realized_edge_concentration_p95": safe_float(best.get("realized_edge_concentration_p95")),
             }
