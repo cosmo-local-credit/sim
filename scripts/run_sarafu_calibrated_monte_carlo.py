@@ -2,8 +2,8 @@
 """Sarafu-grounded Monte Carlo artifacts for the RegenBonds paper.
 
 This runner is intentionally paper-facing. It consumes only privacy-safe
-aggregate calibration files from RegenBonds/analysis, anonymizes pools as
-templates, validates a Sarafu-like baseline against empirical moments, and then
+aggregate calibration files, anonymizes pools as templates, validates a
+Sarafu-like baseline against empirical moments, and then
 simulates counterfactual liquidity policies:
 
 * aid_grant_injection: historical, non-repayable Sarafu-style liquidity.
@@ -103,10 +103,13 @@ POLICY_LABELS = {
 
 
 def default_calibration_dir() -> Path:
+    local = SIM_ROOT / "analysis" / "sarafu_calibration"
+    if local.exists():
+        return local
     sibling = WORKSPACE_ROOT / "RegenBonds" / "analysis"
     if sibling.exists():
         return sibling
-    return SIM_ROOT / "analysis" / "sarafu_calibration"
+    return local
 
 
 def default_output_dir() -> Path:

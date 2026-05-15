@@ -1,0 +1,4 @@
+tier,n_pools,borrow_proxy_matured_events,weighted_matured_borrow_return_rate,median_matured_borrow_return_rate
+strong,45,964,0.566390,0.000000
+moderate,16,1112,0.625000,0.000000
+weak,57,519,0.341040,0.000000

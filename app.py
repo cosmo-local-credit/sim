@@ -14,7 +14,13 @@ from sim.engine import SimulationEngine
 st.set_page_config(page_title="CLC Pool Network Simulator", layout="wide")
 
 APP_ROOT = Path(__file__).resolve().parent
-DEFAULT_REGENBOND_MC_OUTPUT = APP_ROOT.parent / "RegenBonds" / "analysis" / "monte_carlo"
+PAPER_REGENBOND_MC_OUTPUT = APP_ROOT.parent / "RegenBonds" / "analysis" / "monte_carlo"
+LOCAL_REGENBOND_MC_OUTPUT = APP_ROOT / "analysis" / "monte_carlo"
+DEFAULT_REGENBOND_MC_OUTPUT = (
+    PAPER_REGENBOND_MC_OUTPUT
+    if (APP_ROOT.parent / "RegenBonds" / "analysis").exists()
+    else LOCAL_REGENBOND_MC_OUTPUT
+)
 REGENBOND_MC_SCRIPT = APP_ROOT / "scripts" / "run_regenbond_monte_carlo.py"
 PAPER_SARAFU_CALIBRATED_OUTPUT = (
     APP_ROOT.parent / "RegenBonds" / "analysis" / "monte_carlo" / "sarafu_calibrated"

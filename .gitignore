@@ -209,6 +209,11 @@ __marimo__/
 # Local Sarafu-calibrated paper workflow outputs. Authoritative paper outputs
 # live under ../RegenBonds/analysis/monte_carlo/sarafu_calibrated/.
 analysis/sarafu_calibrated*/
+
+# Long-running RegenBond verification outputs are reproducible from scripts and
+# can be large. Commit selected paper artifacts intentionally with -f if needed.
+analysis/monte_carlo/*
+!analysis/monte_carlo/.gitkeep
 sim/__pycache__/__init__.cpython-312.pyc
 sim/__pycache__/__init__.cpython-312.pyc
 sim/__pycache__/config.cpython-312.pyc

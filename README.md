@@ -61,20 +61,36 @@ From the `sim` repo root:
 
 ```bash
 python scripts/run_regenbond_monte_carlo.py \
-  --scenario regenbond_lp_injection \
+  --scenario sarafu_engine_validation \
   --runs 100 \
   --ticks 260 \
   --seed 1 \
-  --output ../RegenBonds/analysis/monte_carlo
+  --analysis-stride 13 \
+  --pool-metrics-stride 13 \
+  --progress-stride 13 \
+  --output analysis/monte_carlo/engine_validation
 ```
 
-The runner consumes aggregate Sarafu calibration artifacts from
-`../RegenBonds/analysis/` and writes manuscript-ready CSV and LaTeX snippets
-under the output directory. It also writes PNG figures under `figures/` unless
-`--no-png` is supplied. Use `--scenario all` for the full baseline,
-regenerative-bond, and stress-test suite. For quick inspection inside this repo,
-use `--output analysis`; for longer runs, `--analysis-stride N` records the
-expensive paper diagnostics every `N` ticks while still simulating every tick.
+The runner consumes the public aggregate Sarafu calibration bundle in
+`analysis/sarafu_calibration/` by default and writes CSV, LaTeX, Markdown, and
+PNG artifacts under the output directory. It does not require a sibling
+`RegenBonds` checkout. Use `--calibration-dir ../RegenBonds/analysis` only when
+intentionally testing against a local regenerated paper-analysis bundle.
+
+For SSH/server batch verification, use:
+
+```bash
+./scripts/start_regenbond_batch_tmux.sh validation-full
+tail -f analysis/monte_carlo/validation-full.log
+./scripts/run_regenbond_remote_batch.sh frontier-pilot
+```
+
+The full runbook, including `tmux`, `tail -f`, and expected output files, is in
+`docs/regenbond_remote_batches.md`.
+
+Use `--scenario all` for the older baseline, regenerative-bond, and stress-test
+suite. For longer runs, `--analysis-stride N` records expensive paper
+diagnostics every `N` ticks while still simulating every tick.
 
 The Streamlit app includes a **RegenBond MC** tab that runs this same script as
 a subprocess and displays the exact CLI-equivalent command. For identical
@@ -85,20 +101,18 @@ identical.
 ## Sarafu-calibrated paper workflow
 
 The default Streamlit tab is **Sarafu Calibrated**. It starts from the
-privacy-safe Sarafu pool calibration outputs in `../RegenBonds/analysis/`,
+privacy-safe Sarafu pool calibration outputs in `analysis/sarafu_calibration/`,
 validates a Sarafu-like baseline, separates observed aid/grant liquidity from
 counterfactual LP/bond-purchaser liquidity, and writes manuscript-ready tables,
 LaTeX snippets, PNG figures, and captions. In this research workspace the
-authoritative paper output is:
+authoritative paper output can still be set explicitly:
 
 ```text
 ../RegenBonds/analysis/monte_carlo/sarafu_calibrated/
 ```
 
-When the simulator is cloned standalone without a sibling `RegenBonds` repo,
-the runner falls back to local `analysis/sarafu_calibrated/` output and expects
-`--calibration-dir` to point at a directory containing the aggregate calibration
-CSVs.
+When the simulator is cloned standalone, the runner uses the local public
+calibration bundle and falls back to local `analysis/sarafu_calibrated/` output.
 
 CLI equivalent:
 

@@ -1,0 +1,10 @@
+tier,asset_class,pool_token_pairs,figure_pairs,same_token_out_value,same_token_matched_later_in_value,same_token_return_coverage
+strong,cash,62,62,253482.960966,58275.992377,0.229901
+strong,redeemable_voucher,176,175,1869325.304302,1309978.492623,0.700776
+strong,internal_voucher,392,392,1012905.528584,605717.963333,0.598000
+moderate,cash,30,28,41069.926294,9764.999023,0.237765
+moderate,redeemable_voucher,90,90,397301.819725,362821.940659,0.913215
+moderate,internal_voucher,212,212,207875.591063,102056.677862,0.490951
+weak,cash,73,69,64390.735104,4715.162190,0.073227
+weak,redeemable_voucher,134,124,68620.155532,27954.276466,0.407377
+weak,internal_voucher,101,100,41187.098350,25861.609365,0.627906

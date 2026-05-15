@@ -3,7 +3,8 @@
 
 The runner is paper-first: it writes deterministic CSV and LaTeX artifacts that
 can be included by the manuscript. It does not read private Sarafu raw data; it
-only consumes aggregate calibration files from RegenBonds/analysis.
+only consumes aggregate calibration files from the public calibration bundle or
+from a local RegenBonds analysis checkout.
 """
 
 from __future__ import annotations
@@ -30,6 +31,8 @@ from sim.config import ScenarioConfig
 from sim.engine import SimulationEngine
 
 
+DEFAULT_PUBLIC_CALIBRATION_DIR = SIM_ROOT / "analysis" / "sarafu_calibration"
+DEFAULT_OUTPUT_DIR = SIM_ROOT / "analysis" / "monte_carlo"
 MONTH_TICKS = 4
 YEAR_TICKS = 52
 DEFAULT_COUPONS = (0.0, 0.03, 0.06, 0.09, 0.12)
@@ -58,6 +61,17 @@ NETWORK_SCALE_FACTORS = {
     "connected_2x": 2.0,
     "connected_5x": 5.0,
 }
+
+
+def default_calibration_dir() -> Path:
+    if DEFAULT_PUBLIC_CALIBRATION_DIR.exists():
+        return DEFAULT_PUBLIC_CALIBRATION_DIR
+    sibling = WORKSPACE_ROOT / "RegenBonds" / "analysis"
+    if sibling.exists():
+        return sibling
+    return DEFAULT_PUBLIC_CALIBRATION_DIR
+
+
 CORE_QUANTILE_METRICS = (
     "bond_annualized_fee_yield",
     "bond_coupon_coverage_ratio",
@@ -213,12 +227,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--calibration-dir",
-        default=str(WORKSPACE_ROOT / "RegenBonds" / "analysis"),
-        help="Directory containing Sarafu-derived aggregate calibration CSVs.",
+        default=str(default_calibration_dir()),
+        help=(
+            "Directory containing Sarafu-derived aggregate calibration CSVs. "
+            "Default uses analysis/sarafu_calibration in a standalone public clone."
+        ),
     )
     parser.add_argument(
         "--output",
-        default=str(WORKSPACE_ROOT / "RegenBonds" / "analysis" / "monte_carlo"),
+        default=str(DEFAULT_OUTPUT_DIR),
         help="Output directory for manuscript CSV and LaTeX artifacts.",
     )
     parser.add_argument(

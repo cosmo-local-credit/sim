@@ -1,0 +1,33 @@
+parameter,value,source
+same_token_return_coverage_cash,0.202695,Figure 2 same-token pool return balance
+same_token_return_coverage_redeemable_voucher,0.728297,Figure 2 same-token pool return balance
+same_token_return_coverage_internal_voucher,0.581343,Figure 2 same-token pool return balance
+same_token_return_coverage_strong_cash,0.229901,Figure 2 same-token pool return balance by pool tier
+same_token_return_coverage_strong_redeemable_voucher,0.700776,Figure 2 same-token pool return balance by pool tier
+same_token_return_coverage_strong_internal_voucher,0.598000,Figure 2 same-token pool return balance by pool tier
+same_token_return_coverage_moderate_cash,0.237765,Figure 2 same-token pool return balance by pool tier
+same_token_return_coverage_moderate_redeemable_voucher,0.913215,Figure 2 same-token pool return balance by pool tier
+same_token_return_coverage_moderate_internal_voucher,0.490951,Figure 2 same-token pool return balance by pool tier
+same_token_return_coverage_weak_cash,0.073227,Figure 2 same-token pool return balance by pool tier
+same_token_return_coverage_weak_redeemable_voucher,0.407377,Figure 2 same-token pool return balance by pool tier
+same_token_return_coverage_weak_internal_voucher,0.627906,Figure 2 same-token pool return balance by pool tier
+impact_projection_log_slope_regenerative_agriculture,0.333014,Figure 1 report activity projection by tag
+impact_projection_share_regenerative_agriculture,0.210139,Figure 1 report activity projection by tag
+impact_projection_log_slope_construction,0.280112,Figure 1 report activity projection by tag
+impact_projection_share_construction,0.128859,Figure 1 report activity projection by tag
+impact_projection_log_slope_cleaning,0.256542,Figure 1 report activity projection by tag
+impact_projection_share_cleaning,0.122345,Figure 1 report activity projection by tag
+impact_projection_log_slope_permaculture,0.145814,Figure 1 report activity projection by tag
+impact_projection_share_permaculture,0.085811,Figure 1 report activity projection by tag
+impact_projection_log_slope_training,0.239725,Figure 1 report activity projection by tag
+impact_projection_share_training,0.078448,Figure 1 report activity projection by tag
+impact_projection_log_slope_housekeeping,0.169631,Figure 1 report activity projection by tag
+impact_projection_share_housekeeping,0.065704,Figure 1 report activity projection by tag
+impact_projection_log_slope_education,0.169331,Figure 1 report activity projection by tag
+impact_projection_share_education,0.064854,Figure 1 report activity projection by tag
+impact_projection_log_slope_volunteer,0.108121,Figure 1 report activity projection by tag
+impact_projection_share_volunteer,0.052393,Figure 1 report activity projection by tag
+impact_projection_log_slope_soil,0.097528,Figure 1 report activity projection by tag
+impact_projection_share_soil,0.045313,Figure 1 report activity projection by tag
+impact_projection_log_slope_building,0.138738,Figure 1 report activity projection by tag
+impact_projection_share_building,0.038516,Figure 1 report activity projection by tag
