@@ -142,8 +142,12 @@ Useful overrides:
 ```bash
 RUNS=20 TICKS=260 ./scripts/run_regenbond_remote_batch.sh validation-full
 OUTPUT_ROOT=/mnt/batch/regenbond ./scripts/run_regenbond_remote_batch.sh frontier-pilot
+BOND_TERM=260 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 PYTHON_BIN=/opt/venvs/sim/bin/python ./scripts/run_regenbond_remote_batch.sh validation-full
 ```
+
+Use `BOND_TERM` for frontier term overrides. Do not use `TERM`; tmux and shells
+use `TERM` for terminal type values such as `tmux-256color`.
 
 ## Start Detached
 

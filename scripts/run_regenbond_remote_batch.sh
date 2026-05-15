@@ -62,7 +62,7 @@ run_frontier() {
     --frontier-refinement-rounds "${FRONTIER_REFINEMENT_ROUNDS:-1}" \
     --runs "${RUNS:-$default_runs}" \
     --ticks "${TICKS:-$default_ticks}" \
-    --term "${TERM:-260}" \
+    --term "${BOND_TERM:-260}" \
     --seed "${SEED:-1}" \
     --analysis-stride "${ANALYSIS_STRIDE:-13}" \
     --pool-metrics-stride "${POOL_METRICS_STRIDE:-13}" \
