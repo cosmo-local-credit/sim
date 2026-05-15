@@ -149,6 +149,8 @@ class Calibration:
     pool_rows: list[PoolCalibration]
     borrow_return_by_tier: dict[str, float]
     impact_rows: list[ImpactProjection]
+    voucher_circulation_baselines: dict[str, dict[str, float]]
+    stable_dependency_anchors: dict[str, dict[str, float]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -224,6 +226,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Number of adaptive midpoint refinement rounds for bond_issuer_frontier.",
+    )
+    parser.add_argument(
+        "--route-success-floor",
+        type=float,
+        default=0.85,
+        help=(
+            "Bond-frontier p05 route-success safety floor. This is a model "
+            "settlement-reliability sensitivity parameter, not a directly "
+            "observed Sarafu failed-route calibration moment."
+        ),
     )
     parser.add_argument(
         "--calibration-dir",
@@ -431,6 +443,31 @@ def load_calibration(calibration_dir: Path) -> Calibration:
         )
     impact_rows.sort(key=lambda item: item.share, reverse=True)
 
+    voucher_circulation_baselines: dict[str, dict[str, float]] = {}
+    circulation_path = calibration_dir / "voucher_circulation_baseline.csv"
+    if circulation_path.exists():
+        for row in read_csv(circulation_path):
+            window = str(row.get("window", "")).strip()
+            if not window:
+                continue
+            voucher_circulation_baselines[window] = {
+                key: safe_float(value)
+                for key, value in row.items()
+                if key != "window"
+            }
+
+    stable_dependency_anchors: dict[str, dict[str, float]] = {}
+    stable_dependency_path = calibration_dir / "stable_dependency_anchors.csv"
+    if stable_dependency_path.exists():
+        for row in read_csv(stable_dependency_path):
+            metric = str(row.get("metric", "")).strip()
+            if not metric:
+                continue
+            stable_dependency_anchors[metric] = {
+                "value": safe_float(row.get("value")),
+                "denominator": safe_float(row.get("denominator")),
+            }
+
     return Calibration(
         params=params,
         repayment_by_tier_asset=repayment_by_tier_asset,
@@ -440,6 +477,8 @@ def load_calibration(calibration_dir: Path) -> Calibration:
         pool_rows=pool_rows,
         borrow_return_by_tier=borrow_return_by_tier,
         impact_rows=impact_rows,
+        voucher_circulation_baselines=voucher_circulation_baselines,
+        stable_dependency_anchors=stable_dependency_anchors,
     )
 
 
@@ -1221,6 +1260,11 @@ def run_one(
             "swap_volume_usd_to_vchr_tick",
             "swap_volume_vchr_to_usd_tick",
             "swap_volume_vchr_to_vchr_tick",
+            "swap_stable_flow_value_tick",
+            "swap_voucher_flow_value_tick",
+            "swap_count_usd_to_vchr_tick",
+            "swap_count_vchr_to_usd_tick",
+            "swap_count_vchr_to_vchr_tick",
             "repayment_volume_usd",
             "loan_issuance_volume_usd",
             "stable_onramp_usd_tick",
@@ -1251,6 +1295,9 @@ def run_one(
             + safe_float(latest.get("stable_total_in_pools"))
         )
         leakage_ratio = safe_float(latest.get("stable_offramp_usd_tick")) / max(1e-9, leakage_denom)
+        cumulative_swap_stable_flow = cumulative_float["swap_stable_flow_value_tick"]
+        cumulative_swap_voucher_flow = cumulative_float["swap_voucher_flow_value_tick"]
+        cumulative_swap_gross_flow = cumulative_swap_stable_flow + cumulative_swap_voucher_flow
 
         common = {
             "scenario": scenario,
@@ -1268,6 +1315,14 @@ def run_one(
             "tick": tick,
             "num_pools": latest.get("num_pools", 0),
             "num_assets": latest.get("num_assets", 0),
+            "pool_total_value_usd": latest.get("pool_total_value_usd", 0.0),
+            "stable_value_total_in_active_pools": latest.get("stable_value_total_in_active_pools", 0.0),
+            "voucher_value_total_in_active_pools": latest.get("voucher_value_total_in_active_pools", 0.0),
+            "stable_value_share_in_active_pools": latest.get("stable_value_share_in_active_pools", 0.0),
+            "voucher_value_share_in_active_pools": latest.get("voucher_value_share_in_active_pools", 0.0),
+            "stable_to_voucher_value_ratio_in_active_pools": latest.get(
+                "stable_to_voucher_value_ratio_in_active_pools", 0.0
+            ),
             "transactions_per_tick": latest.get("transactions_per_tick", 0),
             "transactions_total": cumulative["transactions"],
             "swap_volume_usd_tick": latest.get("swap_volume_usd_tick", 0.0),
@@ -1278,6 +1333,18 @@ def run_one(
             "swap_volume_vchr_to_usd_total": cumulative_float["swap_volume_vchr_to_usd_tick"],
             "swap_volume_vchr_to_vchr_tick": latest.get("swap_volume_vchr_to_vchr_tick", 0.0),
             "swap_volume_vchr_to_vchr_total": cumulative_float["swap_volume_vchr_to_vchr_tick"],
+            "swap_stable_flow_value_tick": latest.get("swap_stable_flow_value_tick", 0.0),
+            "swap_stable_flow_value_total": cumulative_swap_stable_flow,
+            "swap_voucher_flow_value_tick": latest.get("swap_voucher_flow_value_tick", 0.0),
+            "swap_voucher_flow_value_total": cumulative_swap_voucher_flow,
+            "swap_stable_flow_share_tick": latest.get("swap_stable_flow_share_tick", 0.0),
+            "swap_stable_flow_share_total": cumulative_swap_stable_flow / max(1e-9, cumulative_swap_gross_flow),
+            "swap_count_usd_to_vchr_tick": latest.get("swap_count_usd_to_vchr_tick", 0),
+            "swap_count_usd_to_vchr_total": cumulative_float["swap_count_usd_to_vchr_tick"],
+            "swap_count_vchr_to_usd_tick": latest.get("swap_count_vchr_to_usd_tick", 0),
+            "swap_count_vchr_to_usd_total": cumulative_float["swap_count_vchr_to_usd_tick"],
+            "swap_count_vchr_to_vchr_tick": latest.get("swap_count_vchr_to_vchr_tick", 0),
+            "swap_count_vchr_to_vchr_total": cumulative_float["swap_count_vchr_to_vchr_tick"],
             "route_success_rate_tick": route_success_rate(latest),
             "route_success_rate_cumulative": route_success_total,
             "route_found_total": cumulative["route_found"],
@@ -2209,6 +2276,18 @@ def engine_validation_moments(
             pool.borrow_proxy_matured_events * pool.borrow_proxy_matured_return_rate
             for pool in calibration.pool_rows
         ) / empirical_borrow_events
+    current_circulation = calibration.voucher_circulation_baselines.get("trailing_90d", {})
+    stable_anchors = calibration.stable_dependency_anchors
+    empirical_active_stable_share = stable_anchors.get(
+        "net_positive_flow_balance_stable_share_aggregate", {}
+    ).get("value", "")
+    empirical_active_voucher_share = ""
+    if empirical_active_stable_share != "":
+        empirical_active_voucher_share = max(0.0, 1.0 - safe_float(empirical_active_stable_share))
+    empirical_stable_involved_swap_share = (
+        safe_float(current_circulation.get("voucher_to_stable_share"))
+        + safe_float(current_circulation.get("stable_to_voucher_share"))
+    )
     aggregate_specs = [
         (
             "all",
@@ -2218,6 +2297,97 @@ def engine_validation_moments(
             [safe_float(row.get("engine_swap_events_strong")) + safe_float(row.get("engine_swap_events_moderate")) + safe_float(row.get("engine_swap_events_weak")) for row in summaries],
             0.20,
             True,
+        ),
+        (
+            "all",
+            "current_voucher_to_voucher_swap_share",
+            "settlement",
+            current_circulation.get("voucher_to_voucher_share", ""),
+            [
+                safe_float(row.get("swap_count_vchr_to_vchr_total"))
+                / max(1e-9, safe_float(row.get("transactions_total")))
+                for row in summaries
+            ],
+            None,
+            False,
+        ),
+        (
+            "all",
+            "current_voucher_to_stable_swap_share",
+            "settlement",
+            current_circulation.get("voucher_to_stable_share", ""),
+            [
+                safe_float(row.get("swap_count_vchr_to_usd_total"))
+                / max(1e-9, safe_float(row.get("transactions_total")))
+                for row in summaries
+            ],
+            None,
+            False,
+        ),
+        (
+            "all",
+            "current_stable_to_voucher_swap_share",
+            "settlement",
+            current_circulation.get("stable_to_voucher_share", ""),
+            [
+                safe_float(row.get("swap_count_usd_to_vchr_total"))
+                / max(1e-9, safe_float(row.get("transactions_total")))
+                for row in summaries
+            ],
+            None,
+            False,
+        ),
+        (
+            "all",
+            "current_stable_involved_swap_share",
+            "settlement",
+            empirical_stable_involved_swap_share,
+            [
+                (
+                    safe_float(row.get("swap_count_vchr_to_usd_total"))
+                    + safe_float(row.get("swap_count_usd_to_vchr_total"))
+                )
+                / max(1e-9, safe_float(row.get("transactions_total")))
+                for row in summaries
+            ],
+            None,
+            False,
+        ),
+        (
+            "all",
+            "gross_stable_flow_share",
+            "settlement",
+            stable_anchors.get("gross_stable_flow_share", {}).get("value", ""),
+            [safe_float(row.get("swap_stable_flow_share_total")) for row in summaries],
+            None,
+            False,
+        ),
+        (
+            "all",
+            "active_pool_stable_value_share",
+            "settlement",
+            empirical_active_stable_share,
+            [safe_float(row.get("stable_value_share_in_active_pools")) for row in summaries],
+            None,
+            False,
+        ),
+        (
+            "all",
+            "active_pool_voucher_value_share",
+            "settlement",
+            empirical_active_voucher_share,
+            [safe_float(row.get("voucher_value_share_in_active_pools")) for row in summaries],
+            None,
+            False,
+        ),
+        (
+            "all",
+            "active_pool_stable_to_voucher_value_ratio",
+            "settlement",
+            "",
+            [safe_float(row.get("stable_to_voucher_value_ratio_in_active_pools")) for row in summaries],
+            None,
+            False,
         ),
         (
             "all",
@@ -2641,6 +2811,7 @@ def service_coverage(row: dict[str, object]) -> float:
 def summarize_frontier_cell(
     rows: list[dict[str, object]],
     baseline: dict[str, float],
+    route_success_floor: float,
 ) -> dict[str, object]:
     principal_values = [safe_float(row.get("bond_principal_usd")) for row in rows]
     service_values = [service_coverage(row) for row in rows]
@@ -2659,8 +2830,27 @@ def summarize_frontier_cell(
     actual_payment_values = [safe_float(row.get("issuer_actual_bondholder_payment_usd")) for row in rows]
     concentration_values = [safe_float(row.get("realized_edge_top_share")) for row in rows]
     swap_values = [safe_float(row.get("swap_volume_usd_total")) for row in rows]
+    v2v_count_values = [safe_float(row.get("swap_count_vchr_to_vchr_total")) for row in rows]
+    v2v_volume_values = [safe_float(row.get("swap_volume_vchr_to_vchr_total")) for row in rows]
+    v2stable_count_values = [safe_float(row.get("swap_count_vchr_to_usd_total")) for row in rows]
+    stable2v_count_values = [safe_float(row.get("swap_count_usd_to_vchr_total")) for row in rows]
+    transaction_values = [safe_float(row.get("transactions_total")) for row in rows]
+    stable_share_values = [safe_float(row.get("stable_value_share_in_active_pools")) for row in rows]
+    voucher_share_values = [safe_float(row.get("voucher_value_share_in_active_pools")) for row in rows]
+    stable_to_voucher_ratio_values = [
+        safe_float(row.get("stable_to_voucher_value_ratio_in_active_pools")) for row in rows
+    ]
+    v2v_share_values = [
+        v2v / max(1e-9, total) for v2v, total in zip(v2v_count_values, transaction_values)
+    ]
     route_p50 = percentile(route_values, 0.50)
     swap_p50 = percentile(swap_values, 0.50)
+    v2v_count_p50 = percentile(v2v_count_values, 0.50)
+    v2v_volume_p50 = percentile(v2v_volume_values, 0.50)
+    v2v_share_p50 = percentile(v2v_share_values, 0.50)
+    stable_share_p50 = percentile(stable_share_values, 0.50)
+    stable_share_p95 = percentile(stable_share_values, 0.95)
+    voucher_share_p50 = percentile(voucher_share_values, 0.50)
     stress_p50 = percentile(stress_values, 0.50)
     stress_p95 = percentile(stress_values, 0.95)
     leakage_p50 = percentile(leakage_values, 0.50)
@@ -2669,11 +2859,30 @@ def summarize_frontier_cell(
     baseline_stress_p95 = baseline.get("household_cash_stress_p95", baseline_stress_p50)
     baseline_leakage_p50 = baseline.get("liquidity_leakage_p50", 0.0)
     baseline_leakage_p95 = baseline.get("liquidity_leakage_p95", baseline_leakage_p50)
+    baseline_v2v_count_p50 = baseline.get("voucher_to_voucher_count_p50", 0.0)
+    baseline_v2v_share_p50 = baseline.get("voucher_to_voucher_share_p50", 0.0)
+    baseline_stable_share_p50 = baseline.get("stable_value_share_p50", 0.0)
+    baseline_stable_share_p95 = baseline.get("stable_value_share_p95", baseline_stable_share_p50)
+    baseline_voucher_share_p50 = baseline.get("voucher_value_share_p50", 0.0)
     stress_delta_p95 = max(0.0, stress_p95 - baseline_stress_p95)
     leakage_delta_p95 = max(0.0, leakage_p95 - baseline_leakage_p95)
+    stable_dependency_delta_p95 = max(0.0, stable_share_p95 - baseline_stable_share_p95)
+    v2v_count_decline = (
+        baseline_v2v_count_p50 > 0.0 and v2v_count_p50 < baseline_v2v_count_p50 * 0.85
+    )
+    v2v_share_decline = (
+        baseline_v2v_share_p50 > 0.0 and v2v_share_p50 < max(0.0, baseline_v2v_share_p50 - 0.10)
+    )
+    voucher_value_share_decline = (
+        baseline_voucher_share_p50 > 0.0 and voucher_share_p50 < max(0.0, baseline_voucher_share_p50 - 0.15)
+    )
     material_decline = (
         route_p50 < baseline.get("route_success_p50", 0.0) - 0.05
         or swap_p50 < baseline.get("swap_volume_p50", 0.0) * 0.85
+        or v2v_count_decline
+        or v2v_share_decline
+        or stable_dependency_delta_p95 > 0.15
+        or voucher_value_share_decline
         or stress_p50 > baseline_stress_p50 + 0.05
         or leakage_p50 > baseline_leakage_p50 + 0.05
     )
@@ -2682,7 +2891,8 @@ def summarize_frontier_cell(
         constraints.append("p50_service_coverage")
     if percentile(service_values, 0.05) < 1.00:
         constraints.append("p05_service_coverage")
-    if percentile(route_values, 0.05) < 0.85:
+    route_success_floor = max(0.0, min(1.0, float(route_success_floor)))
+    if percentile(route_values, 0.05) < route_success_floor:
         constraints.append("p05_route_success")
     if stress_delta_p95 > 0.20:
         constraints.append("p95_household_cash_stress_delta")
@@ -2692,6 +2902,14 @@ def summarize_frontier_cell(
         constraints.append("p95_unpaid_claims")
     if percentile(concentration_values, 0.95) > 0.25:
         constraints.append("p95_realized_edge_concentration")
+    if v2v_count_decline:
+        constraints.append("voucher_to_voucher_count_decline_vs_no_bond")
+    if v2v_share_decline:
+        constraints.append("voucher_to_voucher_share_decline_vs_no_bond")
+    if stable_dependency_delta_p95 > 0.15:
+        constraints.append("p95_stable_dependency_delta")
+    if voucher_value_share_decline:
+        constraints.append("voucher_value_share_decline_vs_no_bond")
     if material_decline:
         constraints.append("material_decline_vs_no_bond")
     first = rows[0] if rows else {}
@@ -2711,6 +2929,7 @@ def summarize_frontier_cell(
         "issuer_reserve_draw_p95": percentile(reserve_draw_values, 0.95),
         "issuer_unpaid_scheduled_claim_p95": percentile(unpaid_values, 0.95),
         "route_success_p05": percentile(route_values, 0.05),
+        "route_success_floor": route_success_floor,
         "household_cash_stress_p95": stress_p95,
         "household_cash_stress_delta_p95": stress_delta_p95,
         "liquidity_leakage_p95": leakage_p95,
@@ -2718,12 +2937,30 @@ def summarize_frontier_cell(
         "unpaid_claims_ratio_p95": percentile(claims_ratios, 0.95),
         "realized_edge_concentration_p95": percentile(concentration_values, 0.95),
         "swap_volume_usd_total_p50": swap_p50,
+        "voucher_to_voucher_count_p50": v2v_count_p50,
+        "voucher_to_voucher_volume_p50": v2v_volume_p50,
+        "voucher_to_voucher_share_p50": v2v_share_p50,
+        "voucher_to_stable_count_p50": percentile(v2stable_count_values, 0.50),
+        "stable_to_voucher_count_p50": percentile(stable2v_count_values, 0.50),
+        "stable_value_share_p50": stable_share_p50,
+        "stable_value_share_p95": stable_share_p95,
+        "voucher_value_share_p50": voucher_share_p50,
+        "stable_to_voucher_value_ratio_p50": percentile(stable_to_voucher_ratio_values, 0.50),
         "baseline_route_success_p50": baseline.get("route_success_p50", 0.0),
         "baseline_swap_volume_p50": baseline.get("swap_volume_p50", 0.0),
+        "baseline_voucher_to_voucher_count_p50": baseline_v2v_count_p50,
+        "baseline_voucher_to_voucher_share_p50": baseline_v2v_share_p50,
+        "baseline_stable_value_share_p50": baseline_stable_share_p50,
+        "baseline_stable_value_share_p95": baseline_stable_share_p95,
+        "baseline_voucher_value_share_p50": baseline_voucher_share_p50,
         "baseline_household_cash_stress_p50": baseline_stress_p50,
         "baseline_household_cash_stress_p95": baseline_stress_p95,
         "baseline_liquidity_leakage_p50": baseline_leakage_p50,
         "baseline_liquidity_leakage_p95": baseline_leakage_p95,
+        "stable_dependency_delta_p95": stable_dependency_delta_p95,
+        "voucher_to_voucher_count_decline_vs_no_bond": int(v2v_count_decline),
+        "voucher_to_voucher_share_decline_vs_no_bond": int(v2v_share_decline),
+        "voucher_value_share_decline_vs_no_bond": int(voucher_value_share_decline),
         "material_decline_vs_no_bond": int(material_decline),
         "safe": int(not constraints),
         "binding_constraint": ";".join(constraints),
@@ -2757,18 +2994,20 @@ def write_frontier_tables(output_dir: Path, safety_rows: list[dict[str, object]]
         r"\begingroup",
         r"\small",
         r"\setlength{\tabcolsep}{3pt}",
-        r"\begin{tabular}{lrrrrrl}",
+        r"\begin{tabular}{lrrrrrrrl}",
         r"\toprule",
-        r"Scale & Principal ratio & Service p05 & Route p05 & Stress $\Delta$ p95 & Leak $\Delta$ p95 & Binding \\",
+        r"Scale & Principal ratio & Service p05 & Route p05 & V2V share & Stable $\Delta$ p95 & Stress $\Delta$ p95 & Leak $\Delta$ p95 & Binding \\",
         r"\midrule",
     ]
     for row in safety_rows[:24]:
         guardrail_lines.append(
-            "{scale} & {ratio:.2f} & {service:.2f} & {route} & {stress} & {leakage} & {binding} \\\\".format(
+            "{scale} & {ratio:.2f} & {service:.2f} & {route} & {v2v} & {stable} & {stress} & {leakage} & {binding} \\\\".format(
                 scale=latex_escape(row["network_scale"]),
                 ratio=safe_float(row["principal_ratio"]),
                 service=safe_float(row["service_coverage_p05"]),
                 route=fmt_pct(row["route_success_p05"]),
+                v2v=fmt_pct(row.get("voucher_to_voucher_share_p50", 0.0)),
+                stable=fmt_pct(row.get("stable_dependency_delta_p95", 0.0)),
                 stress=fmt_pct(row.get("household_cash_stress_delta_p95", 0.0)),
                 leakage=fmt_pct(row.get("liquidity_leakage_delta_p95", 0.0)),
                 binding=latex_escape(row["binding_constraint"] or "safe"),
@@ -2927,12 +3166,16 @@ def write_frontier_notes(output_dir: Path, args: argparse.Namespace, summary_row
         f"- Certification policy: `{args.certification_policy}`.",
         f"- Issuer reserve share: {args.issuer_reserve_share:.2%}.",
         f"- Issuer payment stride: {args.issuer_payment_stride} weekly ticks.",
+        f"- p05 route-success floor: {max(0.0, min(1.0, float(args.route_success_floor))):.1%}.",
         "- Gross bond principal is the bond amount; the issuer withholds the reserve and deploys the remainder as pool liquidity.",
         "- Strong pools are eligible at full weight; moderate pools are capped; weak pools are excluded from base runs unless another policy is explicitly selected.",
         "",
         "## Non-Extraction Gate",
         "",
-        "A cell is safe only when service coverage, route success, incremental household cash stress, incremental liquidity leakage, unpaid claims, edge concentration, and matched no-bond degradation tests all pass.",
+        "A cell is safe only when service coverage, route success, voucher-to-voucher circulation preservation, active-pool stable-dependency limits, incremental household cash stress, incremental liquidity leakage, unpaid claims, edge concentration, and matched no-bond degradation tests all pass.",
+        "- The route-success floor is a model settlement-reliability sensitivity parameter, not a direct empirical Sarafu failed-route scalar.",
+        "- Voucher-to-voucher count and share are compared against the matched no-bond baseline to protect the empirically observed ROLA-like settlement motif.",
+        "- Stable value share and voucher value share in active pools are compared against the matched no-bond baseline so stable/bond injections do not crowd out voucher-backed settlement capacity.",
         "Cash-stress and liquidity-leakage guardrails are evaluated as deltas against the matched no-bond baseline for the same network scale and seeds.",
         "",
         "## Headline Frontier",
@@ -3089,6 +3332,26 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
             "swap_volume_p50": percentile(
                 [safe_float(row.get("swap_volume_usd_total")) for row in baseline_rows], 0.50
             ),
+            "voucher_to_voucher_count_p50": percentile(
+                [safe_float(row.get("swap_count_vchr_to_vchr_total")) for row in baseline_rows], 0.50
+            ),
+            "voucher_to_voucher_share_p50": percentile(
+                [
+                    safe_float(row.get("swap_count_vchr_to_vchr_total"))
+                    / max(1e-9, safe_float(row.get("transactions_total")))
+                    for row in baseline_rows
+                ],
+                0.50,
+            ),
+            "stable_value_share_p50": percentile(
+                [safe_float(row.get("stable_value_share_in_active_pools")) for row in baseline_rows], 0.50
+            ),
+            "stable_value_share_p95": percentile(
+                [safe_float(row.get("stable_value_share_in_active_pools")) for row in baseline_rows], 0.95
+            ),
+            "voucher_value_share_p50": percentile(
+                [safe_float(row.get("voucher_value_share_in_active_pools")) for row in baseline_rows], 0.50
+            ),
             "household_cash_stress_p50": percentile(
                 [safe_float(row.get("household_cash_stress_ratio")) for row in baseline_rows], 0.50
             ),
@@ -3122,7 +3385,7 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
             seed_offset=scale_seed_offsets[scale],
         )
         all_run_rows.extend(rows)
-        safety = summarize_frontier_cell(rows, baseline_by_scale[scale])
+        safety = summarize_frontier_cell(rows, baseline_by_scale[scale], args.route_success_floor)
         safety_rows.append(safety)
         safety_by_key[key] = safety
 

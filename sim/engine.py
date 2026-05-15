@@ -4437,6 +4437,20 @@ class SimulationEngine:
                 for asset_id, amt in p.vault.inventory.items()
                 if asset_id.startswith("VCHR:")
             )
+            active_stable_value = sum(
+                p.vault.get(cfg.stable_symbol)
+                for p in self.pools.values()
+                if not p.policy.system_pool
+            )
+            active_voucher_value = sum(
+                self._pool_voucher_value_usd(p)
+                for p in self.pools.values()
+                if not p.policy.system_pool
+            )
+            active_stable_voucher_value = active_stable_value + active_voucher_value
+            active_stable_share = active_stable_value / max(1e-9, active_stable_voucher_value)
+            active_voucher_share = active_voucher_value / max(1e-9, active_stable_voucher_value)
+            active_stable_to_voucher_ratio = active_stable_value / max(1e-9, active_voucher_value)
             pools_under_reserve = sum(
                 1 for p in self.pools.values()
                 if not p.policy.system_pool and p.vault.get(cfg.stable_symbol) < p.policy.min_stable_reserve
@@ -4481,6 +4495,11 @@ class SimulationEngine:
             vol_usd_to_vchr = 0.0
             vol_vchr_to_usd = 0.0
             vol_vchr_to_vchr = 0.0
+            swap_stable_flow_value = 0.0
+            swap_voucher_flow_value = 0.0
+            count_usd_to_vchr = 0
+            count_vchr_to_usd = 0
+            count_vchr_to_vchr = 0
             for e in reversed(self.log.events):
                 if e.tick != self.tick:
                     if e.tick < self.tick:
@@ -4498,19 +4517,35 @@ class SimulationEngine:
                     asset_in = receipt.get("asset_in")
                     asset_out = receipt.get("asset_out")
                     amount_in = float(receipt.get("amount_in") or 0.0)
+                    amount_out = float(receipt.get("amount_out") or 0.0)
                     if amount_in > 0.0 and asset_in and asset_out:
                         pool_id = receipt.get("pool_id") or e.pool_id
                         pool = self.pools.get(pool_id)
                         value_in = pool.values.get_value(asset_in) if pool is not None else 1.0
                         if value_in <= 0.0:
                             value_in = 1.0
+                        value_out = pool.values.get_value(asset_out) if pool is not None else 1.0
+                        if value_out <= 0.0:
+                            value_out = 1.0
                         usd = amount_in * value_in
+                        out_value = amount_out * value_out
+                        if asset_in == cfg.stable_symbol:
+                            swap_stable_flow_value += usd
+                        elif asset_in.startswith("VCHR:"):
+                            swap_voucher_flow_value += usd
+                        if asset_out == cfg.stable_symbol:
+                            swap_stable_flow_value += out_value
+                        elif asset_out.startswith("VCHR:"):
+                            swap_voucher_flow_value += out_value
                         if asset_in == cfg.stable_symbol and asset_out.startswith("VCHR:"):
                             vol_usd_to_vchr += usd
+                            count_usd_to_vchr += 1
                         elif asset_out == cfg.stable_symbol and asset_in.startswith("VCHR:"):
                             vol_vchr_to_usd += usd
+                            count_vchr_to_usd += 1
                         elif asset_in.startswith("VCHR:") and asset_out.startswith("VCHR:"):
                             vol_vchr_to_vchr += usd
+                            count_vchr_to_vchr += 1
                 elif e.event_type == "ROUTE_REQUESTED":
                     route_requested += 1
                 elif e.event_type == "ROUTE_FOUND":
@@ -4519,6 +4554,8 @@ class SimulationEngine:
                     route_failed += 1
 
             swap_volume_usd_tick = float(self._swap_volume_usd_tick or 0.0)
+            swap_gross_flow_value = swap_stable_flow_value + swap_voucher_flow_value
+            swap_stable_flow_share = swap_stable_flow_value / max(1e-9, swap_gross_flow_value)
             utilization_rate = swap_volume_usd_tick / max(1e-9, total_pool_value)
             c_ratio = vol_vchr_to_usd / vol_usd_to_vchr if vol_usd_to_vchr > 1e-9 else 0.0
             beta_ratio = vol_vchr_to_vchr / vol_vchr_to_usd if vol_vchr_to_usd > 1e-9 else 0.0
@@ -4554,8 +4591,14 @@ class SimulationEngine:
                 "num_system_pools": num_system,
                 "num_assets": len(self.factory.asset_universe),
                 "swap_receipts_total": swap_receipts,
+                "pool_total_value_usd": total_pool_value,
                 "stable_total_in_pools": stable_total,
                 "voucher_total_in_pools": voucher_total,
+                "stable_value_total_in_active_pools": active_stable_value,
+                "voucher_value_total_in_active_pools": active_voucher_value,
+                "stable_value_share_in_active_pools": active_stable_share,
+                "voucher_value_share_in_active_pools": active_voucher_share,
+                "stable_to_voucher_value_ratio_in_active_pools": active_stable_to_voucher_ratio,
                 "pools_under_stable_reserve": pools_under_reserve,
                 "debt_outstanding_units": debt_outstanding_units,
                 "debt_outstanding_usd": debt_outstanding_usd,
@@ -4568,6 +4611,12 @@ class SimulationEngine:
                 "swap_volume_usd_to_vchr_tick": vol_usd_to_vchr,
                 "swap_volume_vchr_to_usd_tick": vol_vchr_to_usd,
                 "swap_volume_vchr_to_vchr_tick": vol_vchr_to_vchr,
+                "swap_stable_flow_value_tick": swap_stable_flow_value,
+                "swap_voucher_flow_value_tick": swap_voucher_flow_value,
+                "swap_stable_flow_share_tick": swap_stable_flow_share,
+                "swap_count_usd_to_vchr_tick": count_usd_to_vchr,
+                "swap_count_vchr_to_usd_tick": count_vchr_to_usd,
+                "swap_count_vchr_to_vchr_tick": count_vchr_to_vchr,
                 "swap_c_ratio": c_ratio,
                 "swap_beta_ratio": beta_ratio,
                 "utilization_rate": utilization_rate,

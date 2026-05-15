@@ -60,6 +60,7 @@ run_frontier() {
     --certification-policy "${CERTIFICATION_POLICY:-strong_moderate_capped}" \
     --frontier-mode "${FRONTIER_MODE:-adaptive}" \
     --frontier-refinement-rounds "${FRONTIER_REFINEMENT_ROUNDS:-1}" \
+    --route-success-floor "${ROUTE_SUCCESS_FLOOR:-0.85}" \
     --runs "${RUNS:-$default_runs}" \
     --ticks "${TICKS:-$default_ticks}" \
     --term "${BOND_TERM:-260}" \

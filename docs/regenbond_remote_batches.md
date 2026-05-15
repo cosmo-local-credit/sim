@@ -244,6 +244,29 @@ tail -f analysis/monte_carlo/validation-full.log
 7. Run `frontier-publication` only after the validation gate and pilot outputs
    look correct.
 
+The route-success floor in the frontier is a settlement-reliability sensitivity
+parameter, not a directly observed Sarafu failed-route scalar. The empirical
+baseline for ROLA-like settlement protection is now
+`analysis/sarafu_calibration/voucher_circulation_baseline.csv`: recent Sarafu
+activity is dominated by voucher-to-voucher circulation, so frontier safety
+rows also report and guard against voucher-to-voucher decline versus the
+matched no-bond baseline. The stable-dependency empirical anchors are in
+`analysis/sarafu_calibration/stable_dependency_anchors.csv`. Frontier rows also
+report active-pool stable value share, voucher value share, and
+stable-to-voucher value ratio. A frontier cell should not be treated as
+regenerative if stable/bond liquidity pays debt service by making the pool
+network materially more dependent on cash-equivalent balances and weaker on
+voucher-to-voucher settlement. The default route floor remains `0.85`, but
+sensitivity runs should also be reviewed, for example:
+
+```bash
+ROUTE_SUCCESS_FLOOR=0.80 ./scripts/start_regenbond_batch_tmux.sh frontier-pilot
+ROUTE_SUCCESS_FLOOR=0.90 ./scripts/start_regenbond_batch_tmux.sh frontier-pilot
+```
+
+Use a distinct `OUTPUT=...` override for sensitivity runs you want to keep
+side by side.
+
 ## Expected Validation Outputs
 
 When `validation-full` finishes, the final log line should look like:
@@ -274,6 +297,8 @@ Quick checks:
 cat analysis/monte_carlo/engine_validation/engine_validation_summary.csv
 wc -l analysis/monte_carlo/engine_validation/engine_validation_errors.csv
 ls -lh analysis/monte_carlo/engine_validation
+grep -E 'voucher_to_voucher|stable_involved|gross_stable|active_pool_(stable|voucher)' \
+  analysis/monte_carlo/engine_validation/engine_validation_moments.csv
 ```
 
 For a clean paper-facing pass, `engine_validation_summary.csv` should report
@@ -281,6 +306,14 @@ For a clean paper-facing pass, `engine_validation_summary.csv` should report
 row. If the status is `review`, inspect the error rows before using frontier
 outputs as headline paper evidence. If the status is `fail`, do not use frontier
 outputs for the paper until the calibration miss is fixed.
+
+After the settlement-protection calibration update, validation still passes or
+fails only on the binding Sarafu moments. It also reports non-binding
+diagnostic rows for voucher-to-voucher circulation, stable-involved swaps,
+gross stable-flow share, and active-pool stable/voucher value composition.
+These rows are needed before frontier outputs are treated as paper-facing,
+because the paper claim now asks whether bond liquidity protects the
+voucher-settlement network rather than only whether bondholders can be paid.
 
 For recalibration work, run `validation-pilot` before `validation-full`. The
 pilot uses 20 runs over the full 260-week horizon and writes to
