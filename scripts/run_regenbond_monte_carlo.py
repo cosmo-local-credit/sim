@@ -649,34 +649,25 @@ def scenario_config(
         cfg.lp_initial_stable_mean = 0.0
         cfg.bond_coupon_target_annual = 0.0
         cfg.bond_fee_service_share = 0.0
+        cfg.producer_inflow_per_tick = 0.0
+        cfg.consumer_inflow_per_tick = 0.0
+        cfg.lender_inflow_per_tick = 0.0
+        cfg.stable_inflow_per_tick = 0.0
+        cfg.stable_supply_growth_rate = 0.0
+        cfg.stable_supply_noise = 0.0
         cfg.initial_lenders = int(getattr(args, "_current_initial_lenders", cfg.initial_lenders))
         cfg.initial_producers = int(getattr(args, "_current_initial_producers", cfg.initial_producers))
         cfg.initial_consumers = int(getattr(args, "_current_initial_consumers", cfg.initial_consumers))
         cfg.max_pools = cfg.initial_lenders + cfg.initial_producers + cfg.initial_consumers
-        cfg.random_route_requests_per_tick = max(
-            cfg.random_route_requests_per_tick,
-            int(getattr(args, "_validation_route_requests_per_tick", 8)),
+        cfg.random_route_requests_per_tick = int(getattr(args, "_validation_route_requests_per_tick", 2))
+        cfg.swap_requests_budget_per_tick = int(getattr(args, "_validation_swap_budget_per_tick", 120))
+        cfg.swap_attempts_max_per_pool = int(getattr(args, "_validation_swap_attempts_max_per_pool", 2))
+        cfg.swap_sustain_window_ticks = 0
+        cfg.swap_sustain_floor_per_tick = int(getattr(args, "_validation_swap_floor_per_tick", 0))
+        cfg.swap_sustain_max_extra_attempts = int(
+            getattr(args, "_validation_swap_sustain_max_extra_attempts", 500)
         )
-        cfg.swap_requests_budget_per_tick = max(
-            int(cfg.swap_requests_budget_per_tick or 0),
-            int(getattr(args, "_validation_swap_budget_per_tick", 240)),
-        )
-        cfg.swap_attempts_max_per_pool = max(
-            int(cfg.swap_attempts_max_per_pool or 0),
-            int(getattr(args, "_validation_swap_attempts_max_per_pool", 8)),
-        )
-        cfg.swap_sustain_floor_per_tick = max(
-            int(cfg.swap_sustain_floor_per_tick or 0),
-            int(getattr(args, "_validation_swap_floor_per_tick", 0)),
-        )
-        cfg.swap_sustain_max_extra_attempts = max(
-            int(cfg.swap_sustain_max_extra_attempts or 0),
-            int(getattr(args, "_validation_swap_sustain_max_extra_attempts", 1000)),
-        )
-        cfg.swap_sustain_max_rounds = max(
-            int(cfg.swap_sustain_max_rounds or 1),
-            int(getattr(args, "_validation_swap_sustain_max_rounds", 4)),
-        )
+        cfg.swap_sustain_max_rounds = int(getattr(args, "_validation_swap_sustain_max_rounds", 2))
         backing_shock = float(getattr(args, "_validation_backing_shock_per_pool", 0.0))
         if backing_shock > 0.0:
             cfg.stable_shock_tick = 1
@@ -2520,23 +2511,23 @@ def run_sarafu_engine_validation(args: argparse.Namespace, calibration: Calibrat
     empirical_total_swaps = sum(safe_float(row["total_swap_events_horizon"]) for row in empirical_targets)
     empirical_total_backing = sum(safe_float(row["backing_liquidity_inflow"]) for row in empirical_targets)
     target_pool_count = sum(int(count) for count in getattr(args, "_target_tier_counts", {}).values()) or 1
-    # The sustain floor is an input to the engine, while NOAM routing/clearing
-    # adds successful settlement on top. Empirically the validation engine
-    # amplifies the floor by about 1.45x, so target the calibrated floor below
-    # the empirical swaps/week moment.
+    # Validation should target Sarafu activity rather than ratcheting upward
+    # from recent engine activity. The scenario uses a fixed sustain target and
+    # disables recurring stable growth; NOAM routing/clearing may still create
+    # modest variation around the empirical weekly moment.
     args._validation_swap_floor_per_tick = int(
-        math.ceil((empirical_total_swaps / max(1, int(args.ticks))) * 0.68)
+        math.ceil((empirical_total_swaps / max(1, int(args.ticks))) * 0.90)
     )
-    args._validation_route_requests_per_tick = max(8, int(math.ceil(args._validation_swap_floor_per_tick / 50)))
-    args._validation_swap_budget_per_tick = max(240, int(math.ceil(args._validation_swap_floor_per_tick * 0.70)))
-    args._validation_swap_attempts_max_per_pool = 10
+    args._validation_route_requests_per_tick = 1
+    args._validation_swap_budget_per_tick = max(60, int(math.ceil(args._validation_swap_floor_per_tick * 0.25)))
+    args._validation_swap_attempts_max_per_pool = 2
     args._validation_swap_sustain_max_extra_attempts = max(
-        1200, int(math.ceil(args._validation_swap_floor_per_tick * 3.0))
+        600, int(math.ceil(args._validation_swap_floor_per_tick * 1.50))
     )
-    args._validation_swap_sustain_max_rounds = 5
+    args._validation_swap_sustain_max_rounds = 2
     # Sarafu had substantial historical backing/liquidity inflow. This shock is
     # validation-only historical backing, not a bond/LP injection.
-    args._validation_backing_shock_per_pool = (empirical_total_backing * 0.55) / max(1, target_pool_count)
+    args._validation_backing_shock_per_pool = empirical_total_backing / max(1, target_pool_count)
     term_ticks = selected_terms(args)[0] if selected_terms(args) else int(args.ticks)
     bond_rows: list[dict[str, object]] = []
     network_rows: list[dict[str, object]] = []

@@ -78,6 +78,9 @@ case "$JOB" in
   validation-smoke)
     run_engine_validation 5 52 11 engine_validation_smoke
     ;;
+  validation-pilot)
+    run_engine_validation 20 260 1 engine_validation_20run
+    ;;
   validation-full)
     run_engine_validation 100 260 1 engine_validation
     ;;
@@ -92,7 +95,7 @@ case "$JOB" in
     ;;
   *)
     echo "Unknown job: $JOB" >&2
-    echo "Use one of: validation-1mo, validation-smoke, validation-full, frontier-smoke, frontier-pilot, frontier-publication" >&2
+    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, frontier-smoke, frontier-pilot, frontier-publication" >&2
     exit 2
     ;;
 esac

@@ -9,7 +9,8 @@ transactions, addresses, report text, GPS data, pool labels, or pool IDs.
 
 ## Quick Copy/Paste
 
-Run this on the remote server after the repo already exists:
+Run this on the remote server after the repo already exists. For the current
+calibration fix, run the 20-run pilot first:
 
 ```bash
 cd ~/sim
@@ -17,11 +18,30 @@ git pull
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 
+./scripts/start_regenbond_batch_tmux.sh validation-pilot
+tail -f analysis/monte_carlo/validation-pilot.log
+```
+
+If the pilot returns `status=pass`, run the full paper-facing validation:
+
+```bash
 ./scripts/start_regenbond_batch_tmux.sh validation-full
 tail -f analysis/monte_carlo/validation-full.log
 ```
 
-Run this on your local computer after the remote job finishes:
+Run this on your local computer after the pilot finishes:
+
+```bash
+mkdir -p /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo
+
+scp -i ~/.ssh/id_ed25519 -r root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation_20run \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/
+
+scp -i ~/.ssh/id_ed25519 root@128.140.120.36:~/sim/analysis/monte_carlo/validation-pilot.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_20run/
+```
+
+Run this on your local computer after the full validation finishes:
 
 ```bash
 mkdir -p /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo
@@ -30,6 +50,17 @@ scp -r root@wor-testing:~/sim/analysis/monte_carlo/engine_validation \
   /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/
 
 scp root@wor-testing:~/sim/analysis/monte_carlo/validation-full.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation/
+```
+
+If you do not have the `wor-testing` SSH alias configured, use the explicit
+host and key:
+
+```bash
+scp -i ~/.ssh/id_ed25519 -r root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/
+
+scp -i ~/.ssh/id_ed25519 root@128.140.120.36:~/sim/analysis/monte_carlo/validation-full.log \
   /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation/
 ```
 
@@ -49,6 +80,7 @@ Use the wrapper from the repo root:
 ```bash
 ./scripts/run_regenbond_remote_batch.sh validation-1mo
 ./scripts/run_regenbond_remote_batch.sh validation-smoke
+./scripts/run_regenbond_remote_batch.sh validation-pilot
 ./scripts/run_regenbond_remote_batch.sh validation-full
 ./scripts/run_regenbond_remote_batch.sh frontier-smoke
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
@@ -147,13 +179,14 @@ tail -f analysis/monte_carlo/validation-full.log
 
 ## Paper-Facing Sequence
 
-1. Run `validation-full`.
-2. Confirm `analysis/monte_carlo/engine_validation/engine_validation_summary.csv`
+1. Run `validation-pilot` when recalibrating the no-bond engine.
+2. If the pilot passes, run `validation-full`.
+3. Confirm `analysis/monte_carlo/engine_validation/engine_validation_summary.csv`
    has `status=pass`.
-3. Run `frontier-pilot`.
-4. Inspect `bond_issuer_frontier_safety.csv`, `safe_injection_frontier.csv`, and
+4. Run `frontier-pilot`.
+5. Inspect `bond_issuer_frontier_safety.csv`, `safe_injection_frontier.csv`, and
    `paper_integration_notes.md`.
-5. Run `frontier-publication` only after the validation gate and pilot outputs
+6. Run `frontier-publication` only after the validation gate and pilot outputs
    look correct.
 
 ## Expected Validation Outputs
@@ -193,3 +226,8 @@ For a clean paper-facing pass, `engine_validation_summary.csv` should report
 row. If the status is `review`, inspect the error rows before using frontier
 outputs as headline paper evidence. If the status is `fail`, do not use frontier
 outputs for the paper until the calibration miss is fixed.
+
+For recalibration work, run `validation-pilot` before `validation-full`. The
+pilot uses 20 runs over the full 260-week horizon and writes to
+`analysis/monte_carlo/engine_validation_20run/`, so it does not overwrite the
+paper-facing full validation directory.
