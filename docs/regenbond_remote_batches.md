@@ -7,6 +7,32 @@ privacy-safe Sarafu calibration bundle under `analysis/sarafu_calibration/`.
 The calibration bundle is aggregate/anonymized. It does not include raw Sarafu
 transactions, addresses, report text, GPS data, pool labels, or pool IDs.
 
+## Quick Copy/Paste
+
+Run this on the remote server after the repo already exists:
+
+```bash
+cd ~/sim
+git pull
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+
+./scripts/start_regenbond_batch_tmux.sh validation-full
+tail -f analysis/monte_carlo/validation-full.log
+```
+
+Run this on your local computer after the remote job finishes:
+
+```bash
+mkdir -p /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo
+
+scp -r root@wor-testing:~/sim/analysis/monte_carlo/engine_validation \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/
+
+scp root@wor-testing:~/sim/analysis/monte_carlo/validation-full.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation/
+```
+
 ## Server Setup
 
 ```bash
