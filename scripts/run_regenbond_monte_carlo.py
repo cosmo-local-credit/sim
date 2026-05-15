@@ -662,6 +662,10 @@ def scenario_config(
         cfg.random_route_requests_per_tick = int(getattr(args, "_validation_route_requests_per_tick", 2))
         cfg.swap_requests_budget_per_tick = int(getattr(args, "_validation_swap_budget_per_tick", 120))
         cfg.swap_attempts_max_per_pool = int(getattr(args, "_validation_swap_attempts_max_per_pool", 2))
+        cfg.max_hops = 2
+        cfg.noam_max_hops = 2
+        cfg.noam_overlay_enabled = False
+        cfg.noam_clearing_enabled = False
         cfg.swap_sustain_window_ticks = 0
         cfg.swap_sustain_floor_per_tick = int(getattr(args, "_validation_swap_floor_per_tick", 0))
         cfg.swap_sustain_max_extra_attempts = int(
@@ -2511,10 +2515,11 @@ def run_sarafu_engine_validation(args: argparse.Namespace, calibration: Calibrat
     empirical_total_swaps = sum(safe_float(row["total_swap_events_horizon"]) for row in empirical_targets)
     empirical_total_backing = sum(safe_float(row["backing_liquidity_inflow"]) for row in empirical_targets)
     target_pool_count = sum(int(count) for count in getattr(args, "_target_tier_counts", {}).values()) or 1
-    # Validation should target Sarafu activity rather than ratcheting upward
-    # from recent engine activity. The scenario uses a fixed sustain target and
-    # disables recurring stable growth; NOAM routing/clearing may still create
-    # modest variation around the empirical weekly moment.
+    # Validation should target current Sarafu activity rather than ratcheting
+    # upward from recent engine activity. The scenario uses shallow pool swaps,
+    # disables NOAM overlay/clearing, and disables recurring stable growth.
+    # Denser NOAM routing/clearing is reserved for scaled frontier networks
+    # after this current-network gate passes.
     args._validation_swap_floor_per_tick = int(
         math.ceil((empirical_total_swaps / max(1, int(args.ticks))) * 0.90)
     )
