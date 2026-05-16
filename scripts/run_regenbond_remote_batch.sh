@@ -15,12 +15,31 @@ fi
 
 CALIBRATION_DIR="${CALIBRATION_DIR:-analysis/sarafu_calibration}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-analysis/monte_carlo}"
+WORKERS_VALUE="${WORKERS:-${MONTE_CARLO_WORKERS:-auto}}"
+PARTIAL_AGGREGATE_STRIDE_VALUE="${PARTIAL_AGGREGATE_STRIDE:-1}"
+MONTE_CARLO_EXTRA_ARGS=(
+  --workers "$WORKERS_VALUE"
+  --partial-aggregate-stride "$PARTIAL_AGGREGATE_STRIDE_VALUE"
+)
+if [[ -n "${SHARD_DIR:-}" ]]; then
+  MONTE_CARLO_EXTRA_ARGS+=(--shard-dir "$SHARD_DIR")
+fi
+case "${RESUME:-1}" in
+  0|false|FALSE|no|NO)
+    MONTE_CARLO_EXTRA_ARGS+=(--no-resume)
+    ;;
+  *)
+    MONTE_CARLO_EXTRA_ARGS+=(--resume)
+    ;;
+esac
 mkdir -p "$OUTPUT_ROOT"
 
 echo "[batch] job=$JOB"
 echo "[batch] python=$PYTHON_BIN"
 echo "[batch] calibration_dir=$CALIBRATION_DIR"
 echo "[batch] output_root=$OUTPUT_ROOT"
+echo "[batch] workers=$WORKERS_VALUE"
+echo "[batch] resume=${RESUME:-1}"
 
 run_engine_validation() {
   local default_runs="$1"
@@ -38,7 +57,8 @@ run_engine_validation() {
     --pool-metrics-stride "${POOL_METRICS_STRIDE:-13}" \
     --progress-stride "${PROGRESS_STRIDE:-13}" \
     --calibration-dir "$CALIBRATION_DIR" \
-    --output "$output_dir"
+    --output "$output_dir" \
+    "${MONTE_CARLO_EXTRA_ARGS[@]}"
 }
 
 run_frontier() {
@@ -69,7 +89,8 @@ run_frontier() {
     --pool-metrics-stride "${POOL_METRICS_STRIDE:-13}" \
     --progress-stride "${PROGRESS_STRIDE:-13}" \
     --calibration-dir "$CALIBRATION_DIR" \
-    --output "$output_dir"
+    --output "$output_dir" \
+    "${MONTE_CARLO_EXTRA_ARGS[@]}"
 }
 
 case "$JOB" in

@@ -11,14 +11,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import json
 import math
+import os
 import random
 import sys
 import time
+import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -275,6 +280,35 @@ def parse_args() -> argparse.Namespace:
         help="Print run progress every N ticks. Use 0 to disable progress logging.",
     )
     parser.add_argument(
+        "--workers",
+        default="auto",
+        help="Parallel worker count. Use 'auto' for min(cpu_count - 1, 8), or an integer.",
+    )
+    parser.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        default=True,
+        help="Reuse completed matching shards from prior runs.",
+    )
+    parser.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="Ignore existing shards and recompute all jobs.",
+    )
+    parser.add_argument(
+        "--shard-dir",
+        default=None,
+        help="Directory for resumable shard files. Defaults to <output>/_shards.",
+    )
+    parser.add_argument(
+        "--partial-aggregate-stride",
+        type=int,
+        default=1,
+        help="Write partial aggregate CSVs after every N completed jobs.",
+    )
+    parser.add_argument(
         "--no-png",
         action="store_true",
         help="Skip PNG figure generation.",
@@ -334,11 +368,159 @@ def read_csv(path: Path) -> list[dict[str, str]]:
 
 def write_csv(path: Path, fieldnames: list[str], rows: Iterable[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with tmp_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+    tmp_path.replace(path)
+
+
+def write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def read_json(path: Path) -> dict[str, object]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def canonical_hash(payload: object) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+SHARD_CONFIG_KEYS = (
+    "scenario",
+    "runs",
+    "ticks",
+    "seed",
+    "coupon_targets",
+    "terms",
+    "term",
+    "network_scales",
+    "principal_ratios",
+    "bond_fee_service_shares",
+    "certification_policy",
+    "issuer_reserve_share",
+    "issuer_payment_stride",
+    "frontier_mode",
+    "frontier_refinement_rounds",
+    "route_success_floor",
+    "calibration_dir",
+    "max_active_pools_per_tick",
+    "pool_metrics_stride",
+    "analysis_stride",
+    "progress_stride",
+)
+
+
+def args_payload(args: argparse.Namespace) -> dict[str, object]:
+    return {key: getattr(args, key) for key in SHARD_CONFIG_KEYS if hasattr(args, key)}
+
+
+def namespace_from_payload(payload: dict[str, object]) -> argparse.Namespace:
+    return argparse.Namespace(**payload)
+
+
+def resolve_workers(value: object) -> int:
+    text = str(value or "auto").strip().lower()
+    if text == "auto":
+        cpu_count = os.cpu_count() or 1
+        return max(1, min(cpu_count - 1, 8))
+    try:
+        return max(1, int(text))
+    except ValueError as exc:
+        raise ValueError(f"Invalid --workers value: {value!r}") from exc
+
+
+def root_shard_dir(args: argparse.Namespace, output_dir: Path) -> Path:
+    if args.shard_dir:
+        return Path(args.shard_dir).resolve()
+    return output_dir / "_shards"
+
+
+def shard_job_hash(args: argparse.Namespace, job: dict[str, object]) -> str:
+    return canonical_hash({"args": args_payload(args), "job": job})
+
+
+def shard_job_dir(shard_root: Path, kind: str, job_id: str) -> Path:
+    return shard_root / kind / job_id
+
+
+def completed_manifest(path: Path, config_hash: str) -> bool:
+    manifest = read_json(path)
+    return manifest.get("status") == "completed" and manifest.get("config_hash") == config_hash
+
+
+def write_shard_manifest(
+    shard_dir: Path,
+    *,
+    job: dict[str, object],
+    config_hash: str,
+    status: str,
+    files: dict[str, int] | None = None,
+    error: str = "",
+    started_at: float | None = None,
+) -> None:
+    ended_at = time.time()
+    payload: dict[str, object] = {
+        "status": status,
+        "config_hash": config_hash,
+        "job": job,
+        "files": files or {},
+        "started_at": started_at or ended_at,
+        "ended_at": ended_at,
+        "elapsed_seconds": ended_at - (started_at or ended_at),
+    }
+    if error:
+        payload["error"] = error
+    write_json(shard_dir / "manifest.json", payload)
+
+
+def write_rows(path: Path, rows: list[dict[str, object]]) -> None:
+    write_csv(path, list(rows[0].keys()) if rows else [], rows)
+
+
+def read_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    return read_csv(path)
+
+
+def sorted_run_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("scenario", "")),
+            str(row.get("network_scale", "")),
+            safe_float(row.get("principal_ratio")),
+            safe_float(row.get("coupon_target_annual")),
+            safe_float(row.get("bond_fee_service_share")),
+            safe_float(row.get("bond_term_ticks")),
+            safe_float(row.get("run")),
+            safe_float(row.get("tick")),
+            safe_float(row.get("seed")),
+        ),
+    )
+
+
+def sorted_frontier_safety_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("network_scale", "")),
+            safe_float(row.get("coupon_target_annual")),
+            safe_float(row.get("bond_fee_service_share")),
+            safe_float(row.get("principal_ratio")),
+        ),
+    )
 
 
 def safe_float(value: object, default: float = 0.0) -> float:
@@ -364,6 +546,116 @@ def percentile(values: list[float], q: float) -> float:
         return ordered[lo]
     frac = pos - lo
     return ordered[lo] * (1.0 - frac) + ordered[hi] * frac
+
+
+def shard_result_from_files(
+    *,
+    kind: str,
+    job: dict[str, object],
+    shard_root: Path,
+    config_hash: str,
+    csv_names: tuple[str, ...],
+) -> dict[str, object] | None:
+    job_dir = shard_job_dir(shard_root, kind, str(job["job_id"]))
+    if not completed_manifest(job_dir / "manifest.json", config_hash):
+        return None
+    result: dict[str, object] = {"status": "completed", "job": job, "shard_dir": str(job_dir)}
+    for name in csv_names:
+        result[name] = read_rows(job_dir / f"{name}.csv")
+    return result
+
+
+def failed_result(job: dict[str, object], error: str) -> dict[str, object]:
+    return {"status": "failed", "job": job, "error": error}
+
+
+def run_sharded_jobs(
+    *,
+    label: str,
+    kind: str,
+    jobs: list[dict[str, object]],
+    args: argparse.Namespace,
+    calibration: Calibration,
+    output_dir: Path,
+    worker: Callable[[dict[str, object], dict[str, object], Calibration, str, bool], dict[str, object]],
+    load_completed: Callable[[dict[str, object], Path, str], dict[str, object] | None],
+    on_progress: Callable[[list[dict[str, object]]], None] | None = None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    shard_root = root_shard_dir(args, output_dir)
+    args_data = args_payload(args)
+    worker_count = resolve_workers(args.workers)
+    stride = max(1, int(getattr(args, "partial_aggregate_stride", 1) or 1))
+    completed: list[dict[str, object]] = []
+    pending: list[dict[str, object]] = []
+    failed: list[dict[str, object]] = []
+
+    for job in jobs:
+        config_hash = shard_job_hash(args, job)
+        job["config_hash"] = config_hash
+        if args.resume:
+            result = load_completed(job, shard_root, config_hash)
+            if result is not None:
+                completed.append(result)
+                continue
+        pending.append(job)
+
+    print(
+        f"[parallel] {label}: workers={worker_count} completed={len(completed)} pending={len(pending)}",
+        flush=True,
+    )
+    if completed and on_progress is not None:
+        on_progress(completed)
+
+    def handle_result(result: dict[str, object]) -> None:
+        if result.get("status") == "completed":
+            completed.append(result)
+        else:
+            failed.append(result)
+        done = len(completed) + len(failed)
+        if on_progress is not None and done % stride == 0:
+            on_progress(completed)
+        status = result.get("status")
+        job_id = result.get("job", {}).get("job_id", "?") if isinstance(result.get("job"), dict) else "?"
+        print(f"[parallel] {label}: {status} {job_id} ({done}/{len(jobs)})", flush=True)
+
+    if worker_count == 1:
+        for job in pending:
+            try:
+                handle_result(worker(job, args_data, calibration, str(shard_root), bool(args.resume)))
+            except BaseException:
+                error = traceback.format_exc()
+                write_shard_manifest(
+                    shard_job_dir(shard_root, kind, str(job["job_id"])),
+                    job=job,
+                    config_hash=str(job["config_hash"]),
+                    status="failed",
+                    error=error,
+                )
+                handle_result(failed_result(job, error))
+    elif pending:
+        with ProcessPoolExecutor(max_workers=worker_count) as pool:
+            futures = {
+                pool.submit(worker, job, args_data, calibration, str(shard_root), bool(args.resume)): job
+                for job in pending
+            }
+            for future in as_completed(futures):
+                job = futures[future]
+                try:
+                    handle_result(future.result())
+                except BaseException:
+                    error = traceback.format_exc()
+                    write_shard_manifest(
+                        shard_job_dir(shard_root, kind, str(job["job_id"])),
+                        job=job,
+                        config_hash=str(job["config_hash"]),
+                        status="failed",
+                        error=error,
+                    )
+                    handle_result(failed_result(job, error))
+
+    if on_progress is not None:
+        on_progress(completed)
+    return completed, failed
 
 
 def load_calibration(calibration_dir: Path) -> Calibration:
@@ -2715,6 +3007,165 @@ def write_engine_validation_notes(
     (output_dir / "paper_integration_notes.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def load_validation_shard(job: dict[str, object], shard_root: Path, config_hash: str) -> dict[str, object] | None:
+    return shard_result_from_files(
+        kind="validation",
+        job=job,
+        shard_root=shard_root,
+        config_hash=config_hash,
+        csv_names=("bond_rows", "network_rows", "failure_rows", "summary_rows"),
+    )
+
+
+def run_validation_shard(
+    job: dict[str, object],
+    args_data: dict[str, object],
+    calibration: Calibration,
+    shard_root_text: str,
+    resume: bool,
+) -> dict[str, object]:
+    shard_root = Path(shard_root_text)
+    job_dir = shard_job_dir(shard_root, "validation", str(job["job_id"]))
+    config_hash = str(job["config_hash"])
+    if resume:
+        completed = load_validation_shard(job, shard_root, config_hash)
+        if completed is not None:
+            return completed
+    started_at = time.time()
+    try:
+        args = namespace_from_payload(args_data)
+        apply_network_context(
+            args,
+            calibration=calibration,
+            network_scale="current",
+            principal_ratio=0.0,
+            principal_usd=0.0,
+            service_share=0.0,
+            certification_policy="none",
+        )
+        args._current_certified_pool_count = 0.0
+        args._current_certified_capacity_usd = 0.0
+        configure_sarafu_activity_controls(args, calibration, int(args.ticks), "validation")
+        run_idx = int(job["run_idx"])
+        seed = int(job["seed"])
+        term_ticks = int(job["term_ticks"])
+        print(
+            f"[{run_idx}/{args.runs}] scenario=sarafu_engine_validation ticks={args.ticks} run={run_idx} seed={seed}",
+            flush=True,
+        )
+        args._progress_run_position = run_idx
+        args._progress_total_runs = int(args.runs)
+        bond_rows, network_rows, failure_rows, summary = run_one(
+            scenario="sarafu_engine_validation",
+            coupon=0.0,
+            term_ticks=term_ticks,
+            run_index=run_idx,
+            seed=seed,
+            args=args,
+            calibration=calibration,
+        )
+        summary_rows = [summary]
+        write_rows(job_dir / "bond_rows.csv", bond_rows)
+        write_rows(job_dir / "network_rows.csv", network_rows)
+        write_rows(job_dir / "failure_rows.csv", failure_rows)
+        write_rows(job_dir / "summary_rows.csv", summary_rows)
+        files = {
+            "bond_rows": len(bond_rows),
+            "network_rows": len(network_rows),
+            "failure_rows": len(failure_rows),
+            "summary_rows": len(summary_rows),
+        }
+        write_shard_manifest(
+            job_dir,
+            job=job,
+            config_hash=config_hash,
+            status="completed",
+            files=files,
+            started_at=started_at,
+        )
+        return {
+            "status": "completed",
+            "job": job,
+            "shard_dir": str(job_dir),
+            "bond_rows": bond_rows,
+            "network_rows": network_rows,
+            "failure_rows": failure_rows,
+            "summary_rows": summary_rows,
+        }
+    except BaseException:
+        error = traceback.format_exc()
+        write_shard_manifest(
+            job_dir,
+            job=job,
+            config_hash=config_hash,
+            status="failed",
+            error=error,
+            started_at=started_at,
+        )
+        return failed_result(job, error)
+
+
+def write_engine_validation_aggregate(
+    args: argparse.Namespace,
+    calibration: Calibration,
+    output_dir: Path,
+    *,
+    bond_rows: list[dict[str, object]],
+    network_rows: list[dict[str, object]],
+    failures: list[dict[str, object]],
+    summaries: list[dict[str, object]],
+    partial: bool,
+) -> str:
+    bond_rows = sorted_run_rows(bond_rows)
+    network_rows = sorted_run_rows(network_rows)
+    failures = sorted_run_rows(failures)
+    summaries = sorted_run_rows(summaries)
+    rows = engine_validation_moments(calibration, summaries, ticks=int(args.ticks))
+    status = engine_validation_status(rows)
+    error_rows = [row for row in rows if row["validation_status"] in {"review", "fail"}]
+    summary_rows = [
+        {
+            "scenario": "sarafu_engine_validation",
+            "runs": len(summaries),
+            "ticks": int(args.ticks),
+            "status": status,
+            "binding_pass_count": sum(1 for row in rows if row["binding"] == 1 and row["validation_status"] == "pass"),
+            "binding_review_count": sum(1 for row in rows if row["binding"] == 1 and row["validation_status"] == "review"),
+            "binding_fail_count": sum(1 for row in rows if row["binding"] == 1 and row["validation_status"] == "fail"),
+            "reported_diagnostic_count": sum(1 for row in rows if row["validation_status"] == "reported"),
+        }
+    ]
+    suffix = ".partial.csv" if partial else ".csv"
+    write_csv(output_dir / f"engine_validation_moments{suffix}", list(rows[0].keys()) if rows else [], rows)
+    write_csv(output_dir / f"engine_validation_errors{suffix}", list(rows[0].keys()) if rows else [], error_rows)
+    write_csv(output_dir / f"engine_validation_summary{suffix}", list(summary_rows[0].keys()), summary_rows)
+    write_csv(output_dir / f"engine_validation_run_summary{suffix}", list(summaries[0].keys()) if summaries else [], summaries)
+    write_csv(output_dir / f"engine_validation_bond_timeseries{suffix}", list(bond_rows[0].keys()) if bond_rows else [], bond_rows)
+    write_csv(output_dir / f"engine_validation_network_timeseries{suffix}", list(network_rows[0].keys()) if network_rows else [], network_rows)
+    write_csv(output_dir / f"engine_validation_failure_metrics{suffix}", list(failures[0].keys()) if failures else [], failures)
+    if not partial:
+        write_engine_validation_table(output_dir, rows, status)
+        if not args.no_png:
+            write_engine_validation_figures(output_dir, rows)
+        write_engine_validation_notes(output_dir, status=status, args=args, rows=rows)
+    return status
+
+
+def validation_results_to_rows(
+    results: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    bond_rows: list[dict[str, object]] = []
+    network_rows: list[dict[str, object]] = []
+    failures: list[dict[str, object]] = []
+    summaries: list[dict[str, object]] = []
+    for result in results:
+        bond_rows.extend(result.get("bond_rows", []))
+        network_rows.extend(result.get("network_rows", []))
+        failures.extend(result.get("failure_rows", []))
+        summaries.extend(result.get("summary_rows", []))
+    return bond_rows, network_rows, failures, summaries
+
+
 def run_sarafu_engine_validation(args: argparse.Namespace, calibration: Calibration, output_dir: Path) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     apply_network_context(
@@ -2737,60 +3188,54 @@ def run_sarafu_engine_validation(args: argparse.Namespace, calibration: Calibrat
     # Sarafu had substantial historical backing/liquidity inflow. This shock is
     # validation-only historical backing, not a bond/LP injection.
     term_ticks = selected_terms(args)[0] if selected_terms(args) else int(args.ticks)
-    bond_rows: list[dict[str, object]] = []
-    network_rows: list[dict[str, object]] = []
-    summaries: list[dict[str, object]] = []
-    failures: list[dict[str, object]] = []
-    for run_idx in range(1, int(args.runs) + 1):
-        seed = int(args.seed) + run_idx
-        print(
-            f"[{run_idx}/{args.runs}] scenario=sarafu_engine_validation ticks={args.ticks} run={run_idx} seed={seed}",
-            flush=True,
-        )
-        args._progress_run_position = run_idx
-        args._progress_total_runs = int(args.runs)
-        b, n, f, s = run_one(
-            scenario="sarafu_engine_validation",
-            coupon=0.0,
-            term_ticks=term_ticks,
-            run_index=run_idx,
-            seed=seed,
-            args=args,
-            calibration=calibration,
-        )
-        bond_rows.extend(b)
-        network_rows.extend(n)
-        failures.extend(f)
-        summaries.append(s)
-
-    rows = engine_validation_moments(calibration, summaries, ticks=int(args.ticks))
-    status = engine_validation_status(rows)
-    error_rows = [row for row in rows if row["validation_status"] in {"review", "fail"}]
-    summary_rows = [
+    jobs = [
         {
-            "scenario": "sarafu_engine_validation",
-            "runs": int(args.runs),
-            "ticks": int(args.ticks),
-            "status": status,
-            "binding_pass_count": sum(1 for row in rows if row["binding"] == 1 and row["validation_status"] == "pass"),
-            "binding_review_count": sum(1 for row in rows if row["binding"] == 1 and row["validation_status"] == "review"),
-            "binding_fail_count": sum(1 for row in rows if row["binding"] == 1 and row["validation_status"] == "fail"),
-            "reported_diagnostic_count": sum(1 for row in rows if row["validation_status"] == "reported"),
+            "kind": "validation_run",
+            "job_id": f"validation_run_{run_idx:06d}",
+            "run_idx": run_idx,
+            "seed": int(args.seed) + run_idx,
+            "term_ticks": term_ticks,
         }
+        for run_idx in range(1, int(args.runs) + 1)
     ]
-    write_csv(output_dir / "engine_validation_moments.csv", list(rows[0].keys()) if rows else [], rows)
-    write_csv(output_dir / "engine_validation_errors.csv", list(rows[0].keys()) if rows else [], error_rows)
-    write_csv(output_dir / "engine_validation_summary.csv", list(summary_rows[0].keys()), summary_rows)
-    write_csv(output_dir / "engine_validation_run_summary.csv", list(summaries[0].keys()) if summaries else [], summaries)
-    write_csv(output_dir / "engine_validation_bond_timeseries.csv", list(bond_rows[0].keys()) if bond_rows else [], bond_rows)
-    write_csv(output_dir / "engine_validation_network_timeseries.csv", list(network_rows[0].keys()) if network_rows else [], network_rows)
-    write_csv(output_dir / "engine_validation_failure_metrics.csv", list(failures[0].keys()) if failures else [], failures)
-    write_engine_validation_table(output_dir, rows, status)
-    if not args.no_png:
-        write_engine_validation_figures(output_dir, rows)
-    write_engine_validation_notes(output_dir, status=status, args=args, rows=rows)
+
+    def write_partial(results: list[dict[str, object]]) -> None:
+        b, n, f, s = validation_results_to_rows(results)
+        write_engine_validation_aggregate(
+            args,
+            calibration,
+            output_dir,
+            bond_rows=b,
+            network_rows=n,
+            failures=f,
+            summaries=s,
+            partial=True,
+        )
+
+    results, failed = run_sharded_jobs(
+        label="engine validation",
+        kind="validation",
+        jobs=jobs,
+        args=args,
+        calibration=calibration,
+        output_dir=output_dir,
+        worker=run_validation_shard,
+        load_completed=load_validation_shard,
+        on_progress=write_partial,
+    )
+    bond_rows, network_rows, failures, summaries = validation_results_to_rows(results)
+    status = write_engine_validation_aggregate(
+        args,
+        calibration,
+        output_dir,
+        bond_rows=bond_rows,
+        network_rows=network_rows,
+        failures=failures,
+        summaries=summaries,
+        partial=False,
+    )
     print(f"Wrote engine validation artifacts to {output_dir} (status={status})")
-    return 0
+    return 1 if failed or len(summaries) != int(args.runs) else 0
 
 
 def service_coverage(row: dict[str, object]) -> float:
@@ -3285,152 +3730,230 @@ def frontier_validation_gate_status(output_dir: Path) -> str:
     return str(rows[0].get("status", "")).strip().lower() or "missing"
 
 
-def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration, output_dir: Path) -> int:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    validation_status = frontier_validation_gate_status(output_dir)
-    if validation_status == "fail":
-        raise RuntimeError(
-            "Refusing paper-facing bond_issuer_frontier because full engine validation status is fail."
-        )
-    if validation_status in {"missing", "review"}:
-        print(
-            f"Validation gate status for frontier is {validation_status}; outputs should be treated as non-final.",
-            flush=True,
-        )
-    configure_sarafu_activity_controls(args, calibration, int(args.ticks), "frontier")
-    network_scales = parse_str_list(args.network_scales)
-    for scale in network_scales:
-        if scale not in NETWORK_SCALE_FACTORS:
-            raise ValueError(f"Unknown network scale {scale!r}")
-    principal_ratios = sorted({max(0.0, value) for value in parse_float_list(args.principal_ratios)})
-    coupons = parse_float_list(args.coupon_targets)
-    service_shares = parse_float_list(args.bond_fee_service_shares)
-    term_ticks = selected_terms(args)[0] if selected_terms(args) else int(args.ticks)
-    all_run_rows: list[dict[str, object]] = []
-    safety_rows: list[dict[str, object]] = []
-    safety_by_key: dict[tuple[str, float, float, float], dict[str, object]] = {}
-    baseline_by_scale: dict[str, dict[str, float]] = {}
-    scale_seed_offsets = {scale: idx * 10_000_000 for idx, scale in enumerate(network_scales)}
+def frontier_token(value: object) -> str:
+    text = f"{safe_float(value):.8f}".rstrip("0").rstrip(".")
+    return text.replace("-", "m").replace(".", "p") or "0"
 
-    for scale in network_scales:
-        baseline_rows = run_frontier_cell(
-            args,
-            calibration,
-            network_scale=scale,
-            principal_ratio=0.0,
-            principal_usd=0.0,
-            coupon=0.0,
-            service_share=0.0,
-            term_ticks=term_ticks,
-            seed_offset=scale_seed_offsets[scale],
-        )
-        all_run_rows.extend(baseline_rows)
-        baseline_by_scale[scale] = {
-            "route_success_p50": percentile(
-                [safe_float(row.get("route_success_rate_cumulative")) for row in baseline_rows], 0.50
-            ),
-            "swap_volume_p50": percentile(
-                [safe_float(row.get("swap_volume_usd_total")) for row in baseline_rows], 0.50
-            ),
-            "voucher_to_voucher_count_p50": percentile(
-                [safe_float(row.get("swap_count_vchr_to_vchr_total")) for row in baseline_rows], 0.50
-            ),
-            "voucher_to_voucher_share_p50": percentile(
-                [
-                    safe_float(row.get("swap_count_vchr_to_vchr_total"))
-                    / max(1e-9, safe_float(row.get("transactions_total")))
-                    for row in baseline_rows
-                ],
-                0.50,
-            ),
-            "stable_value_share_p50": percentile(
-                [safe_float(row.get("stable_value_share_in_active_pools")) for row in baseline_rows], 0.50
-            ),
-            "stable_value_share_p95": percentile(
-                [safe_float(row.get("stable_value_share_in_active_pools")) for row in baseline_rows], 0.95
-            ),
-            "voucher_value_share_p50": percentile(
-                [safe_float(row.get("voucher_value_share_in_active_pools")) for row in baseline_rows], 0.50
-            ),
-            "household_cash_stress_p50": percentile(
-                [safe_float(row.get("household_cash_stress_ratio")) for row in baseline_rows], 0.50
-            ),
-            "household_cash_stress_p95": percentile(
-                [safe_float(row.get("household_cash_stress_ratio")) for row in baseline_rows], 0.95
-            ),
-            "liquidity_leakage_p50": percentile(
-                [safe_float(row.get("stable_liquidity_leakage_ratio_cumulative")) for row in baseline_rows], 0.50
-            ),
-            "liquidity_leakage_p95": percentile(
-                [safe_float(row.get("stable_liquidity_leakage_ratio_cumulative")) for row in baseline_rows], 0.95
-            ),
-        }
 
-    def evaluate_cell(scale: str, ratio: float, coupon: float, service_share: float) -> None:
-        key = frontier_cell_key(scale, ratio, coupon, service_share)
-        if key in safety_by_key:
-            return
+def frontier_job_id(phase: str, scale: str, ratio: float, coupon: float, share: float) -> str:
+    return (
+        f"frontier_{phase}_{scale}_"
+        f"r{frontier_token(ratio)}_c{frontier_token(coupon)}_s{frontier_token(share)}"
+    )
+
+
+def frontier_baseline_metrics(baseline_rows: list[dict[str, object]]) -> dict[str, float]:
+    return {
+        "route_success_p50": percentile(
+            [safe_float(row.get("route_success_rate_cumulative")) for row in baseline_rows], 0.50
+        ),
+        "swap_volume_p50": percentile(
+            [safe_float(row.get("swap_volume_usd_total")) for row in baseline_rows], 0.50
+        ),
+        "voucher_to_voucher_count_p50": percentile(
+            [safe_float(row.get("swap_count_vchr_to_vchr_total")) for row in baseline_rows], 0.50
+        ),
+        "voucher_to_voucher_share_p50": percentile(
+            [
+                safe_float(row.get("swap_count_vchr_to_vchr_total"))
+                / max(1e-9, safe_float(row.get("transactions_total")))
+                for row in baseline_rows
+            ],
+            0.50,
+        ),
+        "stable_value_share_p50": percentile(
+            [safe_float(row.get("stable_value_share_in_active_pools")) for row in baseline_rows], 0.50
+        ),
+        "stable_value_share_p95": percentile(
+            [safe_float(row.get("stable_value_share_in_active_pools")) for row in baseline_rows], 0.95
+        ),
+        "voucher_value_share_p50": percentile(
+            [safe_float(row.get("voucher_value_share_in_active_pools")) for row in baseline_rows], 0.50
+        ),
+        "household_cash_stress_p50": percentile(
+            [safe_float(row.get("household_cash_stress_ratio")) for row in baseline_rows], 0.50
+        ),
+        "household_cash_stress_p95": percentile(
+            [safe_float(row.get("household_cash_stress_ratio")) for row in baseline_rows], 0.95
+        ),
+        "liquidity_leakage_p50": percentile(
+            [safe_float(row.get("stable_liquidity_leakage_ratio_cumulative")) for row in baseline_rows], 0.50
+        ),
+        "liquidity_leakage_p95": percentile(
+            [safe_float(row.get("stable_liquidity_leakage_ratio_cumulative")) for row in baseline_rows], 0.95
+        ),
+    }
+
+
+def load_frontier_cell_shard(job: dict[str, object], shard_root: Path, config_hash: str) -> dict[str, object] | None:
+    return shard_result_from_files(
+        kind="frontier",
+        job=job,
+        shard_root=shard_root,
+        config_hash=config_hash,
+        csv_names=("rows",),
+    )
+
+
+def load_frontier_run_summary(run_dir: Path, run_hash: str) -> dict[str, object] | None:
+    if not completed_manifest(run_dir / "manifest.json", run_hash):
+        return None
+    rows = read_rows(run_dir / "summary.csv")
+    return dict(rows[0]) if rows else None
+
+
+def run_frontier_cell_shard(
+    job: dict[str, object],
+    args_data: dict[str, object],
+    calibration: Calibration,
+    shard_root_text: str,
+    resume: bool,
+) -> dict[str, object]:
+    shard_root = Path(shard_root_text)
+    job_dir = shard_job_dir(shard_root, "frontier", str(job["job_id"]))
+    config_hash = str(job["config_hash"])
+    if resume:
+        completed = load_frontier_cell_shard(job, shard_root, config_hash)
+        if completed is not None:
+            return completed
+    started_at = time.time()
+    try:
+        args = namespace_from_payload(args_data)
+        configure_sarafu_activity_controls(args, calibration, int(args.ticks), "frontier")
+        scale = str(job["network_scale"])
+        ratio = safe_float(job["principal_ratio"])
+        coupon = safe_float(job["coupon"])
+        share = safe_float(job["service_share"])
+        principal_usd = safe_float(job["principal_usd"])
+        term_ticks = int(job["term_ticks"])
+        seed_offset = int(job["seed_offset"])
         capacity = certified_pool_capacity(calibration, scale, args.certification_policy)
-        certified_capacity = max(0.0, capacity["certified_backing_capacity_usd"])
-        principal_usd = certified_capacity * max(0.0, ratio)
-        rows = run_frontier_cell(
+        apply_network_context(
             args,
-            calibration,
+            calibration=calibration,
             network_scale=scale,
             principal_ratio=ratio,
             principal_usd=principal_usd,
-            coupon=coupon,
-            service_share=service_share,
-            term_ticks=term_ticks,
-            seed_offset=scale_seed_offsets[scale],
+            service_share=share,
+            certification_policy=args.certification_policy,
         )
-        all_run_rows.extend(rows)
-        safety = summarize_frontier_cell(rows, baseline_by_scale[scale], args.route_success_floor)
-        safety_rows.append(safety)
-        safety_by_key[key] = safety
-
-    for scale_idx, scale in enumerate(network_scales):
-        for ratio in principal_ratios:
-            for coupon in coupons:
-                for service_share in service_shares:
-                    evaluate_cell(scale, ratio, coupon, service_share)
-
-    if args.frontier_mode == "adaptive":
-        for refinement_round in range(max(0, int(args.frontier_refinement_rounds))):
-            new_cells: list[tuple[str, float, float, float]] = []
-            for scale in network_scales:
-                for coupon in coupons:
-                    for service_share in service_shares:
-                        rows = [
-                            row
-                            for row in safety_by_key.values()
-                            if row["network_scale"] == scale
-                            and abs(safe_float(row["coupon_target_annual"]) - coupon) <= 1e-9
-                            and abs(safe_float(row["bond_fee_service_share"]) - service_share) <= 1e-9
-                        ]
-                        rows = sorted(rows, key=lambda row: safe_float(row["principal_ratio"]))
-                        for low, high in zip(rows, rows[1:]):
-                            low_safe = int(low.get("safe", 0)) == 1
-                            high_safe = int(high.get("safe", 0)) == 1
-                            if low_safe and not high_safe:
-                                midpoint = (safe_float(low["principal_ratio"]) + safe_float(high["principal_ratio"])) / 2.0
-                                key = frontier_cell_key(scale, midpoint, coupon, service_share)
-                                if key not in safety_by_key:
-                                    new_cells.append((scale, midpoint, coupon, service_share))
-                                break
-            if not new_cells:
-                break
+        args._current_certified_pool_count = capacity["certified_pool_count"]
+        args._current_certified_capacity_usd = capacity["certified_backing_capacity_usd"]
+        rows: list[dict[str, object]] = []
+        for run_idx in range(1, int(args.runs) + 1):
+            seed = int(args.seed) + seed_offset + run_idx
+            run_hash = canonical_hash({"cell_config_hash": config_hash, "run_idx": run_idx, "seed": seed})
+            run_dir = job_dir / "runs" / f"run_{run_idx:06d}"
+            if resume:
+                summary = load_frontier_run_summary(run_dir, run_hash)
+                if summary is not None:
+                    rows.append(summary)
+                    continue
             print(
-                f"Adaptive frontier refinement round {refinement_round + 1}: {len(new_cells)} midpoint cells",
+                "[{run}/{runs}] scenario=bond_issuer_frontier scale={scale} principal_ratio={ratio} coupon={coupon} share={share} seed={seed}".format(
+                    run=run_idx,
+                    runs=args.runs,
+                    scale=scale,
+                    ratio=ratio,
+                    coupon=coupon,
+                    share=share,
+                    seed=seed,
+                ),
                 flush=True,
             )
-            for scale, ratio, coupon, service_share in new_cells:
-                evaluate_cell(scale, ratio, coupon, service_share)
+            args._progress_run_position = run_idx
+            args._progress_total_runs = int(args.runs)
+            _, _, _, summary = run_one(
+                scenario="bond_issuer_frontier",
+                coupon=coupon,
+                term_ticks=term_ticks,
+                run_index=run_idx,
+                seed=seed,
+                args=args,
+                calibration=calibration,
+            )
+            write_rows(run_dir / "summary.csv", [summary])
+            write_shard_manifest(
+                run_dir,
+                job={**job, "run_idx": run_idx, "seed": seed},
+                config_hash=run_hash,
+                status="completed",
+                files={"summary": 1},
+            )
+            rows.append(summary)
+        rows = sorted_run_rows(rows)
+        write_rows(job_dir / "rows.csv", rows)
+        write_shard_manifest(
+            job_dir,
+            job=job,
+            config_hash=config_hash,
+            status="completed",
+            files={"rows": len(rows)},
+            started_at=started_at,
+        )
+        return {"status": "completed", "job": job, "shard_dir": str(job_dir), "rows": rows}
+    except BaseException:
+        error = traceback.format_exc()
+        write_shard_manifest(
+            job_dir,
+            job=job,
+            config_hash=config_hash,
+            status="failed",
+            error=error,
+            started_at=started_at,
+        )
+        return failed_result(job, error)
 
+
+def frontier_results_to_run_rows(results: list[dict[str, object]]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for result in results:
+        rows.extend(result.get("rows", []))
+    return sorted_run_rows(rows)
+
+
+def frontier_safety_from_results(
+    cell_results: list[dict[str, object]],
+    baseline_by_scale: dict[str, dict[str, float]],
+    route_success_floor: float,
+) -> list[dict[str, object]]:
+    safety_rows = []
+    seen: set[tuple[str, float, float, float]] = set()
+    for result in cell_results:
+        rows = list(result.get("rows", []))
+        if not rows:
+            continue
+        first = rows[0]
+        key = frontier_cell_key(
+            str(first.get("network_scale", "")),
+            safe_float(first.get("principal_ratio")),
+            safe_float(first.get("coupon_target_annual")),
+            safe_float(first.get("bond_fee_service_share")),
+        )
+        if key in seen:
+            continue
+        baseline = baseline_by_scale.get(key[0])
+        if baseline is None:
+            continue
+        safety_rows.append(summarize_frontier_cell(rows, baseline, route_success_floor))
+        seen.add(key)
+    return sorted_frontier_safety_rows(safety_rows)
+
+
+def frontier_summary_rows(
+    network_scales: list[str],
+    safety_rows: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     frontier_rows = []
     grouped: dict[tuple[str, float, float], list[dict[str, object]]] = defaultdict(list)
     for row in safety_rows:
-        grouped[(str(row["network_scale"]), safe_float(row["coupon_target_annual"]), safe_float(row["bond_fee_service_share"]))].append(row)
+        grouped[
+            (
+                str(row["network_scale"]),
+                safe_float(row["coupon_target_annual"]),
+                safe_float(row["bond_fee_service_share"]),
+            )
+        ].append(row)
     for (scale, coupon, share), rows in sorted(grouped.items()):
         safe_rows = [row for row in rows if int(row["safe"]) == 1]
         if safe_rows:
@@ -3485,73 +4008,362 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
                 "realized_edge_concentration_p95": safe_float(best.get("realized_edge_concentration_p95")),
             }
         )
+    return frontier_rows, headline_rows
 
+
+def write_frontier_aggregate(
+    args: argparse.Namespace,
+    output_dir: Path,
+    *,
+    network_scales: list[str],
+    all_run_rows: list[dict[str, object]],
+    safety_rows: list[dict[str, object]],
+    partial: bool,
+) -> None:
+    all_run_rows = sorted_run_rows(all_run_rows)
+    safety_rows = sorted_frontier_safety_rows(safety_rows)
+    frontier_rows, headline_rows = frontier_summary_rows(network_scales, safety_rows)
     issuer_rows = issuer_cashflow_summary_rows(safety_rows)
-    write_csv(output_dir / "bond_issuer_frontier_runs.csv", list(all_run_rows[0].keys()) if all_run_rows else [], all_run_rows)
-    write_csv(output_dir / "bond_issuer_frontier_safety.csv", list(safety_rows[0].keys()) if safety_rows else [], safety_rows)
-    write_csv(output_dir / "safe_injection_frontier.csv", list(frontier_rows[0].keys()) if frontier_rows else [], frontier_rows)
-    write_csv(output_dir / "network_scaling_summary.csv", list(headline_rows[0].keys()) if headline_rows else [], headline_rows)
-    write_csv(output_dir / "issuer_cashflow_summary.csv", list(issuer_rows[0].keys()) if issuer_rows else [], issuer_rows)
-    write_frontier_tables(output_dir, safety_rows, frontier_rows)
-    if not args.no_png:
-        write_frontier_figures(output_dir, headline_rows, safety_rows)
-    write_frontier_notes(output_dir, args, headline_rows)
+    suffix = ".partial.csv" if partial else ".csv"
+    write_csv(output_dir / f"bond_issuer_frontier_runs{suffix}", list(all_run_rows[0].keys()) if all_run_rows else [], all_run_rows)
+    write_csv(output_dir / f"bond_issuer_frontier_safety{suffix}", list(safety_rows[0].keys()) if safety_rows else [], safety_rows)
+    write_csv(output_dir / f"safe_injection_frontier{suffix}", list(frontier_rows[0].keys()) if frontier_rows else [], frontier_rows)
+    write_csv(output_dir / f"network_scaling_summary{suffix}", list(headline_rows[0].keys()) if headline_rows else [], headline_rows)
+    write_csv(output_dir / f"issuer_cashflow_summary{suffix}", list(issuer_rows[0].keys()) if issuer_rows else [], issuer_rows)
+    if not partial:
+        write_frontier_tables(output_dir, safety_rows, frontier_rows)
+        if not args.no_png:
+            write_frontier_figures(output_dir, headline_rows, safety_rows)
+        write_frontier_notes(output_dir, args, headline_rows)
+
+
+def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration, output_dir: Path) -> int:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    validation_status = frontier_validation_gate_status(output_dir)
+    if validation_status == "fail":
+        raise RuntimeError(
+            "Refusing paper-facing bond_issuer_frontier because full engine validation status is fail."
+        )
+    if validation_status in {"missing", "review"}:
+        print(
+            f"Validation gate status for frontier is {validation_status}; outputs should be treated as non-final.",
+            flush=True,
+        )
+    configure_sarafu_activity_controls(args, calibration, int(args.ticks), "frontier")
+    network_scales = parse_str_list(args.network_scales)
+    for scale in network_scales:
+        if scale not in NETWORK_SCALE_FACTORS:
+            raise ValueError(f"Unknown network scale {scale!r}")
+    principal_ratios = sorted({max(0.0, value) for value in parse_float_list(args.principal_ratios)})
+    coupons = parse_float_list(args.coupon_targets)
+    service_shares = parse_float_list(args.bond_fee_service_shares)
+    term_ticks = selected_terms(args)[0] if selected_terms(args) else int(args.ticks)
+    scale_seed_offsets = {scale: idx * 10_000_000 for idx, scale in enumerate(network_scales)}
+
+    def make_cell_job(phase: str, scale: str, ratio: float, coupon: float, service_share: float) -> dict[str, object]:
+        capacity = certified_pool_capacity(calibration, scale, args.certification_policy)
+        certified_capacity = max(0.0, capacity["certified_backing_capacity_usd"])
+        principal_usd = certified_capacity * max(0.0, ratio)
+        if phase == "baseline":
+            principal_usd = 0.0
+        return {
+            "kind": "frontier_cell",
+            "phase": phase,
+            "job_id": frontier_job_id(phase, scale, ratio, coupon, service_share),
+            "network_scale": scale,
+            "principal_ratio": ratio,
+            "principal_usd": principal_usd,
+            "coupon": coupon,
+            "service_share": service_share,
+            "term_ticks": term_ticks,
+            "seed_offset": scale_seed_offsets[scale],
+        }
+
+    baseline_jobs = [
+        make_cell_job("baseline", scale, 0.0, 0.0, 0.0)
+        for scale in network_scales
+    ]
+    baseline_results, baseline_failures = run_sharded_jobs(
+        label="frontier baselines",
+        kind="frontier",
+        jobs=baseline_jobs,
+        args=args,
+        calibration=calibration,
+        output_dir=output_dir,
+        worker=run_frontier_cell_shard,
+        load_completed=load_frontier_cell_shard,
+        on_progress=lambda results: write_frontier_aggregate(
+            args,
+            output_dir,
+            network_scales=network_scales,
+            all_run_rows=frontier_results_to_run_rows(results),
+            safety_rows=[],
+            partial=True,
+        ),
+    )
+    if baseline_failures:
+        write_frontier_aggregate(
+            args,
+            output_dir,
+            network_scales=network_scales,
+            all_run_rows=frontier_results_to_run_rows(baseline_results),
+            safety_rows=[],
+            partial=True,
+        )
+        print(f"Frontier baselines had {len(baseline_failures)} failed shard(s); rerun to resume.", flush=True)
+        return 1
+
+    baseline_by_scale: dict[str, dict[str, float]] = {}
+    for result in baseline_results:
+        rows = list(result.get("rows", []))
+        if not rows:
+            continue
+        scale = str(rows[0].get("network_scale", ""))
+        baseline_by_scale[scale] = frontier_baseline_metrics(rows)
+
+    grid_jobs = []
+    for scale in network_scales:
+        for ratio in principal_ratios:
+            for coupon in coupons:
+                for service_share in service_shares:
+                    grid_jobs.append(make_cell_job("grid", scale, ratio, coupon, service_share))
+
+    def write_frontier_partial(cell_results: list[dict[str, object]]) -> None:
+        safety_rows = frontier_safety_from_results(
+            cell_results,
+            baseline_by_scale,
+            safe_float(args.route_success_floor),
+        )
+        write_frontier_aggregate(
+            args,
+            output_dir,
+            network_scales=network_scales,
+            all_run_rows=frontier_results_to_run_rows(baseline_results + cell_results),
+            safety_rows=safety_rows,
+            partial=True,
+        )
+
+    grid_results, grid_failures = run_sharded_jobs(
+        label="frontier grid",
+        kind="frontier",
+        jobs=grid_jobs,
+        args=args,
+        calibration=calibration,
+        output_dir=output_dir,
+        worker=run_frontier_cell_shard,
+        load_completed=load_frontier_cell_shard,
+        on_progress=write_frontier_partial,
+    )
+    if grid_failures:
+        write_frontier_partial(grid_results)
+        print(f"Frontier grid had {len(grid_failures)} failed shard(s); rerun to resume.", flush=True)
+        return 1
+
+    all_cell_results = list(grid_results)
+    safety_rows = frontier_safety_from_results(
+        all_cell_results,
+        baseline_by_scale,
+        safe_float(args.route_success_floor),
+    )
+    safety_by_key = {
+        frontier_cell_key(
+            str(row["network_scale"]),
+            safe_float(row["principal_ratio"]),
+            safe_float(row["coupon_target_annual"]),
+            safe_float(row["bond_fee_service_share"]),
+        ): row
+        for row in safety_rows
+    }
+
+    if args.frontier_mode == "adaptive":
+        for refinement_round in range(max(0, int(args.frontier_refinement_rounds))):
+            new_cells: list[tuple[str, float, float, float]] = []
+            for scale in network_scales:
+                for coupon in coupons:
+                    for service_share in service_shares:
+                        rows = [
+                            row
+                            for row in safety_by_key.values()
+                            if row["network_scale"] == scale
+                            and abs(safe_float(row["coupon_target_annual"]) - coupon) <= 1e-9
+                            and abs(safe_float(row["bond_fee_service_share"]) - service_share) <= 1e-9
+                        ]
+                        rows = sorted(rows, key=lambda row: safe_float(row["principal_ratio"]))
+                        for low, high in zip(rows, rows[1:]):
+                            low_safe = int(low.get("safe", 0)) == 1
+                            high_safe = int(high.get("safe", 0)) == 1
+                            if low_safe and not high_safe:
+                                midpoint = (safe_float(low["principal_ratio"]) + safe_float(high["principal_ratio"])) / 2.0
+                                key = frontier_cell_key(scale, midpoint, coupon, service_share)
+                                if key not in safety_by_key:
+                                    new_cells.append((scale, midpoint, coupon, service_share))
+                                break
+            if not new_cells:
+                break
+            print(
+                f"Adaptive frontier refinement round {refinement_round + 1}: {len(new_cells)} midpoint cells",
+                flush=True,
+            )
+            adaptive_jobs = [
+                make_cell_job(f"adaptive{refinement_round + 1}", scale, ratio, coupon, service_share)
+                for scale, ratio, coupon, service_share in new_cells
+            ]
+            adaptive_results, adaptive_failures = run_sharded_jobs(
+                label=f"frontier adaptive round {refinement_round + 1}",
+                kind="frontier",
+                jobs=adaptive_jobs,
+                args=args,
+                calibration=calibration,
+                output_dir=output_dir,
+                worker=run_frontier_cell_shard,
+                load_completed=load_frontier_cell_shard,
+                on_progress=lambda results, prior=list(all_cell_results): write_frontier_partial(prior + results),
+            )
+            if adaptive_failures:
+                write_frontier_partial(all_cell_results + adaptive_results)
+                print(
+                    f"Frontier adaptive round {refinement_round + 1} had {len(adaptive_failures)} failed shard(s); rerun to resume.",
+                    flush=True,
+                )
+                return 1
+            all_cell_results.extend(adaptive_results)
+            safety_rows = frontier_safety_from_results(
+                all_cell_results,
+                baseline_by_scale,
+                safe_float(args.route_success_floor),
+            )
+            safety_by_key = {
+                frontier_cell_key(
+                    str(row["network_scale"]),
+                    safe_float(row["principal_ratio"]),
+                    safe_float(row["coupon_target_annual"]),
+                    safe_float(row["bond_fee_service_share"]),
+                ): row
+                for row in safety_rows
+            }
+
+    write_frontier_aggregate(
+        args,
+        output_dir,
+        network_scales=network_scales,
+        all_run_rows=frontier_results_to_run_rows(baseline_results + all_cell_results),
+        safety_rows=safety_rows,
+        partial=False,
+    )
     print(f"Wrote bond issuer frontier artifacts to {output_dir}")
     return 0
 
 
-def main() -> int:
-    args = parse_args()
-    scenarios = list(LEGACY_SCENARIOS) if args.scenario == "all" else [args.scenario]
-    coupons = parse_float_list(args.coupon_targets)
-    terms = selected_terms(args)
-    output_dir = Path(args.output).resolve()
-    calibration = load_calibration(Path(args.calibration_dir).resolve())
+def load_legacy_shard(job: dict[str, object], shard_root: Path, config_hash: str) -> dict[str, object] | None:
+    return shard_result_from_files(
+        kind="legacy",
+        job=job,
+        shard_root=shard_root,
+        config_hash=config_hash,
+        csv_names=("bond_rows", "network_rows", "failure_rows", "summary_rows"),
+    )
 
-    if args.scenario == "sarafu_engine_validation":
-        return run_sarafu_engine_validation(args, calibration, output_dir)
-    if args.scenario == "bond_issuer_frontier":
-        return run_bond_issuer_frontier(args, calibration, output_dir)
 
-    bond_rows: list[dict[str, object]] = []
-    network_rows: list[dict[str, object]] = []
-    failure_rows: list[dict[str, object]] = []
-    summary_rows: list[dict[str, object]] = []
-    total_jobs = len(scenarios) * len(coupons) * len(terms) * int(args.runs)
-    job = 0
+def run_legacy_shard(
+    job: dict[str, object],
+    args_data: dict[str, object],
+    calibration: Calibration,
+    shard_root_text: str,
+    resume: bool,
+) -> dict[str, object]:
+    shard_root = Path(shard_root_text)
+    job_dir = shard_job_dir(shard_root, "legacy", str(job["job_id"]))
+    config_hash = str(job["config_hash"])
+    if resume:
+        completed = load_legacy_shard(job, shard_root, config_hash)
+        if completed is not None:
+            return completed
+    started_at = time.time()
+    try:
+        args = namespace_from_payload(args_data)
+        scenario = str(job["scenario_name"])
+        coupon = safe_float(job["coupon"])
+        term_ticks = int(job["term_ticks"])
+        run_idx = int(job["run_idx"])
+        seed = int(job["seed"])
+        job_position = int(job["job_position"])
+        total_jobs = int(job["total_jobs"])
+        print(
+            f"[{job_position}/{total_jobs}] scenario={scenario} coupon={coupon} term={term_ticks} run={run_idx} seed={seed}",
+            flush=True,
+        )
+        args._progress_run_position = job_position
+        args._progress_total_runs = total_jobs
+        bond_rows, network_rows, failure_rows, summary = run_one(
+            scenario=scenario,
+            coupon=coupon,
+            term_ticks=term_ticks,
+            run_index=run_idx,
+            seed=seed,
+            args=args,
+            calibration=calibration,
+        )
+        summary_rows = [summary]
+        write_rows(job_dir / "bond_rows.csv", bond_rows)
+        write_rows(job_dir / "network_rows.csv", network_rows)
+        write_rows(job_dir / "failure_rows.csv", failure_rows)
+        write_rows(job_dir / "summary_rows.csv", summary_rows)
+        write_shard_manifest(
+            job_dir,
+            job=job,
+            config_hash=config_hash,
+            status="completed",
+            files={
+                "bond_rows": len(bond_rows),
+                "network_rows": len(network_rows),
+                "failure_rows": len(failure_rows),
+                "summary_rows": len(summary_rows),
+            },
+            started_at=started_at,
+        )
+        return {
+            "status": "completed",
+            "job": job,
+            "shard_dir": str(job_dir),
+            "bond_rows": bond_rows,
+            "network_rows": network_rows,
+            "failure_rows": failure_rows,
+            "summary_rows": summary_rows,
+        }
+    except BaseException:
+        error = traceback.format_exc()
+        write_shard_manifest(
+            job_dir,
+            job=job,
+            config_hash=config_hash,
+            status="failed",
+            error=error,
+            started_at=started_at,
+        )
+        return failed_result(job, error)
 
-    for scenario_idx, scenario in enumerate(scenarios):
-        for coupon_idx, coupon in enumerate(coupons):
-            for term_idx, term_ticks in enumerate(terms):
-                for run_idx in range(1, int(args.runs) + 1):
-                    job += 1
-                    seed = (
-                        int(args.seed)
-                        + scenario_idx * 1_000_000
-                        + coupon_idx * 100_000
-                        + term_idx * 10_000
-                        + run_idx
-                    )
-                    print(
-                        f"[{job}/{total_jobs}] scenario={scenario} coupon={coupon} term={term_ticks} run={run_idx} seed={seed}",
-                        flush=True,
-                    )
-                    args._progress_run_position = job
-                    args._progress_total_runs = total_jobs
-                    b, n, f, s = run_one(
-                        scenario=scenario,
-                        coupon=coupon,
-                        term_ticks=term_ticks,
-                        run_index=run_idx,
-                        seed=seed,
-                        args=args,
-                        calibration=calibration,
-                    )
-                    bond_rows.extend(b)
-                    network_rows.extend(n)
-                    failure_rows.extend(f)
-                    summary_rows.append(s)
 
+def legacy_results_to_rows(
+    results: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    return validation_results_to_rows(results)
+
+
+def write_legacy_aggregate(
+    args: argparse.Namespace,
+    calibration: Calibration,
+    output_dir: Path,
+    *,
+    bond_rows: list[dict[str, object]],
+    network_rows: list[dict[str, object]],
+    failure_rows: list[dict[str, object]],
+    summary_rows: list[dict[str, object]],
+    partial: bool,
+) -> None:
+    bond_rows = sorted_run_rows(bond_rows)
+    network_rows = sorted_run_rows(network_rows)
+    failure_rows = sorted_run_rows(failure_rows)
+    summary_rows = sorted_run_rows(summary_rows)
     quantile_source = []
     by_key_network = {
         (
@@ -3574,44 +4386,108 @@ def main() -> int:
         quantile_source.append({**row, **by_key_network.get(key, {})})
     quantiles = quantile_rows(quantile_source, CORE_QUANTILE_METRICS)
     failure_summary_rows = summarize_failures(failure_rows)
-
+    suffix = ".partial.csv" if partial else ".csv"
+    write_csv(output_dir / f"mc_bond_return_timeseries{suffix}", list(bond_rows[0].keys()) if bond_rows else [], bond_rows)
+    write_csv(output_dir / f"mc_network_scaling_timeseries{suffix}", list(network_rows[0].keys()) if network_rows else [], network_rows)
+    write_csv(output_dir / f"mc_run_summary{suffix}", list(summary_rows[0].keys()) if summary_rows else [], summary_rows)
+    write_csv(output_dir / f"mc_failure_metrics{suffix}", list(failure_rows[0].keys()) if failure_rows else [], failure_rows)
     write_csv(
-        output_dir / "mc_bond_return_timeseries.csv",
-        list(bond_rows[0].keys()) if bond_rows else [],
-        bond_rows,
-    )
-    write_csv(
-        output_dir / "mc_network_scaling_timeseries.csv",
-        list(network_rows[0].keys()) if network_rows else [],
-        network_rows,
-    )
-    write_csv(
-        output_dir / "mc_run_summary.csv",
-        list(summary_rows[0].keys()) if summary_rows else [],
-        summary_rows,
-    )
-    write_csv(
-        output_dir / "mc_failure_metrics.csv",
-        list(failure_rows[0].keys()) if failure_rows else [],
-        failure_rows,
-    )
-    write_csv(
-        output_dir / "mc_failure_summary.csv",
+        output_dir / f"mc_failure_summary{suffix}",
         list(failure_summary_rows[0].keys()) if failure_summary_rows else [],
         failure_summary_rows,
     )
-    write_csv(
-        output_dir / "mc_timeseries_quantiles.csv",
-        list(quantiles[0].keys()) if quantiles else [],
-        quantiles,
+    write_csv(output_dir / f"mc_timeseries_quantiles{suffix}", list(quantiles[0].keys()) if quantiles else [], quantiles)
+    if not partial:
+        write_latex_tables(output_dir, calibration, summary_rows, failure_summary_rows)
+        write_csv_tables(output_dir, calibration, summary_rows, failure_summary_rows)
+        if not args.no_png:
+            write_png_figures(output_dir, quantiles, failure_summary_rows, args)
+        public_output_privacy_check(output_dir)
+
+
+def main() -> int:
+    args = parse_args()
+    scenarios = list(LEGACY_SCENARIOS) if args.scenario == "all" else [args.scenario]
+    coupons = parse_float_list(args.coupon_targets)
+    terms = selected_terms(args)
+    output_dir = Path(args.output).resolve()
+    calibration = load_calibration(Path(args.calibration_dir).resolve())
+
+    if args.scenario == "sarafu_engine_validation":
+        return run_sarafu_engine_validation(args, calibration, output_dir)
+    if args.scenario == "bond_issuer_frontier":
+        return run_bond_issuer_frontier(args, calibration, output_dir)
+
+    total_jobs = len(scenarios) * len(coupons) * len(terms) * int(args.runs)
+    job = 0
+    jobs: list[dict[str, object]] = []
+
+    for scenario_idx, scenario in enumerate(scenarios):
+        for coupon_idx, coupon in enumerate(coupons):
+            for term_idx, term_ticks in enumerate(terms):
+                for run_idx in range(1, int(args.runs) + 1):
+                    job += 1
+                    seed = (
+                        int(args.seed)
+                        + scenario_idx * 1_000_000
+                        + coupon_idx * 100_000
+                        + term_idx * 10_000
+                        + run_idx
+                    )
+                    jobs.append(
+                        {
+                            "kind": "legacy_run",
+                            "job_id": (
+                                f"legacy_{scenario}_c{frontier_token(coupon)}_"
+                                f"t{term_ticks}_run_{run_idx:06d}"
+                            ),
+                            "scenario_name": scenario,
+                            "coupon": coupon,
+                            "term_ticks": term_ticks,
+                            "run_idx": run_idx,
+                            "seed": seed,
+                            "job_position": job,
+                            "total_jobs": total_jobs,
+                        }
+                    )
+
+    def write_partial(results: list[dict[str, object]]) -> None:
+        b, n, f, s = legacy_results_to_rows(results)
+        write_legacy_aggregate(
+            args,
+            calibration,
+            output_dir,
+            bond_rows=b,
+            network_rows=n,
+            failure_rows=f,
+            summary_rows=s,
+            partial=True,
+        )
+
+    results, failed = run_sharded_jobs(
+        label="legacy Monte Carlo",
+        kind="legacy",
+        jobs=jobs,
+        args=args,
+        calibration=calibration,
+        output_dir=output_dir,
+        worker=run_legacy_shard,
+        load_completed=load_legacy_shard,
+        on_progress=write_partial,
     )
-    write_latex_tables(output_dir, calibration, summary_rows, failure_summary_rows)
-    write_csv_tables(output_dir, calibration, summary_rows, failure_summary_rows)
-    if not args.no_png:
-        write_png_figures(output_dir, quantiles, failure_summary_rows, args)
-    public_output_privacy_check(output_dir)
+    bond_rows, network_rows, failure_rows, summary_rows = legacy_results_to_rows(results)
+    write_legacy_aggregate(
+        args,
+        calibration,
+        output_dir,
+        bond_rows=bond_rows,
+        network_rows=network_rows,
+        failure_rows=failure_rows,
+        summary_rows=summary_rows,
+        partial=False,
+    )
     print(f"Wrote Monte Carlo artifacts to {output_dir}")
-    return 0
+    return 1 if failed or len(summary_rows) != total_jobs else 0
 
 
 if __name__ == "__main__":
