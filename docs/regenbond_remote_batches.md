@@ -104,6 +104,19 @@ for every job:
 min(cpu_count - 1, 8), with a floor of 1
 ```
 
+The cap at `8` is deliberately conservative for shared or memory-constrained
+VPS runs, especially for `connected_5x` frontier cells. On a dedicated 16-CPU
+server with enough RAM, use an explicit worker count instead of `auto`:
+
+```bash
+WORKERS=12 ./scripts/start_regenbond_batch_tmux.sh frontier-pilot
+WORKERS=15 ./scripts/start_regenbond_batch_tmux.sh frontier-pilot
+```
+
+`WORKERS=12` leaves more headroom for SSH, tmux, logging, and aggregation.
+`WORKERS=15` is reasonable when the server is dedicated to the batch and memory
+use remains comfortable in `htop` or `free -h`.
+
 Override worker count:
 
 ```bash
@@ -499,35 +512,135 @@ OUTPUT=/tmp/regenbond_frontier_debug \
 
 ## Pulling Outputs Locally
 
-From your local machine:
+Run these from your local machine after each remote job finishes. Create the
+local parent directory first:
 
 ```bash
 mkdir -p /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo
+```
 
-scp -i ~/.ssh/id_ed25519 -r root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/
+Use `rsync` instead of `scp -r` for normal review/paper pulls. The commands
+below use your SSH key and exclude `_shards/` plus `*.partial.csv`, so they do
+not download resumable worker shards:
 
-scp -i ~/.ssh/id_ed25519 root@128.140.120.36:~/sim/analysis/monte_carlo/validation-full.log \
+```bash
+rsync -av \
+  --exclude '_shards/' \
+  --exclude '*.partial.csv' \
+  -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation_20run/ \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_20run/
+```
+
+Only use `scp -r` if you intentionally want to copy `_shards/` too.
+
+### Validation Outputs
+
+Pull `validation-1mo`:
+
+```bash
+rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
+  -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation_1mo_test/ \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_1mo_test/
+
+rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/validation-1mo.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_1mo_test/
+```
+
+Pull `validation-smoke`:
+
+```bash
+rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
+  -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation_smoke/ \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_smoke/
+
+rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/validation-smoke.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_smoke/
+```
+
+Pull `validation-pilot`:
+
+```bash
+rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
+  -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation_20run/ \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_20run/
+
+rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/validation-pilot.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_20run/
+```
+
+Pull `validation-full`:
+
+```bash
+rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
+  -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation/ \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation/
+
+rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/validation-full.log \
   /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation/
 ```
 
-Pilot frontier pull:
+### Frontier Outputs
+
+Pull `frontier-smoke`:
 
 ```bash
-mkdir -p /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo
+rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
+  -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier_smoke/ \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_smoke/
 
-scp -i ~/.ssh/id_ed25519 -r root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier_pilot \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/
+rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-smoke.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_smoke/
+```
 
-scp -i ~/.ssh/id_ed25519 root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-pilot.log \
+Pull `frontier-pilot`:
+
+```bash
+rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
+  -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier_pilot/ \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
+
+rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-pilot.log \
   /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
 ```
 
-With a configured SSH alias:
+Pull `frontier-publication`:
 
 ```bash
-scp -r root@wor-testing:~/sim/analysis/monte_carlo/bond_issuer_frontier_pilot \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/
+rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
+  -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier/ \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier/
+
+rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-publication.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier/
+```
+
+### SSH Alias Form
+
+If `wor-testing` is configured as an SSH alias for
+`root@128.140.120.36`, the same commands can be shortened. Example:
+
+```bash
+rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
+  root@wor-testing:~/sim/analysis/monte_carlo/bond_issuer_frontier_pilot/ \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
+
+rsync -av root@wor-testing:~/sim/analysis/monte_carlo/frontier-pilot.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
 ```
 
 ## Expected Outputs
@@ -589,6 +702,16 @@ Rerun the same command to resume failed or missing shards:
 ```bash
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 ```
+
+Restart a tmux batch with more workers:
+
+```bash
+tmux send-keys -t regenbond C-c
+WORKERS=15 ./scripts/start_regenbond_batch_tmux.sh frontier-pilot
+```
+
+Do not delete the output directory when increasing workers. The rerun uses
+`_shards/` to skip completed cells and resume missing or interrupted work.
 
 If the machine is memory constrained, reduce workers:
 

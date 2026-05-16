@@ -3912,6 +3912,32 @@ def frontier_results_to_run_rows(results: list[dict[str, object]]) -> list[dict[
     return sorted_run_rows(rows)
 
 
+def split_frontier_results(
+    results: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    baseline_results: list[dict[str, object]] = []
+    cell_results: list[dict[str, object]] = []
+    for result in results:
+        job = result.get("job")
+        phase = str(job.get("phase", "")) if isinstance(job, dict) else ""
+        if phase == "baseline":
+            baseline_results.append(result)
+        else:
+            cell_results.append(result)
+    return baseline_results, cell_results
+
+
+def frontier_baselines_by_scale(results: list[dict[str, object]]) -> dict[str, dict[str, float]]:
+    baseline_by_scale: dict[str, dict[str, float]] = {}
+    for result in results:
+        rows = list(result.get("rows", []))
+        if not rows:
+            continue
+        scale = str(rows[0].get("network_scale", ""))
+        baseline_by_scale[scale] = frontier_baseline_metrics(rows)
+    return baseline_by_scale
+
+
 def frontier_safety_from_results(
     cell_results: list[dict[str, object]],
     baseline_by_scale: dict[str, dict[str, float]],
@@ -4083,44 +4109,6 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
         make_cell_job("baseline", scale, 0.0, 0.0, 0.0)
         for scale in network_scales
     ]
-    baseline_results, baseline_failures = run_sharded_jobs(
-        label="frontier baselines",
-        kind="frontier",
-        jobs=baseline_jobs,
-        args=args,
-        calibration=calibration,
-        output_dir=output_dir,
-        worker=run_frontier_cell_shard,
-        load_completed=load_frontier_cell_shard,
-        on_progress=lambda results: write_frontier_aggregate(
-            args,
-            output_dir,
-            network_scales=network_scales,
-            all_run_rows=frontier_results_to_run_rows(results),
-            safety_rows=[],
-            partial=True,
-        ),
-    )
-    if baseline_failures:
-        write_frontier_aggregate(
-            args,
-            output_dir,
-            network_scales=network_scales,
-            all_run_rows=frontier_results_to_run_rows(baseline_results),
-            safety_rows=[],
-            partial=True,
-        )
-        print(f"Frontier baselines had {len(baseline_failures)} failed shard(s); rerun to resume.", flush=True)
-        return 1
-
-    baseline_by_scale: dict[str, dict[str, float]] = {}
-    for result in baseline_results:
-        rows = list(result.get("rows", []))
-        if not rows:
-            continue
-        scale = str(rows[0].get("network_scale", ""))
-        baseline_by_scale[scale] = frontier_baseline_metrics(rows)
-
     grid_jobs = []
     for scale in network_scales:
         for ratio in principal_ratios:
@@ -4128,43 +4116,60 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
                 for service_share in service_shares:
                     grid_jobs.append(make_cell_job("grid", scale, ratio, coupon, service_share))
 
-    def write_frontier_partial(cell_results: list[dict[str, object]]) -> None:
+    def safety_for_completed(
+        baseline_results: list[dict[str, object]],
+        cell_results: list[dict[str, object]],
+    ) -> tuple[dict[str, dict[str, float]], list[dict[str, object]]]:
+        baseline_by_scale = frontier_baselines_by_scale(baseline_results)
+        if any(scale not in baseline_by_scale for scale in network_scales):
+            return baseline_by_scale, []
         safety_rows = frontier_safety_from_results(
             cell_results,
             baseline_by_scale,
             safe_float(args.route_success_floor),
         )
+        return baseline_by_scale, safety_rows
+
+    def write_initial_frontier_partial(results: list[dict[str, object]]) -> None:
+        baseline_results, cell_results = split_frontier_results(results)
+        _, safety_rows = safety_for_completed(baseline_results, cell_results)
         write_frontier_aggregate(
             args,
             output_dir,
             network_scales=network_scales,
-            all_run_rows=frontier_results_to_run_rows(baseline_results + cell_results),
+            all_run_rows=frontier_results_to_run_rows(results),
             safety_rows=safety_rows,
             partial=True,
         )
 
-    grid_results, grid_failures = run_sharded_jobs(
-        label="frontier grid",
+    initial_results, initial_failures = run_sharded_jobs(
+        label="frontier baselines+grid",
         kind="frontier",
-        jobs=grid_jobs,
+        jobs=baseline_jobs + grid_jobs,
         args=args,
         calibration=calibration,
         output_dir=output_dir,
         worker=run_frontier_cell_shard,
         load_completed=load_frontier_cell_shard,
-        on_progress=write_frontier_partial,
+        on_progress=write_initial_frontier_partial,
     )
-    if grid_failures:
-        write_frontier_partial(grid_results)
-        print(f"Frontier grid had {len(grid_failures)} failed shard(s); rerun to resume.", flush=True)
+    baseline_results, grid_results = split_frontier_results(initial_results)
+    baseline_by_scale, grid_safety_rows = safety_for_completed(baseline_results, grid_results)
+    if initial_failures:
+        write_initial_frontier_partial(initial_results)
+        print(f"Frontier baselines+grid had {len(initial_failures)} failed shard(s); rerun to resume.", flush=True)
+        return 1
+    missing_baselines = [scale for scale in network_scales if scale not in baseline_by_scale]
+    if missing_baselines:
+        write_initial_frontier_partial(initial_results)
+        print(
+            "Frontier baselines incomplete for scale(s): " + ", ".join(missing_baselines) + "; rerun to resume.",
+            flush=True,
+        )
         return 1
 
     all_cell_results = list(grid_results)
-    safety_rows = frontier_safety_from_results(
-        all_cell_results,
-        baseline_by_scale,
-        safe_float(args.route_success_floor),
-    )
+    safety_rows = grid_safety_rows
     safety_by_key = {
         frontier_cell_key(
             str(row["network_scale"]),
@@ -4174,6 +4179,21 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
         ): row
         for row in safety_rows
     }
+
+    def write_frontier_partial(cell_results: list[dict[str, object]]) -> None:
+        partial_safety_rows = frontier_safety_from_results(
+            cell_results,
+            baseline_by_scale,
+            safe_float(args.route_success_floor),
+        )
+        write_frontier_aggregate(
+            args,
+            output_dir,
+            network_scales=network_scales,
+            all_run_rows=frontier_results_to_run_rows(baseline_results + cell_results),
+            safety_rows=partial_safety_rows,
+            partial=True,
+        )
 
     if args.frontier_mode == "adaptive":
         for refinement_round in range(max(0, int(args.frontier_refinement_rounds))):
