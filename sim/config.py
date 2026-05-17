@@ -208,6 +208,8 @@ class ScenarioConfig:
     quarterly_clearing_enabled: bool = False
     quarterly_clearing_stride_ticks: int = 13
     quarterly_clearing_surplus_share: float = 1.0
+    bond_service_reserve_enabled: bool = False
+    bond_service_reserve_recovery_share: float = 1.0
     calibration_profile: str = "sarafu_empirical"
 
     # Insurance / incidents

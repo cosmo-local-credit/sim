@@ -132,6 +132,12 @@ class SimulationEngine:
         self._lp_returned_usd_by_pool: Dict[str, float] = {}
         self._lp_injected_usd_total: float = 0.0
         self._lp_returned_usd_total: float = 0.0
+        self._bond_service_reserve_usd_balance: float = 0.0
+        self._bond_service_reserved_usd_tick: float = 0.0
+        self._bond_service_reserved_usd_total: float = 0.0
+        self._bond_service_paid_from_reserve_usd_tick: float = 0.0
+        self._bond_service_paid_from_reserve_usd_total: float = 0.0
+        self._bond_service_reserved_by_pool: Dict[str, float] = {}
         self._lp_pending_contribution_tick: Dict[str, int] = {}
         self._stable_onramp_usd_tick: float = 0.0
         self._stable_offramp_usd_tick: float = 0.0
@@ -159,6 +165,8 @@ class SimulationEngine:
         self._productive_credit_queue: Dict[int, list[Tuple[str, float, str]]] = {}
         self._producer_debt_obligations: list[ProducerDebtObligation] = []
         self._next_producer_debt_obligation_id: int = 1
+        self._producer_debt_originated_usd_tick: float = 0.0
+        self._producer_debt_originated_usd_total: float = 0.0
         self._producer_debt_matured_usd_tick: float = 0.0
         self._producer_debt_matured_usd_total: float = 0.0
         self._producer_debt_repaid_usd_tick: float = 0.0
@@ -2832,10 +2840,13 @@ class SimulationEngine:
         pool = self.pools.get(pool_id)
         if pool is None or pool.policy.role != "lender":
             return
-        self._lender_recovered_stable_by_pool[pool_id] = (
-            self._lender_recovered_stable_by_pool.get(pool_id, 0.0) + float(amount_usd)
-        )
         amount = float(amount_usd)
+        reserved = self._reserve_lender_recovered_stable_for_bond_service(pool, amount, reason)
+        pending = max(0.0, amount - reserved)
+        if pending > 1e-9:
+            self._lender_recovered_stable_by_pool[pool_id] = (
+                self._lender_recovered_stable_by_pool.get(pool_id, 0.0) + pending
+            )
         self._lender_recovered_stable_total_by_pool[pool_id] = (
             self._lender_recovered_stable_total_by_pool.get(pool_id, 0.0) + amount
         )
@@ -2865,7 +2876,7 @@ class SimulationEngine:
             "LENDER_STABLE_RECOVERED",
             pool_id=pool_id,
             amount=amount,
-            meta={"reason": reason},
+            meta={"reason": reason, "reserved_for_bond_service": reserved},
         ))
 
     def _register_producer_debt_obligation(
@@ -2903,6 +2914,8 @@ class SimulationEngine:
         )
         self._next_producer_debt_obligation_id += 1
         self._producer_debt_obligations.append(obligation)
+        self._producer_debt_originated_usd_tick += float(borrowed_usd)
+        self._producer_debt_originated_usd_total += float(borrowed_usd)
         self.log.add(Event(
             self.tick,
             "PRODUCER_DEBT_OBLIGATION_CREATED",
@@ -3590,7 +3603,7 @@ class SimulationEngine:
                 meta={"pools": pool_count, "one_shot": True},
             ))
 
-    def _issuer_schedule_due_at_tick(self) -> float:
+    def _issuer_schedule_due_at_tick(self, tick: Optional[int] = None) -> float:
         principal = max(0.0, float(self.cfg.bond_gross_principal_usd or 0.0))
         if principal <= 1e-9:
             return 0.0
@@ -3599,8 +3612,9 @@ class SimulationEngine:
         coupon_annual = max(0.0, float(self.cfg.bond_coupon_target_annual or 0.0))
         year_ticks = 52.0
         total_periods = max(1, math.ceil(term_ticks / stride))
-        periods_elapsed = min(total_periods, self.tick // stride)
-        if self.tick >= term_ticks:
+        schedule_tick = self.tick if tick is None else max(0, int(tick))
+        periods_elapsed = min(total_periods, schedule_tick // stride)
+        if schedule_tick >= term_ticks:
             periods_elapsed = total_periods
         if periods_elapsed <= 0:
             return 0.0
@@ -3617,6 +3631,93 @@ class SimulationEngine:
             previous_tick = payment_tick
         return coupon_due + min(principal, principal_due)
 
+    def _next_issuer_service_due_target(self) -> float:
+        principal = max(0.0, float(self.cfg.bond_gross_principal_usd or 0.0))
+        if principal <= 1e-9:
+            return 0.0
+        term_ticks = max(1, int(self.cfg.bond_term_ticks or 1))
+        stride = max(1, int(self.cfg.issuer_payment_stride_ticks or 13))
+        if self.tick >= term_ticks:
+            target_tick = term_ticks
+        else:
+            periods_elapsed = self.tick // stride
+            if self.tick % stride == 0 and self.tick > 0:
+                target_tick = min(term_ticks, periods_elapsed * stride)
+            else:
+                target_tick = min(term_ticks, (periods_elapsed + 1) * stride)
+        return self._issuer_schedule_due_at_tick(target_tick)
+
+    def _reserve_lender_recovered_stable_for_bond_service(
+        self,
+        pool: Pool,
+        amount_usd: float,
+        reason: str,
+    ) -> float:
+        if not bool(self.cfg.bond_service_reserve_enabled):
+            return 0.0
+        if str(self.cfg.bond_return_mode or "") != "issuer_cashflow":
+            return 0.0
+        if amount_usd <= 1e-9 or pool.policy.role != "lender":
+            return 0.0
+        share = max(0.0, min(1.0, float(self.cfg.bond_service_reserve_recovery_share or 0.0)))
+        if share <= 1e-9:
+            return 0.0
+        target_due = self._next_issuer_service_due_target()
+        remaining_need = max(
+            0.0,
+            target_due
+            - float(self._lp_returned_usd_total or 0.0)
+            - float(self._bond_service_reserve_usd_balance or 0.0),
+        )
+        if remaining_need <= 1e-9:
+            return 0.0
+        stable_id = self.cfg.stable_symbol
+        amount = min(float(amount_usd) * share, remaining_need, pool.vault.get(stable_id))
+        if amount <= 1e-9:
+            return 0.0
+        if not self._vault_sub(pool, stable_id, amount, "bond_service_reserve_out", "issuer_service_reserve"):
+            return 0.0
+        self._bond_service_reserve_usd_balance += amount
+        self._bond_service_reserved_usd_tick += amount
+        self._bond_service_reserved_usd_total += amount
+        self._bond_service_reserved_by_pool[pool.pool_id] = (
+            self._bond_service_reserved_by_pool.get(pool.pool_id, 0.0) + amount
+        )
+        self._stable_offramp_usd_tick += amount
+        self.log.add(Event(
+            self.tick,
+            "BOND_SERVICE_RESERVED",
+            pool_id=pool.pool_id,
+            amount=amount,
+            meta={"reason": reason, "target_due": target_due, "remaining_need_before": remaining_need},
+        ))
+        return amount
+
+    def _pay_bond_service_from_reserve(self) -> float:
+        if not bool(self.cfg.bond_service_reserve_enabled):
+            return 0.0
+        if str(self.cfg.bond_return_mode or "") != "issuer_cashflow":
+            return 0.0
+        scheduled_due = self._issuer_schedule_due_at_tick()
+        remaining_need = max(0.0, scheduled_due - float(self._lp_returned_usd_total or 0.0))
+        amount = min(float(self._bond_service_reserve_usd_balance or 0.0), remaining_need)
+        if amount <= 1e-9:
+            return 0.0
+        self._bond_service_reserve_usd_balance -= amount
+        self._bond_service_paid_from_reserve_usd_tick += amount
+        self._bond_service_paid_from_reserve_usd_total += amount
+        self._lp_returned_usd_by_pool["bond_service_reserve"] = (
+            self._lp_returned_usd_by_pool.get("bond_service_reserve", 0.0) + amount
+        )
+        self._lp_returned_usd_total += amount
+        self.log.add(Event(
+            self.tick,
+            "BOND_SERVICE_RESERVE_PAID",
+            amount=amount,
+            meta={"scheduled_due": scheduled_due, "remaining_need_before": remaining_need},
+        ))
+        return amount
+
     def _apply_quarterly_clearing(self) -> None:
         if not bool(self.cfg.quarterly_clearing_enabled):
             return
@@ -3625,6 +3726,7 @@ class SimulationEngine:
         stride = max(1, int(self.cfg.quarterly_clearing_stride_ticks or 13))
         if self.tick % stride != 0:
             return
+        self._pay_bond_service_from_reserve()
         scheduled_due = self._issuer_schedule_due_at_tick()
         remaining_need = max(0.0, scheduled_due - float(self._lp_returned_usd_total or 0.0))
         if remaining_need <= 1e-9:
@@ -4821,6 +4923,7 @@ class SimulationEngine:
             self._route_source_stable_net_flow_value_tick = 0.0
             self._route_source_voucher_net_flow_value_tick = 0.0
             self._productive_credit_inflow_usd_tick = 0.0
+            self._producer_debt_originated_usd_tick = 0.0
             self._producer_debt_matured_usd_tick = 0.0
             self._producer_debt_repaid_usd_tick = 0.0
             self._producer_debt_repaid_regular_usd_tick = 0.0
@@ -4854,6 +4957,8 @@ class SimulationEngine:
             self._fee_conversion_attempted_usd_tick = 0.0
             self._fee_conversion_success_usd_tick = 0.0
             self._fee_conversion_failed_usd_tick = 0.0
+            self._bond_service_reserved_usd_tick = 0.0
+            self._bond_service_paid_from_reserve_usd_tick = 0.0
             self._lender_recovered_stable_usd_tick = 0.0
             self._lender_recovered_stable_borrower_regular_usd_tick = 0.0
             self._lender_recovered_stable_borrower_maturity_usd_tick = 0.0
@@ -5995,6 +6100,8 @@ class SimulationEngine:
                 "productive_credit_inflow_usd_total": float(self._productive_credit_inflow_usd_total),
                 "producer_debt_active_obligations": int(producer_debt_active_count),
                 "producer_debt_active_usd": float(producer_debt_active_usd),
+                "producer_debt_originated_usd_tick": float(self._producer_debt_originated_usd_tick),
+                "producer_debt_originated_usd_total": float(self._producer_debt_originated_usd_total),
                 "lender_stable_total_usd": float(lender_stable_total_usd),
                 "lender_stable_reserve_usd": float(lender_stable_reserve_usd),
                 "lender_stable_available_above_reserve_usd": float(
@@ -6031,6 +6138,15 @@ class SimulationEngine:
                 ),
                 "lender_recovered_stable_other_usd_total": float(
                     self._lender_recovered_stable_other_usd_total
+                ),
+                "bond_service_reserve_balance_usd": float(self._bond_service_reserve_usd_balance),
+                "bond_service_reserved_usd_tick": float(self._bond_service_reserved_usd_tick),
+                "bond_service_reserved_usd_total": float(self._bond_service_reserved_usd_total),
+                "bond_service_paid_from_reserve_usd_tick": float(
+                    self._bond_service_paid_from_reserve_usd_tick
+                ),
+                "bond_service_paid_from_reserve_usd_total": float(
+                    self._bond_service_paid_from_reserve_usd_total
                 ),
                 "producer_loan_attempts_tick": int(self._producer_loan_attempts_tick),
                 "producer_loan_no_lender_tick": int(self._producer_loan_no_lender_tick),

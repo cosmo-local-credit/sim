@@ -1,7 +1,7 @@
 import argparse
 import unittest
 
-from scripts.run_regenbond_monte_carlo import scenario_config
+from scripts.run_regenbond_monte_carlo import bond_metrics, scenario_config
 from sim.config import ScenarioConfig
 from sim.core import Event, IssuerLedger
 from sim.engine import SimulationEngine
@@ -135,6 +135,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.bond_deployed_principal_usd, 1000.0)
         self.assertAlmostEqual(cfg.issuer_reserve_share, 0.0)
         self.assertAlmostEqual(cfg.producer_debt_maturity_recovery_rate, 1.0)
+        self.assertTrue(cfg.bond_service_reserve_enabled)
         self.assertEqual(cfg.max_pools, 9)
 
         engine = SimulationEngine(cfg, seed=7)
@@ -394,6 +395,55 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(engine._stable_offramp_usd_tick, 50.0)
         self.assertAlmostEqual(clc_pool.vault.get(engine.cfg.stable_symbol), clc_before)
         self.assertAlmostEqual(lender_pool.vault.get(engine.cfg.stable_symbol), 50.0)
+
+    def test_bond_service_reserve_prioritizes_scheduled_debt_service(self):
+        engine = SimulationEngine(
+            small_config(
+                quarterly_clearing_enabled=True,
+                quarterly_clearing_stride_ticks=13,
+                bond_return_mode="issuer_cashflow",
+                bond_gross_principal_usd=1000.0,
+                bond_term_ticks=260,
+                bond_service_reserve_enabled=True,
+                bond_service_reserve_recovery_share=1.0,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        current_stable = lender_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(lender_pool, stable_id, current_stable, "test_clear", "test")
+        engine._vault_add(lender_pool, stable_id, 100.0, "test_recovery", "test")
+
+        engine.tick = 1
+        engine._record_lender_recovered_stable(lender_pool.pool_id, 100.0, "borrower_stable_repayment")
+
+        self.assertAlmostEqual(engine._bond_service_reserve_usd_balance, 50.0)
+        self.assertAlmostEqual(engine._bond_service_reserved_usd_total, 50.0)
+        self.assertAlmostEqual(engine._lender_recovered_stable_by_pool[lender_pool.pool_id], 50.0)
+        self.assertAlmostEqual(lender_pool.vault.get(stable_id), 50.0)
+
+        engine.tick = 13
+        engine._apply_quarterly_clearing()
+
+        self.assertAlmostEqual(engine._bond_service_paid_from_reserve_usd_total, 50.0)
+        self.assertAlmostEqual(engine._bond_service_reserve_usd_balance, 0.0)
+        self.assertAlmostEqual(engine._lp_returned_usd_total, 50.0)
+        self.assertAlmostEqual(engine._quarterly_clearing_usd_total, 0.0)
+
+    def test_issuer_cashflow_bond_metrics_do_not_haircut_principal_service_share(self):
+        cfg = small_config(
+            bond_return_mode="issuer_cashflow",
+            bond_gross_principal_usd=1000.0,
+            bond_term_ticks=260,
+            bond_fee_service_share=0.5,
+        )
+
+        metrics = bond_metrics({"lp_returned_usd_total": 100.0}, cfg, 13)
+
+        self.assertAlmostEqual(metrics["bond_cumulative_fee_return_usd"], 100.0)
+        self.assertAlmostEqual(metrics["issuer_eligible_fee_service_inflow_usd"], 100.0)
+        self.assertAlmostEqual(metrics["issuer_actual_bondholder_payment_usd"], 50.0)
 
     def test_producer_debt_maturity_repayment_recovers_lender_stable(self):
         engine = SimulationEngine(

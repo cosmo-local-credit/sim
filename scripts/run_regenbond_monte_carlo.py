@@ -1291,6 +1291,8 @@ def scenario_config(
         cfg.quarterly_clearing_surplus_share = max(
             0.0, min(1.0, float(getattr(args, "_frontier_quarterly_clearing_surplus_share", 1.0)))
         )
+        cfg.bond_service_reserve_enabled = True
+        cfg.bond_service_reserve_recovery_share = 1.0
         cfg.route_substitution_enabled = True
         cfg.route_substitution_max_alternatives = 3
         route_request_base = int(getattr(args, "_frontier_route_requests_per_tick", 1))
@@ -1642,7 +1644,10 @@ def bond_metrics(latest: dict[str, object], cfg: ScenarioConfig, tick: int) -> d
     deployed_principal = configured_deployed if configured_deployed > 1e-9 else raw_deployed
     raw_returned = safe_float(latest.get("lp_returned_usd_total"))
     service_share = max(0.0, min(1.0, float(cfg.bond_fee_service_share or 0.0)))
-    returned = raw_returned * service_share
+    if str(getattr(cfg, "bond_return_mode", "") or "") == "issuer_cashflow":
+        returned = raw_returned
+    else:
+        returned = raw_returned * service_share
     elapsed_years = max(tick / YEAR_TICKS, 1.0 / YEAR_TICKS)
     coupon = max(0.0, float(cfg.bond_coupon_target_annual or 0.0))
     reserve_share = max(0.0, min(0.95, safe_float(getattr(cfg, "issuer_reserve_share", 0.10))))
@@ -1893,6 +1898,7 @@ def run_one(
             "swap_count_vchr_to_vchr_tick",
             "repayment_volume_usd",
             "loan_issuance_volume_usd",
+            "producer_debt_originated_usd_tick",
             "lender_recovered_stable_usd_tick",
             "lender_recovered_stable_borrower_regular_usd_tick",
             "lender_recovered_stable_borrower_maturity_usd_tick",
@@ -1937,6 +1943,8 @@ def run_one(
             "fee_conversion_attempted_usd_tick",
             "fee_conversion_success_usd_tick",
             "fee_conversion_failed_usd_tick",
+            "bond_service_reserved_usd_tick",
+            "bond_service_paid_from_reserve_usd_tick",
             "quarterly_clearing_usd_tick",
         ):
             cumulative_float[metric] += safe_float(latest.get(metric))
@@ -2137,6 +2145,10 @@ def run_one(
             "repayment_volume_usd_total": cumulative_float["repayment_volume_usd"],
             "loan_issuance_volume_usd": latest.get("loan_issuance_volume_usd", 0.0),
             "loan_issuance_volume_usd_total": cumulative_float["loan_issuance_volume_usd"],
+            "producer_debt_originated_usd": latest.get("producer_debt_originated_usd_tick", 0.0),
+            "producer_debt_originated_usd_total": cumulative_float[
+                "producer_debt_originated_usd_tick"
+            ],
             "producer_loan_attempts": latest.get("producer_loan_attempts_tick", 0),
             "producer_loan_attempts_total": cumulative_float["producer_loan_attempts_tick"],
             "producer_loan_no_lender": latest.get("producer_loan_no_lender_tick", 0),
@@ -2249,6 +2261,15 @@ def run_one(
             ),
             "lender_recovered_stable_other_usd_total": cumulative_float[
                 "lender_recovered_stable_other_usd_tick"
+            ],
+            "bond_service_reserve_balance_usd": latest.get("bond_service_reserve_balance_usd", 0.0),
+            "bond_service_reserved_usd": latest.get("bond_service_reserved_usd_tick", 0.0),
+            "bond_service_reserved_usd_total": cumulative_float["bond_service_reserved_usd_tick"],
+            "bond_service_paid_from_reserve_usd": latest.get(
+                "bond_service_paid_from_reserve_usd_tick", 0.0
+            ),
+            "bond_service_paid_from_reserve_usd_total": cumulative_float[
+                "bond_service_paid_from_reserve_usd_tick"
             ],
             "debt_outstanding_usd": latest.get("debt_outstanding_usd", 0.0),
             "issued_voucher_supply_total": latest.get("issued_voucher_supply_total", 0.0),
@@ -2527,6 +2548,10 @@ def run_one(
                         engine, "_lender_recovered_stable_total_by_pool_reason", {}
                     ).items()
                 },
+                sort_keys=True,
+            ),
+            "bond_service_reserved_by_pool_json": json.dumps(
+                getattr(engine, "_bond_service_reserved_by_pool", {}),
                 sort_keys=True,
             ),
             **tier_summary_fields,
@@ -4085,6 +4110,9 @@ def summarize_frontier_cell(
     loan_issuance_volume_values = [
         safe_float(row.get("loan_issuance_volume_usd_total")) for row in rows
     ]
+    producer_debt_originated_values = [
+        safe_float(row.get("producer_debt_originated_usd_total")) for row in rows
+    ]
     loan_issuance_to_capacity_values = [
         loan / max(1e-9, capacity)
         for loan, capacity in zip(loan_issuance_volume_values, producer_credit_capacity_values)
@@ -4136,6 +4164,15 @@ def summarize_frontier_cell(
     ]
     lender_recovered_stable_other_values = [
         safe_float(row.get("lender_recovered_stable_other_usd_total")) for row in rows
+    ]
+    bond_service_reserved_values = [
+        safe_float(row.get("bond_service_reserved_usd_total")) for row in rows
+    ]
+    bond_service_reserve_balance_values = [
+        safe_float(row.get("bond_service_reserve_balance_usd")) for row in rows
+    ]
+    bond_service_paid_from_reserve_values = [
+        safe_float(row.get("bond_service_paid_from_reserve_usd_total")) for row in rows
     ]
     v2v_share_values = [
         v2v / max(1e-9, total) for v2v, total in zip(v2v_count_values, transaction_values)
@@ -4279,6 +4316,7 @@ def summarize_frontier_cell(
         ),
         "producer_deposit_credit_capacity_usd_p50": percentile(producer_credit_capacity_values, 0.50),
         "loan_issuance_volume_usd_total_p50": percentile(loan_issuance_volume_values, 0.50),
+        "producer_debt_originated_usd_total_p50": percentile(producer_debt_originated_values, 0.50),
         "loan_issuance_to_credit_capacity_p50": percentile(loan_issuance_to_capacity_values, 0.50),
         "bond_principal_to_credit_capacity_p50": percentile(principal_to_credit_capacity_values, 0.50),
         "producer_loan_attempts_total_p50": percentile(producer_loan_attempt_values, 0.50),
@@ -4316,6 +4354,11 @@ def summarize_frontier_cell(
         ),
         "lender_recovered_stable_other_usd_total_p50": percentile(
             lender_recovered_stable_other_values, 0.50
+        ),
+        "bond_service_reserved_usd_total_p50": percentile(bond_service_reserved_values, 0.50),
+        "bond_service_reserve_balance_usd_p50": percentile(bond_service_reserve_balance_values, 0.50),
+        "bond_service_paid_from_reserve_usd_total_p50": percentile(
+            bond_service_paid_from_reserve_values, 0.50
         ),
         "baseline_route_success_p50": baseline.get("route_success_p50", 0.0),
         "baseline_swap_volume_p50": baseline.get("swap_volume_p50", 0.0),
