@@ -2822,6 +2822,71 @@ class SimulationEngine:
             self._refresh_lender_voucher_limits(updated_vouchers)
             self.rebuild_indexes()
 
+    def _apply_historical_voucher_backing(self) -> None:
+        target_tick = self.cfg.historical_voucher_backing_tick
+        if target_tick is None or self.tick != int(target_tick):
+            return
+        total = max(0.0, float(self.cfg.historical_voucher_backing_total_usd or 0.0))
+        if total <= 1e-9:
+            return
+
+        producer_entries: list[tuple[Pool, Agent, str, float]] = []
+        for pool in self.pools.values():
+            if pool.policy.system_pool or pool.policy.role != "producer":
+                continue
+            agent = self.agents.get(pool.steward_id)
+            if agent is None:
+                continue
+            voucher_id = agent.voucher_spec.voucher_id
+            weight = max(self._pool_total_value(pool), float(self.cfg.random_request_amount_mean or 1.0))
+            producer_entries.append((pool, agent, voucher_id, weight))
+        if not producer_entries:
+            return
+
+        weight_total = sum(weight for *_rest, weight in producer_entries)
+        if weight_total <= 1e-9:
+            weight_total = float(len(producer_entries))
+            producer_entries = [
+                (pool, agent, voucher_id, 1.0)
+                for pool, agent, voucher_id, _weight in producer_entries
+            ]
+
+        updated_vouchers: Set[str] = set()
+        for pool, agent, voucher_id, weight in producer_entries:
+            voucher_value = total * (weight / weight_total)
+            if voucher_value <= 1e-9:
+                continue
+            value = self._asset_value(pool, voucher_id)
+            amount = voucher_value / max(1e-9, value)
+            if not pool.registry.is_listed(voucher_id):
+                pool.list_asset_with_value_and_limit(
+                    voucher_id,
+                    value=value,
+                    window_len=self.cfg.default_window_len,
+                    cap_in=self.cfg.producer_voucher_cap_in,
+                )
+            self._vault_add(pool, voucher_id, amount, "historical_voucher_backing", agent.agent_id)
+            agent.issuer.issue(amount)
+            self._record_producer_deposit_value(voucher_id, voucher_value)
+            self._producer_deposit_voucher_usd_tick += voucher_value
+            self._producer_deposit_voucher_usd_total += voucher_value
+            updated_vouchers.add(voucher_id)
+            self.log.add(Event(
+                self.tick,
+                "PRODUCER_VOUCHER_DEPOSIT",
+                actor_id=agent.agent_id,
+                pool_id=pool.pool_id,
+                asset_id=voucher_id,
+                amount=voucher_value,
+                meta={
+                    "source": "historical_voucher_backing",
+                    "voucher_units": amount,
+                },
+            ))
+        if updated_vouchers:
+            self._refresh_lender_voucher_limits(updated_vouchers)
+            self.rebuild_indexes()
+
     def _apply_stable_growth_per_pool(self, multiplier: int = 1) -> None:
         scale = max(1, int(multiplier or 1))
         onramp_total = 0.0
@@ -4087,6 +4152,7 @@ class SimulationEngine:
 
             self._apply_productive_credit_inflows()
             self._apply_producer_deposits()
+            self._apply_historical_voucher_backing()
 
             # exogenous stable inflow
             stable_stride = max(1, int(self.cfg.stable_growth_stride_ticks or 1))

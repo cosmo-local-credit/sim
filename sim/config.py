@@ -239,6 +239,8 @@ class ScenarioConfig:
     producer_deposit_stride_ticks: int = 4
     producer_stable_deposit_rate_per_month: float = 0.0
     producer_voucher_deposit_rate_per_month: float = 0.0
+    historical_voucher_backing_tick: int | None = None
+    historical_voucher_backing_total_usd: float = 0.0
     productive_credit_enabled: bool = False
     productive_credit_return_rate: float = 0.0
     productive_credit_lag_ticks: int = 2

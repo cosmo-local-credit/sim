@@ -1179,6 +1179,13 @@ def scenario_config(
         if backing_shock > 0.0:
             cfg.stable_shock_tick = 1
             cfg.stable_shock_amount = backing_shock
+        voucher_backing_total = float(
+            getattr(args, "_validation_historical_voucher_backing_total_usd", 0.0)
+        )
+        if voucher_backing_total > 0.0:
+            cfg.producer_deposits_enabled = True
+            cfg.historical_voucher_backing_tick = 1
+            cfg.historical_voucher_backing_total_usd = voucher_backing_total
         cfg.calibration_profile = "sarafu_engine_validation"
     elif scenario == "regenbond_lp_injection":
         cfg.initial_liquidity_providers = 1
@@ -1277,6 +1284,12 @@ def scenario_config(
             cfg.stable_shock_amount = (
                 historical_cash_backing_total * factor
             ) / max(1, int(cfg.max_pools or 1))
+        historical_voucher_backing_total = float(
+            getattr(args, "_frontier_historical_voucher_backing_total_usd", 0.0)
+        )
+        if historical_voucher_backing_total > 0.0:
+            cfg.historical_voucher_backing_tick = 1
+            cfg.historical_voucher_backing_total_usd = historical_voucher_backing_total * factor
         cfg.calibration_profile = "bond_issuer_frontier"
     elif scenario == "stress_weak_pool_repayment":
         cfg.initial_liquidity_providers = 1

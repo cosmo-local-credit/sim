@@ -90,6 +90,36 @@ class RegenBondRevisionTests(unittest.TestCase):
             100.0,
         )
 
+    def test_historical_voucher_backing_is_recorded_as_producer_deposit(self):
+        engine = SimulationEngine(
+            small_config(
+                kes_per_usd=100.0,
+                voucher_unit_value_usd=0.01,
+                historical_voucher_backing_tick=2,
+                historical_voucher_backing_total_usd=250.0,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        voucher_id = producer.voucher_spec.voucher_id
+        before_units = producer_pool.vault.get(voucher_id)
+        before_deposit_value = engine._producer_deposit_value_by_voucher.get(voucher_id, 0.0)
+        before_credit_capacity = engine._producer_deposit_credit_capacity_usd()
+
+        engine.tick = 2
+        engine._apply_historical_voucher_backing()
+
+        self.assertAlmostEqual(engine._producer_deposit_voucher_usd_total, 250.0)
+        self.assertAlmostEqual(
+            engine._producer_deposit_value_by_voucher[voucher_id] - before_deposit_value,
+            250.0,
+        )
+        self.assertAlmostEqual(producer_pool.vault.get(voucher_id) - before_units, 25_000.0)
+        self.assertAlmostEqual(
+            engine._producer_deposit_credit_capacity_usd() - before_credit_capacity,
+            1_250.0,
+        )
+
     def test_voucher_fee_conversion_records_failed_routed_conversion(self):
         engine = SimulationEngine(
             small_config(
