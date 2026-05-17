@@ -125,11 +125,23 @@ class SimulationEngine:
         self._stable_offramp_usd_tick: float = 0.0
         self._stable_onramp_usd_month: float = 0.0
         self._stable_offramp_usd_month: float = 0.0
+        self._historical_stable_backing_usd_tick: float = 0.0
+        self._historical_stable_backing_usd_total: float = 0.0
+        self._historical_stable_backing_pools_tick: int = 0
+        self._historical_stable_backing_pools_total: int = 0
+        self._historical_stable_backing_usd_by_role: Dict[str, float] = {}
+        self._historical_stable_backing_pools_by_role: Dict[str, int] = {}
+        self._stable_excess_sweep_usd_tick: float = 0.0
+        self._stable_excess_sweep_usd_total: float = 0.0
+        self._stable_excess_sweep_pools_tick: int = 0
+        self._stable_excess_sweep_pools_total: int = 0
         self._producer_deposit_stable_usd_tick: float = 0.0
         self._producer_deposit_voucher_usd_tick: float = 0.0
         self._producer_deposit_stable_usd_total: float = 0.0
         self._producer_deposit_voucher_usd_total: float = 0.0
         self._producer_deposit_value_by_voucher: Dict[str, float] = {}
+        self._route_source_stable_net_flow_value_tick: float = 0.0
+        self._route_source_voucher_net_flow_value_tick: float = 0.0
         self._productive_credit_inflow_usd_tick: float = 0.0
         self._productive_credit_inflow_usd_total: float = 0.0
         self._productive_credit_queue: Dict[int, list[Tuple[str, float, str]]] = {}
@@ -1380,7 +1392,11 @@ class SimulationEngine:
         if pool.policy.role == "lender":
             if asset_in != self.cfg.stable_symbol and asset_out != self.cfg.stable_symbol:
                 return False
-        if pool.policy.role in ("consumer", "producer") and asset_out == self.cfg.stable_symbol:
+        if (
+            pool.policy.role in ("consumer", "producer")
+            and asset_out == self.cfg.stable_symbol
+            and max(0.0, float(self.cfg.producer_consumer_stable_target_bias or 0.0)) <= 0.0
+        ):
             return False
         if pool.policy.role == "clc":
             allowed = {self.cfg.stable_symbol}
@@ -1527,7 +1543,12 @@ class SimulationEngine:
 
     def _sample_amount_in(self, pool: "Pool", asset_in: str) -> float:
         total_value = self._pool_total_value(pool)
-        mean_usd = total_value * float(self.cfg.swap_size_mean_frac or 0.0)
+        multiplier = 1.0
+        if asset_in == self.cfg.stable_symbol:
+            multiplier = max(0.0, float(self.cfg.stable_source_swap_size_multiplier or 0.0))
+        elif asset_in.startswith("VCHR:"):
+            multiplier = max(0.0, float(self.cfg.voucher_source_swap_size_multiplier or 0.0))
+        mean_usd = total_value * float(self.cfg.swap_size_mean_frac or 0.0) * multiplier
         if mean_usd <= 0.0:
             return 0.0
         amount_usd = float(np.random.exponential(mean_usd))
@@ -1537,6 +1558,23 @@ class SimulationEngine:
         value_in = self._asset_value(pool, asset_in)
         amount_in = amount_usd / value_in
         return min(amount_in, pool.vault.get(asset_in))
+
+    def _source_asset_selection_weights(self, pool: "Pool", assets: list[str]) -> np.ndarray:
+        weights = np.array(
+            [pool.vault.get(asset) * self._asset_value(pool, asset) for asset in assets],
+            dtype=float,
+        )
+        stable_bias_config: float | None = None
+        if pool.policy.role == "consumer":
+            stable_bias_config = self.cfg.consumer_stable_source_bias
+        elif pool.policy.role == "producer":
+            stable_bias_config = self.cfg.producer_stable_source_bias
+        if stable_bias_config is not None:
+            stable_bias = max(0.0, float(stable_bias_config or 0.0))
+            for idx, asset in enumerate(assets):
+                if asset == self.cfg.stable_symbol:
+                    weights[idx] *= stable_bias
+        return weights
 
     def _swap_attempts_for_pool(self, pool: "Pool") -> int:
         attempts = int(self.cfg.random_route_requests_per_tick)
@@ -1567,6 +1605,16 @@ class SimulationEngine:
         elif ema > 1.0:
             ema = 1.0
         self._swap_success_ema[pool_id] = ema
+
+    def _record_route_source_net_flow(self, pool: "Pool", asset_id: str, amount: float, sign: float) -> None:
+        if amount <= 1e-12:
+            return
+        value = self._asset_value(pool, asset_id)
+        flow_value = amount * value * sign
+        if asset_id == self.cfg.stable_symbol:
+            self._route_source_stable_net_flow_value_tick += flow_value
+        elif asset_id.startswith("VCHR:"):
+            self._route_source_voucher_net_flow_value_tick += flow_value
 
     def _record_fee_cumulative(self, receipt: SwapReceipt) -> None:
         if receipt.status != "executed":
@@ -1633,19 +1681,25 @@ class SimulationEngine:
         exclude: Optional[Set[str]] = None,
     ) -> Optional[str]:
         mode = self.cfg.swap_target_selection_mode
+        stable_target_bias = 1.0
         restrict_stable = False
         if source_pool is not None and source_pool.policy.role in ("producer", "consumer"):
-            restrict_stable = True
+            stable_target_bias = max(0.0, float(self.cfg.producer_consumer_stable_target_bias or 0.0))
+            restrict_stable = stable_target_bias <= 0.0
         if mode == "liquidity_weighted":
             self._refresh_liquidity_cache()
-            candidates = [
-                (a, w)
-                for a, w in self._liquidity_by_asset.items()
-                if a != asset_in
-                and w > 0.0
-                and (not restrict_stable or a != self.cfg.stable_symbol)
-                and (exclude is None or a not in exclude)
-            ]
+            candidates = []
+            for asset_id, weight in self._liquidity_by_asset.items():
+                if asset_id == asset_in or weight <= 0.0:
+                    continue
+                if restrict_stable and asset_id == self.cfg.stable_symbol:
+                    continue
+                if exclude is not None and asset_id in exclude:
+                    continue
+                if asset_id == self.cfg.stable_symbol:
+                    weight *= stable_target_bias
+                if weight > 0.0:
+                    candidates.append((asset_id, weight))
             if not candidates:
                 return None
             assets, weights = zip(*candidates)
@@ -1859,10 +1913,15 @@ class SimulationEngine:
         executed = self._noam_routing_swaps_tick + self._noam_clearing_swaps_tick
         if executed >= target:
             return
-        max_extra = max(0, int(self.cfg.swap_sustain_max_extra_attempts or 0))
+        shortfall = max(0, target - executed)
+        attempts_per_missing = max(1.0, float(self.cfg.swap_sustain_attempts_per_missing_swap or 1.0))
+        max_extra = max(
+            int(math.ceil(shortfall * attempts_per_missing)),
+            int(self.cfg.swap_sustain_max_extra_attempts or 0),
+        )
         if max_extra <= 0:
             return
-        rounds = max(1, int(self.cfg.swap_sustain_max_rounds or 1))
+        max_passes = max(1, int(self.cfg.swap_sustain_max_rounds or 1))
         pools = [
             p for p in self.pools.values()
             if not p.policy.system_pool and p.policy.role != "liquidity_provider" and p.vault.inventory
@@ -1870,7 +1929,8 @@ class SimulationEngine:
         if not pools:
             return
         remaining = max_extra
-        for _ in range(rounds):
+        idle_passes = 0
+        for _ in range(max_passes):
             if executed >= target or remaining <= 0:
                 break
             self.rng.shuffle(pools)
@@ -1886,7 +1946,11 @@ class SimulationEngine:
                 remaining -= attempted
                 executed = self._noam_routing_swaps_tick + self._noam_clearing_swaps_tick
             if not progressed:
-                break
+                idle_passes += 1
+                if idle_passes >= 2:
+                    break
+            else:
+                idle_passes = 0
 
     def _record_swap_history(self) -> None:
         if not bool(self.cfg.swap_sustain_enabled):
@@ -2887,6 +2951,65 @@ class SimulationEngine:
             self._refresh_lender_voucher_limits(updated_vouchers)
             self.rebuild_indexes()
 
+    def _apply_historical_stable_backing(self) -> None:
+        target_tick = self.cfg.historical_stable_backing_tick
+        if target_tick is None or self.tick != int(target_tick):
+            return
+        total = max(0.0, float(self.cfg.historical_stable_backing_total_usd or 0.0))
+        if total <= 1e-9:
+            return
+
+        role_filter = {
+            str(role)
+            for role in (self.cfg.historical_stable_backing_roles or ())
+            if str(role)
+        }
+        eligible = [
+            pool
+            for pool in self.pools.values()
+            if not pool.policy.system_pool
+            and (not role_filter or pool.policy.role in role_filter)
+        ]
+        if not eligible:
+            return
+
+        amount_per_pool = total / float(len(eligible))
+        stable_id = self.cfg.stable_symbol
+        role_usd: Dict[str, float] = {}
+        role_pools: Dict[str, int] = {}
+        total_applied = 0.0
+        for pool in eligible:
+            if amount_per_pool <= 1e-9:
+                continue
+            self._vault_add(pool, stable_id, amount_per_pool, "historical_stable_backing", "historical")
+            role = str(pool.policy.role)
+            role_usd[role] = role_usd.get(role, 0.0) + amount_per_pool
+            role_pools[role] = role_pools.get(role, 0) + 1
+            total_applied += amount_per_pool
+
+        if total_applied <= 1e-9:
+            return
+        self._stable_onramp_usd_tick += total_applied
+        self._historical_stable_backing_usd_tick += total_applied
+        self._historical_stable_backing_usd_total += total_applied
+        self._historical_stable_backing_pools_tick += len(eligible)
+        self._historical_stable_backing_pools_total += len(eligible)
+        for role, value in role_usd.items():
+            self._historical_stable_backing_usd_by_role[role] = (
+                self._historical_stable_backing_usd_by_role.get(role, 0.0) + value
+            )
+        for role, count in role_pools.items():
+            self._historical_stable_backing_pools_by_role[role] = (
+                self._historical_stable_backing_pools_by_role.get(role, 0) + count
+            )
+        self.log.add(Event(
+            self.tick,
+            "HISTORICAL_STABLE_BACKING",
+            asset_id=stable_id,
+            amount=total_applied,
+            meta={"roles": role_usd, "recipient_pools": len(eligible)},
+        ))
+
     def _apply_stable_growth_per_pool(self, multiplier: int = 1) -> None:
         scale = max(1, int(multiplier or 1))
         onramp_total = 0.0
@@ -3499,6 +3622,60 @@ class SimulationEngine:
                 "MONTHLY_OFFRAMP_BALANCED",
                 amount=total_offramp,
                 meta={"net_onramp_usd": net_onramp, "used_usd": total_offramp},
+            ))
+
+    def _sweep_pool_stable_excess(self, pool: "Pool", action: str = "stable_excess_sweep") -> float:
+        stable_id = self.cfg.stable_symbol
+        buffer_share = max(0.0, float(self.cfg.stable_excess_sweep_buffer_voucher_share or 0.0))
+        stable_available = pool.vault.get(stable_id)
+        if stable_available <= 1e-9:
+            return 0.0
+        reserve = max(0.0, float(pool.policy.min_stable_reserve or 0.0))
+        working_buffer = self._pool_voucher_value_usd(pool) * buffer_share
+        preserved = reserve + working_buffer
+        amount = max(0.0, stable_available - preserved)
+        if amount <= 1e-9:
+            return 0.0
+        if not self._vault_sub(pool, stable_id, amount, action, "fiat"):
+            return 0.0
+        self._stable_offramp_usd_tick += amount
+        self._stable_offramp_usd_month += amount
+        self._stable_excess_sweep_usd_tick += amount
+        self._stable_excess_sweep_usd_total += amount
+        self._stable_excess_sweep_pools_tick += 1
+        self._stable_excess_sweep_pools_total += 1
+        return amount
+
+    def _apply_stable_excess_sweep(self) -> None:
+        if not bool(self.cfg.stable_excess_sweep_enabled):
+            return
+        role_filter = {
+            str(role)
+            for role in (self.cfg.stable_excess_sweep_roles or ())
+            if str(role)
+        }
+        total_swept = 0.0
+        pools_swept = 0
+        role_usd: Dict[str, float] = {}
+        for pool in self.pools.values():
+            if pool.policy.system_pool:
+                continue
+            if role_filter and pool.policy.role not in role_filter:
+                continue
+            amount = self._sweep_pool_stable_excess(pool)
+            if amount <= 1e-9:
+                continue
+            total_swept += amount
+            pools_swept += 1
+            role = str(pool.policy.role)
+            role_usd[role] = role_usd.get(role, 0.0) + amount
+        if total_swept > 0.0:
+            self.log.add(Event(
+                self.tick,
+                "STABLE_EXCESS_SWEEP",
+                asset_id=self.cfg.stable_symbol,
+                amount=total_swept,
+                meta={"roles": role_usd, "recipient_pools": pools_swept},
             ))
 
     def _deposit_fee_asset_to_pool(self, pool: Pool, asset_id: str, amount: float, value: float, action: str) -> None:
@@ -4133,8 +4310,14 @@ class SimulationEngine:
             self._incidents_tick = 0
             self._stable_onramp_usd_tick = 0.0
             self._stable_offramp_usd_tick = 0.0
+            self._historical_stable_backing_usd_tick = 0.0
+            self._historical_stable_backing_pools_tick = 0
+            self._stable_excess_sweep_usd_tick = 0.0
+            self._stable_excess_sweep_pools_tick = 0
             self._producer_deposit_stable_usd_tick = 0.0
             self._producer_deposit_voucher_usd_tick = 0.0
+            self._route_source_stable_net_flow_value_tick = 0.0
+            self._route_source_voucher_net_flow_value_tick = 0.0
             self._productive_credit_inflow_usd_tick = 0.0
             self._fee_conversion_attempted_usd_tick = 0.0
             self._fee_conversion_success_usd_tick = 0.0
@@ -4152,6 +4335,7 @@ class SimulationEngine:
 
             self._apply_productive_credit_inflows()
             self._apply_producer_deposits()
+            self._apply_historical_stable_backing()
             self._apply_historical_voucher_backing()
 
             # exogenous stable inflow
@@ -4258,6 +4442,7 @@ class SimulationEngine:
             epoch = max(1, int(self.cfg.waterfall_epoch_ticks or 1))
             if self.tick % epoch == 0:
                 self._apply_monthly_offramp_balancer()
+                self._apply_stable_excess_sweep()
                 self._stable_onramp_usd_month = 0.0
                 self._stable_offramp_usd_month = 0.0
             self.snapshot_metrics()
@@ -4291,7 +4476,7 @@ class SimulationEngine:
             # Keep producer stable on-hand for repayments unless debt is cleared.
             if self._producer_debt_outstanding(source_pool) > 1e-9:
                 asset_candidates = [a for a in asset_candidates if a != self.cfg.stable_symbol]
-        elif source_pool.policy.role == "consumer":
+        elif source_pool.policy.role == "consumer" and self.cfg.consumer_stable_source_bias is None:
             if self.cfg.stable_symbol in asset_candidates:
                 asset_candidates = [self.cfg.stable_symbol]
         if not asset_candidates:
@@ -4301,10 +4486,7 @@ class SimulationEngine:
             if len(asset_candidates) > max_assets:
                 mode = self.cfg.swap_asset_selection_mode
                 if mode == "value_weighted":
-                    weights = np.array(
-                        [source_pool.vault.get(a) * self._asset_value(source_pool, a) for a in asset_candidates],
-                        dtype=float,
-                    )
+                    weights = self._source_asset_selection_weights(source_pool, asset_candidates)
                     total = float(weights.sum())
                     if total > 0.0:
                         probs = weights / total
@@ -4740,6 +4922,12 @@ class SimulationEngine:
             self._record_fee_cumulative(receipt)
             self._record_clc_swap_cumulative(receipt)
             if (
+                bool(self.cfg.stable_excess_sweep_after_stable_receipt)
+                and pool.policy.role in ("producer", "consumer")
+                and receipt.asset_in == self.cfg.stable_symbol
+            ):
+                self._sweep_pool_stable_excess(pool, action="stable_receipt_sweep")
+            if (
                 pool.policy.role == "lender"
                 and receipt.asset_in == self.cfg.stable_symbol
                 and self._is_producer_voucher(receipt.asset_out)
@@ -4793,6 +4981,8 @@ class SimulationEngine:
                     issuer_pool = self.pools.get(issuer_pool_id)
                     if issuer_pool is not None:
                         self._vault_add(issuer_pool, out_asset, out_amount, "redeem_receive", source_pool_id)
+                        self._record_route_source_net_flow(source_pool, asset_in, amount_in, -1.0)
+                        self._record_route_source_net_flow(issuer_pool, out_asset, out_amount, 1.0)
                         escrow[out_asset] = 0.0
                         self.log.add(Event(self.tick, "VOUCHER_REDEEMED", actor_id=issuer_id, asset_id=out_asset, amount=out_amount))
                         self._noam_route_cache_store(source_pool_id, plan, amount_in)
@@ -4802,11 +4992,15 @@ class SimulationEngine:
                 return False
             # lenders/sys_clc keep vouchers from swaps
             self._vault_add(source_pool, out_asset, out_amount, "route_deposit", "escrow")
+            self._record_route_source_net_flow(source_pool, asset_in, amount_in, -1.0)
+            self._record_route_source_net_flow(source_pool, out_asset, out_amount, 1.0)
             self._noam_route_cache_store(source_pool_id, plan, amount_in)
             return True
 
         # normal asset: deposit back to source pool
         self._vault_add(source_pool, out_asset, out_amount, "route_deposit", "escrow")
+        self._record_route_source_net_flow(source_pool, asset_in, amount_in, -1.0)
+        self._record_route_source_net_flow(source_pool, out_asset, out_amount, 1.0)
         self._noam_route_cache_store(source_pool_id, plan, amount_in)
         return True
 
@@ -5138,6 +5332,12 @@ class SimulationEngine:
                 "swap_stable_flow_share_tick": swap_stable_flow_share,
                 "swap_stable_net_flow_value_tick": swap_stable_net_flow_value,
                 "swap_voucher_net_flow_value_tick": swap_voucher_net_flow_value,
+                "route_source_stable_net_flow_value_tick": float(
+                    self._route_source_stable_net_flow_value_tick
+                ),
+                "route_source_voucher_net_flow_value_tick": float(
+                    self._route_source_voucher_net_flow_value_tick
+                ),
                 "swap_count_usd_to_vchr_tick": count_usd_to_vchr,
                 "swap_count_vchr_to_usd_tick": count_vchr_to_usd,
                 "swap_count_vchr_to_vchr_tick": count_vchr_to_vchr,
@@ -5207,4 +5407,30 @@ class SimulationEngine:
                 "incidents_tick": int(self._incidents_tick),
                 "stable_onramp_usd_tick": float(self._stable_onramp_usd_tick),
                 "stable_offramp_usd_tick": float(self._stable_offramp_usd_tick),
+                "historical_stable_backing_usd_tick": float(self._historical_stable_backing_usd_tick),
+                "historical_stable_backing_usd_total": float(self._historical_stable_backing_usd_total),
+                "historical_stable_backing_pools_tick": int(self._historical_stable_backing_pools_tick),
+                "historical_stable_backing_pools_total": int(self._historical_stable_backing_pools_total),
+                "historical_stable_backing_producer_usd_total": float(
+                    self._historical_stable_backing_usd_by_role.get("producer", 0.0)
+                ),
+                "historical_stable_backing_consumer_usd_total": float(
+                    self._historical_stable_backing_usd_by_role.get("consumer", 0.0)
+                ),
+                "historical_stable_backing_lender_usd_total": float(
+                    self._historical_stable_backing_usd_by_role.get("lender", 0.0)
+                ),
+                "historical_stable_backing_producer_pools_total": int(
+                    self._historical_stable_backing_pools_by_role.get("producer", 0)
+                ),
+                "historical_stable_backing_consumer_pools_total": int(
+                    self._historical_stable_backing_pools_by_role.get("consumer", 0)
+                ),
+                "historical_stable_backing_lender_pools_total": int(
+                    self._historical_stable_backing_pools_by_role.get("lender", 0)
+                ),
+                "stable_excess_sweep_usd_tick": float(self._stable_excess_sweep_usd_tick),
+                "stable_excess_sweep_usd_total": float(self._stable_excess_sweep_usd_total),
+                "stable_excess_sweep_pools_tick": int(self._stable_excess_sweep_pools_tick),
+                "stable_excess_sweep_pools_total": int(self._stable_excess_sweep_pools_total),
             })

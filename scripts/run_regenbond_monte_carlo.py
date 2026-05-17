@@ -1022,18 +1022,17 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
         for row in empirical_targets
     )
     empirical_voucher_backing = sum(safe_float(row.get("backing_voucher_inflow")) for row in empirical_targets)
-    base_pool_count = max(1, len(calibration.pool_rows))
-    swap_floor = int(math.ceil((empirical_total_swaps / max(1, int(ticks))) * 0.90))
+    swap_floor = int(math.ceil(empirical_total_swaps / max(1, int(ticks))))
     setattr(args, f"_{prefix}_swap_floor_per_tick", swap_floor)
     setattr(args, f"_{prefix}_route_requests_per_tick", 1)
     setattr(args, f"_{prefix}_swap_budget_per_tick", max(60, int(math.ceil(swap_floor * 0.25))))
     setattr(args, f"_{prefix}_swap_attempts_max_per_pool", 2)
-    setattr(args, f"_{prefix}_swap_sustain_max_extra_attempts", max(600, int(math.ceil(swap_floor * 1.50))))
-    setattr(args, f"_{prefix}_swap_sustain_max_rounds", 2)
+    setattr(args, f"_{prefix}_swap_sustain_max_extra_attempts", max(1, int(math.ceil(swap_floor * 3.0))))
+    setattr(args, f"_{prefix}_swap_sustain_max_rounds", 8)
+    setattr(args, f"_{prefix}_swap_sustain_attempts_per_missing_swap", 3.0)
     setattr(args, f"_{prefix}_historical_backing_total_usd", empirical_total_backing)
     setattr(args, f"_{prefix}_historical_cash_backing_total_usd", empirical_cash_backing)
     setattr(args, f"_{prefix}_historical_voucher_backing_total_usd", empirical_voucher_backing)
-    setattr(args, f"_{prefix}_backing_shock_per_pool", empirical_cash_backing / base_pool_count)
     stable_deposit_rate = 0.0
     voucher_deposit_rate = 0.0
     productive_return_rate = 0.0
@@ -1156,6 +1155,8 @@ def scenario_config(
         cfg.consumer_inflow_per_tick = 0.0
         cfg.lender_inflow_per_tick = 0.0
         cfg.stable_inflow_per_tick = 0.0
+        cfg.initial_stable_per_pool_mean = 0.0
+        cfg.min_stable_reserve_mean = 0.0
         cfg.stable_supply_growth_rate = 0.0
         cfg.stable_supply_noise = 0.0
         cfg.initial_lenders = int(getattr(args, "_current_initial_lenders", cfg.initial_lenders))
@@ -1165,20 +1166,28 @@ def scenario_config(
         cfg.random_route_requests_per_tick = int(getattr(args, "_validation_route_requests_per_tick", 2))
         cfg.swap_requests_budget_per_tick = int(getattr(args, "_validation_swap_budget_per_tick", 120))
         cfg.swap_attempts_max_per_pool = int(getattr(args, "_validation_swap_attempts_max_per_pool", 2))
-        cfg.max_hops = 2
-        cfg.noam_max_hops = 2
+        cfg.max_hops = 3
+        cfg.noam_max_hops = 3
         cfg.noam_overlay_enabled = False
         cfg.noam_clearing_enabled = False
+        cfg.route_substitution_enabled = True
+        cfg.route_substitution_max_alternatives = 3
         cfg.swap_sustain_window_ticks = 0
         cfg.swap_sustain_floor_per_tick = int(getattr(args, "_validation_swap_floor_per_tick", 0))
         cfg.swap_sustain_max_extra_attempts = int(
             getattr(args, "_validation_swap_sustain_max_extra_attempts", 500)
         )
         cfg.swap_sustain_max_rounds = int(getattr(args, "_validation_swap_sustain_max_rounds", 2))
-        backing_shock = float(getattr(args, "_validation_backing_shock_per_pool", 0.0))
-        if backing_shock > 0.0:
-            cfg.stable_shock_tick = 1
-            cfg.stable_shock_amount = backing_shock
+        cfg.swap_sustain_attempts_per_missing_swap = float(
+            getattr(args, "_validation_swap_sustain_attempts_per_missing_swap", 1.0)
+        )
+        stable_backing_total = float(
+            getattr(args, "_validation_historical_cash_backing_total_usd", 0.0)
+        )
+        if stable_backing_total > 0.0:
+            cfg.historical_stable_backing_tick = 1
+            cfg.historical_stable_backing_total_usd = stable_backing_total
+            cfg.historical_stable_backing_roles = ("producer", "consumer")
         voucher_backing_total = float(
             getattr(args, "_validation_historical_voucher_backing_total_usd", 0.0)
         )
@@ -1186,6 +1195,15 @@ def scenario_config(
             cfg.producer_deposits_enabled = True
             cfg.historical_voucher_backing_tick = 1
             cfg.historical_voucher_backing_total_usd = voucher_backing_total
+        cfg.consumer_stable_source_bias = 0.25
+        cfg.producer_stable_source_bias = 0.05
+        cfg.producer_consumer_stable_target_bias = 0.0
+        cfg.stable_source_swap_size_multiplier = 2.0
+        cfg.voucher_source_swap_size_multiplier = 0.5
+        cfg.stable_excess_sweep_enabled = True
+        cfg.stable_excess_sweep_after_stable_receipt = False
+        cfg.stable_excess_sweep_buffer_voucher_share = 0.05
+        cfg.stable_excess_sweep_roles = ("producer", "consumer")
         cfg.calibration_profile = "sarafu_engine_validation"
     elif scenario == "regenbond_lp_injection":
         cfg.initial_liquidity_providers = 1
@@ -1261,6 +1279,9 @@ def scenario_config(
                 int(math.ceil(frontier_floor * 1.50)),
             )
             cfg.swap_sustain_max_rounds = int(getattr(args, "_frontier_swap_sustain_max_rounds", 2))
+            cfg.swap_sustain_attempts_per_missing_swap = float(
+                getattr(args, "_frontier_swap_sustain_attempts_per_missing_swap", 1.0)
+            )
         else:
             cfg.swap_requests_budget_per_tick = max(100, int(round(100 * factor)))
         cfg.noam_topk_pools_per_asset = max(cfg.noam_topk_pools_per_asset, int(round(16 * math.sqrt(factor))))
@@ -1280,10 +1301,9 @@ def scenario_config(
             getattr(args, "_frontier_historical_cash_backing_total_usd", 0.0)
         )
         if historical_cash_backing_total > 0.0:
-            cfg.stable_shock_tick = 1
-            cfg.stable_shock_amount = (
-                historical_cash_backing_total * factor
-            ) / max(1, int(cfg.max_pools or 1))
+            cfg.historical_stable_backing_tick = 1
+            cfg.historical_stable_backing_total_usd = historical_cash_backing_total * factor
+            cfg.historical_stable_backing_roles = ("producer", "consumer")
         historical_voucher_backing_total = float(
             getattr(args, "_frontier_historical_voucher_backing_total_usd", 0.0)
         )
@@ -1836,6 +1856,8 @@ def run_one(
             "swap_voucher_flow_value_tick",
             "swap_stable_net_flow_value_tick",
             "swap_voucher_net_flow_value_tick",
+            "route_source_stable_net_flow_value_tick",
+            "route_source_voucher_net_flow_value_tick",
             "swap_count_usd_to_vchr_tick",
             "swap_count_vchr_to_usd_tick",
             "swap_count_vchr_to_vchr_tick",
@@ -1893,14 +1915,40 @@ def run_one(
         cumulative_swap_stable_flow = cumulative_float["swap_stable_flow_value_tick"]
         cumulative_swap_voucher_flow = cumulative_float["swap_voucher_flow_value_tick"]
         cumulative_swap_gross_flow = cumulative_swap_stable_flow + cumulative_swap_voucher_flow
+        latest_engine_gross_stable_flow = (
+            safe_float(latest.get("swap_stable_flow_value_tick"))
+            + safe_float(latest.get("stable_onramp_usd_tick"))
+            + safe_float(latest.get("stable_offramp_usd_tick"))
+            + safe_float(latest.get("producer_deposit_stable_usd_tick"))
+        )
+        latest_engine_gross_voucher_flow = (
+            safe_float(latest.get("swap_voucher_flow_value_tick"))
+            + safe_float(latest.get("producer_deposit_voucher_usd_tick"))
+        )
+        latest_engine_gross_flow = latest_engine_gross_stable_flow + latest_engine_gross_voucher_flow
+        cumulative_engine_gross_stable_flow = (
+            cumulative_swap_stable_flow
+            + cumulative_float["stable_onramp_usd_tick"]
+            + cumulative_float["stable_offramp_usd_tick"]
+            + cumulative_float["producer_deposit_stable_usd_tick"]
+        )
+        cumulative_engine_gross_voucher_flow = (
+            cumulative_swap_voucher_flow
+            + cumulative_float["producer_deposit_voucher_usd_tick"]
+        )
+        cumulative_engine_gross_flow = (
+            cumulative_engine_gross_stable_flow + cumulative_engine_gross_voucher_flow
+        )
         cumulative_stable_flow_net = (
             cumulative_float["stable_onramp_usd_tick"]
             - cumulative_float["stable_offramp_usd_tick"]
             + cumulative_float["swap_stable_net_flow_value_tick"]
+            + cumulative_float["route_source_stable_net_flow_value_tick"]
         )
         cumulative_voucher_flow_net = (
             cumulative_float["producer_deposit_voucher_usd_tick"]
             + cumulative_float["swap_voucher_net_flow_value_tick"]
+            + cumulative_float["route_source_voucher_net_flow_value_tick"]
         )
         cumulative_stable_flow_positive = max(0.0, cumulative_stable_flow_net)
         cumulative_voucher_flow_positive = max(0.0, cumulative_voucher_flow_net)
@@ -1970,10 +2018,32 @@ def run_one(
             "swap_voucher_flow_value_total": cumulative_swap_voucher_flow,
             "swap_stable_flow_share_tick": latest.get("swap_stable_flow_share_tick", 0.0),
             "swap_stable_flow_share_total": cumulative_swap_stable_flow / max(1e-9, cumulative_swap_gross_flow),
+            "engine_gross_stable_flow_value_tick": latest_engine_gross_stable_flow,
+            "engine_gross_stable_flow_value_total": cumulative_engine_gross_stable_flow,
+            "engine_gross_voucher_flow_value_tick": latest_engine_gross_voucher_flow,
+            "engine_gross_voucher_flow_value_total": cumulative_engine_gross_voucher_flow,
+            "engine_gross_flow_stable_share_tick": (
+                latest_engine_gross_stable_flow / max(1e-9, latest_engine_gross_flow)
+            ),
+            "engine_gross_flow_stable_share_total": (
+                cumulative_engine_gross_stable_flow / max(1e-9, cumulative_engine_gross_flow)
+            ),
             "swap_stable_net_flow_value_tick": latest.get("swap_stable_net_flow_value_tick", 0.0),
             "swap_stable_net_flow_value_total": cumulative_float["swap_stable_net_flow_value_tick"],
             "swap_voucher_net_flow_value_tick": latest.get("swap_voucher_net_flow_value_tick", 0.0),
             "swap_voucher_net_flow_value_total": cumulative_float["swap_voucher_net_flow_value_tick"],
+            "route_source_stable_net_flow_value_tick": latest.get(
+                "route_source_stable_net_flow_value_tick", 0.0
+            ),
+            "route_source_stable_net_flow_value_total": cumulative_float[
+                "route_source_stable_net_flow_value_tick"
+            ],
+            "route_source_voucher_net_flow_value_tick": latest.get(
+                "route_source_voucher_net_flow_value_tick", 0.0
+            ),
+            "route_source_voucher_net_flow_value_total": cumulative_float[
+                "route_source_voucher_net_flow_value_tick"
+            ],
             "engine_flow_stable_net_usd_total": cumulative_stable_flow_net,
             "engine_flow_voucher_net_usd_total": cumulative_voucher_flow_net,
             "engine_flow_positive_stable_usd_total": cumulative_stable_flow_positive,
@@ -2033,6 +2103,32 @@ def run_one(
             "stable_onramp_usd_total": cumulative_float["stable_onramp_usd_tick"],
             "stable_offramp_usd_tick": latest.get("stable_offramp_usd_tick", 0.0),
             "stable_offramp_usd_total": cumulative_float["stable_offramp_usd_tick"],
+            "historical_stable_backing_usd_tick": latest.get("historical_stable_backing_usd_tick", 0.0),
+            "historical_stable_backing_usd_total": latest.get("historical_stable_backing_usd_total", 0.0),
+            "historical_stable_backing_pools_tick": latest.get("historical_stable_backing_pools_tick", 0),
+            "historical_stable_backing_pools_total": latest.get("historical_stable_backing_pools_total", 0),
+            "historical_stable_backing_producer_usd_total": latest.get(
+                "historical_stable_backing_producer_usd_total", 0.0
+            ),
+            "historical_stable_backing_consumer_usd_total": latest.get(
+                "historical_stable_backing_consumer_usd_total", 0.0
+            ),
+            "historical_stable_backing_lender_usd_total": latest.get(
+                "historical_stable_backing_lender_usd_total", 0.0
+            ),
+            "historical_stable_backing_producer_pools_total": latest.get(
+                "historical_stable_backing_producer_pools_total", 0
+            ),
+            "historical_stable_backing_consumer_pools_total": latest.get(
+                "historical_stable_backing_consumer_pools_total", 0
+            ),
+            "historical_stable_backing_lender_pools_total": latest.get(
+                "historical_stable_backing_lender_pools_total", 0
+            ),
+            "stable_excess_sweep_usd_tick": latest.get("stable_excess_sweep_usd_tick", 0.0),
+            "stable_excess_sweep_usd_total": latest.get("stable_excess_sweep_usd_total", 0.0),
+            "stable_excess_sweep_pools_tick": latest.get("stable_excess_sweep_pools_tick", 0),
+            "stable_excess_sweep_pools_total": latest.get("stable_excess_sweep_pools_total", 0),
             "household_cash_stress_ratio": stress_ratio,
             "stable_liquidity_leakage_ratio_tick": leakage_ratio,
             "stable_liquidity_leakage_ratio_cumulative": (
@@ -3033,7 +3129,7 @@ def engine_validation_moments(
             "gross_stable_flow_share_strict_1ksh",
             "settlement",
             stable_anchors.get("gross_stable_flow_share_strict_1ksh", {}).get("value", ""),
-            [safe_float(row.get("swap_stable_flow_share_total")) for row in summaries],
+            [safe_float(row.get("engine_gross_flow_stable_share_total")) for row in summaries],
             None,
             False,
         ),
@@ -3042,7 +3138,7 @@ def engine_validation_moments(
             "gross_stable_flow_share_metadata_weighted",
             "settlement",
             stable_anchors.get("gross_stable_flow_share", {}).get("value", ""),
-            [safe_float(row.get("swap_stable_flow_share_total")) for row in summaries],
+            [safe_float(row.get("engine_gross_flow_stable_share_total")) for row in summaries],
             None,
             False,
         ),

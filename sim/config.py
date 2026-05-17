@@ -37,8 +37,12 @@ class ScenarioConfig:
     consumer_inflow_per_tick: float | None = 0.05  # rate of current stable per month
     lender_inflow_per_tick: float = 0.05  # rate of current stable per month
     liquidity_provider_inflow_per_tick: float = 0.0  # rate of current stable per month
+    min_stable_reserve_mean: float = 200.0
     stable_shock_tick: int | None = None
     stable_shock_amount: float = 0.0  # negative drains, positive adds
+    historical_stable_backing_tick: int | None = None
+    historical_stable_backing_total_usd: float = 0.0
+    historical_stable_backing_roles: tuple[str, ...] = ("producer", "consumer")
     stable_growth_mode: str = "per_pool"  # "per_pool" or "network_target"
     stable_growth_stride_ticks: int = 4
     stable_supply_cap: float = 100_000_000.0
@@ -63,6 +67,10 @@ class ScenarioConfig:
     offramp_min_attempts: int = 2
     producer_offramp_rate_per_month: float = 0.05
     consumer_offramp_rate_per_month: float = 0.05
+    stable_excess_sweep_enabled: bool = False
+    stable_excess_sweep_after_stable_receipt: bool = False
+    stable_excess_sweep_buffer_voucher_share: float = 0.0
+    stable_excess_sweep_roles: tuple[str, ...] = ("producer", "consumer")
     metrics_stride: int = 1
     pool_metrics_stride: int = 1
     max_active_pools_per_tick: int | None = None
@@ -231,6 +239,7 @@ class ScenarioConfig:
     swap_sustain_floor_per_tick: int = 0
     swap_sustain_max_extra_attempts: int = 200
     swap_sustain_max_rounds: int = 2
+    swap_sustain_attempts_per_missing_swap: float = 1.0
 
     # Loan repayment (weeks)
     loan_term_weeks: int = 4
@@ -250,6 +259,11 @@ class ScenarioConfig:
     swap_size_min_usd: float = 1.0
     swap_size_max_usd: float | None = None
     swap_asset_selection_mode: str = "value_weighted"  # "uniform" or "value_weighted"
+    consumer_stable_source_bias: float | None = None
+    producer_stable_source_bias: float | None = None
+    producer_consumer_stable_target_bias: float = 0.0
+    stable_source_swap_size_multiplier: float = 1.0
+    voucher_source_swap_size_multiplier: float = 1.0
     swap_limits_enabled: bool = True
     swap_target_selection_mode: str = "liquidity_weighted"  # "uniform" or "liquidity_weighted"
     swap_target_retry_count: int = 2

@@ -120,6 +120,109 @@ class RegenBondRevisionTests(unittest.TestCase):
             1_250.0,
         )
 
+    def test_historical_stable_backing_applies_once_to_eligible_roles(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=2,
+                initial_consumers=1,
+                initial_liquidity_providers=0,
+                max_pools=4,
+                historical_stable_backing_tick=2,
+                historical_stable_backing_total_usd=120.0,
+                historical_stable_backing_roles=("producer", "consumer"),
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        eligible_pools = [
+            pool for pool in engine.pools.values() if pool.policy.role in ("producer", "consumer")
+        ]
+        before = {pool.pool_id: pool.vault.get(stable_id) for pool in [lender_pool, *eligible_pools]}
+
+        engine.tick = 2
+        engine._apply_historical_stable_backing()
+
+        self.assertAlmostEqual(engine._historical_stable_backing_usd_total, 120.0)
+        self.assertAlmostEqual(engine._stable_onramp_usd_tick, 120.0)
+        self.assertEqual(engine._historical_stable_backing_pools_total, len(eligible_pools))
+        self.assertAlmostEqual(lender_pool.vault.get(stable_id), before[lender_pool.pool_id])
+        for pool in eligible_pools:
+            self.assertAlmostEqual(pool.vault.get(stable_id) - before[pool.pool_id], 40.0)
+
+    def test_consumer_weighted_source_selection_can_choose_voucher_with_stable_present(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=0,
+                initial_producers=1,
+                initial_consumers=1,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                consumer_stable_source_bias=0.0,
+            )
+        )
+        consumer = next(agent for agent in engine.agents.values() if agent.role == "consumer")
+        consumer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "consumer")
+        voucher_id = consumer.voucher_spec.voucher_id
+        consumer_pool.list_asset_with_value_and_limit(voucher_id, value=1.0, window_len=1, cap_in=1e12)
+        engine._vault_add(consumer_pool, engine.cfg.stable_symbol, 100.0, "test_seed", "test")
+        engine._vault_add(consumer_pool, voucher_id, 100.0, "test_seed", "test")
+
+        weights = engine._source_asset_selection_weights(
+            consumer_pool,
+            [engine.cfg.stable_symbol, voucher_id],
+        )
+
+        self.assertAlmostEqual(float(weights[0]), 0.0)
+        self.assertGreater(float(weights[1]), 0.0)
+
+    def test_producer_weighted_source_selection_can_choose_voucher_with_stable_present(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=0,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=1,
+                producer_stable_source_bias=0.0,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        voucher_id = producer.voucher_spec.voucher_id
+        engine._vault_add(producer_pool, engine.cfg.stable_symbol, 100.0, "test_seed", "test")
+        engine._vault_add(producer_pool, voucher_id, 100.0, "test_seed", "test")
+
+        weights = engine._source_asset_selection_weights(
+            producer_pool,
+            [engine.cfg.stable_symbol, voucher_id],
+        )
+
+        self.assertAlmostEqual(float(weights[0]), 0.0)
+        self.assertGreater(float(weights[1]), 0.0)
+
+    def test_stable_excess_sweep_preserves_reserve_and_records_offramp(self):
+        engine = SimulationEngine(
+            small_config(
+                stable_excess_sweep_enabled=True,
+                stable_excess_sweep_buffer_voucher_share=0.0,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "producer")
+        current_stable = producer_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(producer_pool, stable_id, current_stable, "test_clear", "test")
+        producer_pool.policy.min_stable_reserve = 25.0
+        engine._vault_add(producer_pool, stable_id, 100.0, "test_seed", "test")
+
+        engine._apply_stable_excess_sweep()
+
+        self.assertAlmostEqual(producer_pool.vault.get(stable_id), 25.0)
+        self.assertAlmostEqual(engine._stable_offramp_usd_tick, 75.0)
+        self.assertAlmostEqual(engine._stable_excess_sweep_usd_total, 75.0)
+        self.assertEqual(engine._stable_excess_sweep_pools_total, 1)
+
     def test_voucher_fee_conversion_records_failed_routed_conversion(self):
         engine = SimulationEngine(
             small_config(

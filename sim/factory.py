@@ -87,7 +87,10 @@ class PoolFactory:
         policy = PoolPolicy(
             mode=mode,
             role=role,
-            min_stable_reserve=max(0.0, np.random.exponential(200.0)),
+            min_stable_reserve=max(
+                0.0,
+                np.random.exponential(max(0.0, float(cfg.min_stable_reserve_mean or 0.0))),
+            ),
             redemption_bias=redeem_bias,
             paused=False,
             limits_enabled=cfg.swap_limits_enabled,
