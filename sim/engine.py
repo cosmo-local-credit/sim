@@ -125,6 +125,31 @@ class SimulationEngine:
         self._stable_offramp_usd_tick: float = 0.0
         self._stable_onramp_usd_month: float = 0.0
         self._stable_offramp_usd_month: float = 0.0
+        self._producer_deposit_stable_usd_tick: float = 0.0
+        self._producer_deposit_voucher_usd_tick: float = 0.0
+        self._producer_deposit_stable_usd_total: float = 0.0
+        self._producer_deposit_voucher_usd_total: float = 0.0
+        self._producer_deposit_value_by_voucher: Dict[str, float] = {}
+        self._productive_credit_inflow_usd_tick: float = 0.0
+        self._productive_credit_inflow_usd_total: float = 0.0
+        self._productive_credit_queue: Dict[int, list[Tuple[str, float, str]]] = {}
+        self._fee_conversion_attempted_usd_tick: float = 0.0
+        self._fee_conversion_success_usd_tick: float = 0.0
+        self._fee_conversion_failed_usd_tick: float = 0.0
+        self._fee_conversion_attempted_usd_total: float = 0.0
+        self._fee_conversion_success_usd_total: float = 0.0
+        self._fee_conversion_failed_usd_total: float = 0.0
+        self._lender_recovered_stable_by_pool: Dict[str, float] = {}
+        self._quarterly_clearing_usd_tick: float = 0.0
+        self._quarterly_clearing_usd_total: float = 0.0
+        self._quarterly_clearing_lender_liquidity_before_tick: float = 0.0
+        self._quarterly_clearing_lender_liquidity_after_tick: float = 0.0
+        self._route_fixed_requested_tick: int = 0
+        self._route_fixed_found_tick: int = 0
+        self._route_fixed_failed_tick: int = 0
+        self._route_substitution_requested_tick: int = 0
+        self._route_substitution_found_tick: int = 0
+        self._route_substitution_failed_tick: int = 0
         self._pool_value_cache: Dict[str, float] = {}
         self._pool_voucher_value_cache: Dict[str, float] = {}
         self._swap_success_ema: Dict[str, float] = {}
@@ -343,6 +368,20 @@ class SimulationEngine:
         lender_pool: Optional["Pool"] = None,
         value_override: Optional[float] = None,
     ) -> float:
+        deposit_multiple = max(0.0, float(self.cfg.lender_voucher_cap_deposit_multiple or 0.0))
+        deposit_value = float(self._producer_deposit_value_by_voucher.get(voucher_id, 0.0))
+        if bool(self.cfg.producer_deposits_enabled) and deposit_multiple > 0.0 and deposit_value > 0.0:
+            value = value_override
+            if value is None or value <= 0.0:
+                if lender_pool is not None:
+                    value = lender_pool.values.get_value(voucher_id)
+                if value is None or value <= 0.0:
+                    spec = self.factory.voucher_specs.get(voucher_id)
+                    issuer = self.agents.get(spec.issuer_id) if spec else None
+                    issuer_pool = self.pools.get(issuer.pool_id) if issuer else None
+                    value = issuer_pool.values.get_value(voucher_id) if issuer_pool is not None else 1.0
+            value = value if value and value > 0.0 else 1.0
+            return max(0.0, (deposit_value * deposit_multiple) / value)
         fraction = max(0.0, float(self.cfg.lender_voucher_cap_supply_fraction or 0.0))
         if fraction <= 0.0:
             return 0.0
@@ -2454,6 +2493,10 @@ class SimulationEngine:
             if own_amt > 0:
                 self._vault_add(pool, own_v, own_amt, "seed_voucher", agent.agent_id)
                 agent.issuer.issue(own_amt)
+                self._record_producer_deposit_value(
+                    own_v,
+                    own_amt * self._asset_value(pool, own_v),
+                )
                 supply_updates.add(own_v)
             self._assign_producer_voucher_to_lender(own_v)
 
@@ -2632,6 +2675,146 @@ class SimulationEngine:
                 meta={"pools_updated": pools_updated, "target_per_pool": target},
             ))
 
+    def _record_producer_deposit_value(self, voucher_id: str, amount_usd: float) -> None:
+        if amount_usd <= 1e-9:
+            return
+        self._producer_deposit_value_by_voucher[voucher_id] = (
+            self._producer_deposit_value_by_voucher.get(voucher_id, 0.0) + float(amount_usd)
+        )
+
+    def _producer_deposit_credit_capacity_usd(self) -> float:
+        multiple = max(0.0, float(self.cfg.lender_voucher_cap_deposit_multiple or 0.0))
+        return sum(self._producer_deposit_value_by_voucher.values()) * multiple
+
+    def _record_lender_recovered_stable(self, pool_id: str, amount_usd: float, reason: str) -> None:
+        if amount_usd <= 1e-9:
+            return
+        pool = self.pools.get(pool_id)
+        if pool is None or pool.policy.role != "lender":
+            return
+        self._lender_recovered_stable_by_pool[pool_id] = (
+            self._lender_recovered_stable_by_pool.get(pool_id, 0.0) + float(amount_usd)
+        )
+        self.log.add(Event(
+            self.tick,
+            "LENDER_STABLE_RECOVERED",
+            pool_id=pool_id,
+            amount=float(amount_usd),
+            meta={"reason": reason},
+        ))
+
+    def _schedule_productive_credit_inflow(self, pool_id: str, borrowed_usd: float, voucher_id: str) -> None:
+        if not bool(self.cfg.productive_credit_enabled):
+            return
+        rate = max(0.0, float(self.cfg.productive_credit_return_rate or 0.0))
+        if borrowed_usd <= 1e-9 or rate <= 0.0:
+            return
+        lag = max(0, int(self.cfg.productive_credit_lag_ticks or 0))
+        due_tick = self.tick + lag
+        amount = borrowed_usd * rate
+        self._productive_credit_queue.setdefault(due_tick, []).append((pool_id, amount, voucher_id))
+        self.log.add(Event(
+            self.tick,
+            "PRODUCTIVE_CREDIT_SCHEDULED",
+            pool_id=pool_id,
+            asset_id=self.cfg.stable_symbol,
+            amount=amount,
+            meta={"borrowed_usd": borrowed_usd, "lag_ticks": lag, "voucher_id": voucher_id},
+        ))
+
+    def _apply_productive_credit_inflows(self) -> None:
+        due = self._productive_credit_queue.pop(self.tick, [])
+        if not due:
+            return
+        stable_id = self.cfg.stable_symbol
+        for pool_id, amount, voucher_id in due:
+            pool = self.pools.get(pool_id)
+            if pool is None or pool.policy.system_pool:
+                continue
+            amount = max(0.0, float(amount))
+            if amount <= 1e-9:
+                continue
+            self._vault_add(pool, stable_id, amount, "productive_credit_inflow", "business")
+            self._record_producer_deposit_value(voucher_id, amount)
+            self._stable_onramp_usd_tick += amount
+            self._producer_deposit_stable_usd_tick += amount
+            self._producer_deposit_stable_usd_total += amount
+            self._productive_credit_inflow_usd_tick += amount
+            self._productive_credit_inflow_usd_total += amount
+            self.log.add(Event(
+                self.tick,
+                "PRODUCTIVE_CREDIT_INFLOW",
+                pool_id=pool_id,
+                asset_id=stable_id,
+                amount=amount,
+                meta={"voucher_id": voucher_id},
+            ))
+        self._refresh_lender_voucher_limits()
+
+    def _apply_producer_deposits(self) -> None:
+        if not bool(self.cfg.producer_deposits_enabled):
+            return
+        stride = max(1, int(self.cfg.producer_deposit_stride_ticks or 1))
+        if self.tick % stride != 0:
+            return
+        stable_rate = max(0.0, float(self.cfg.producer_stable_deposit_rate_per_month or 0.0))
+        voucher_rate = max(0.0, float(self.cfg.producer_voucher_deposit_rate_per_month or 0.0))
+        if stable_rate <= 0.0 and voucher_rate <= 0.0:
+            return
+        stable_id = self.cfg.stable_symbol
+        updated_vouchers: Set[str] = set()
+        for pool in self.pools.values():
+            if pool.policy.system_pool or pool.policy.role != "producer":
+                continue
+            agent = self.agents.get(pool.steward_id)
+            if agent is None:
+                continue
+            voucher_id = agent.voucher_spec.voucher_id
+            value = self._asset_value(pool, voucher_id)
+            base_value = max(self._pool_total_value(pool), float(self.cfg.random_request_amount_mean or 1.0))
+            stable_amount = (base_value * stable_rate / float(MONTH_TICKS)) * stride
+            if stable_amount > 1e-9:
+                self._vault_add(pool, stable_id, stable_amount, "producer_stable_deposit", "business")
+                self._record_producer_deposit_value(voucher_id, stable_amount)
+                self._stable_onramp_usd_tick += stable_amount
+                self._producer_deposit_stable_usd_tick += stable_amount
+                self._producer_deposit_stable_usd_total += stable_amount
+                self.log.add(Event(
+                    self.tick,
+                    "PRODUCER_STABLE_DEPOSIT",
+                    pool_id=pool.pool_id,
+                    asset_id=stable_id,
+                    amount=stable_amount,
+                ))
+            voucher_value = (base_value * voucher_rate / float(MONTH_TICKS)) * stride
+            if voucher_value > 1e-9:
+                amount = voucher_value / max(1e-9, value)
+                if not pool.registry.is_listed(voucher_id):
+                    pool.list_asset_with_value_and_limit(
+                        voucher_id,
+                        value=value,
+                        window_len=self.cfg.default_window_len,
+                        cap_in=self.cfg.producer_voucher_cap_in,
+                    )
+                self._vault_add(pool, voucher_id, amount, "producer_voucher_deposit", agent.agent_id)
+                agent.issuer.issue(amount)
+                self._record_producer_deposit_value(voucher_id, voucher_value)
+                self._producer_deposit_voucher_usd_tick += voucher_value
+                self._producer_deposit_voucher_usd_total += voucher_value
+                updated_vouchers.add(voucher_id)
+                self.log.add(Event(
+                    self.tick,
+                    "PRODUCER_VOUCHER_DEPOSIT",
+                    actor_id=agent.agent_id,
+                    pool_id=pool.pool_id,
+                    asset_id=voucher_id,
+                    amount=voucher_value,
+                    meta={"voucher_units": amount},
+                ))
+        if updated_vouchers:
+            self._refresh_lender_voucher_limits(updated_vouchers)
+            self.rebuild_indexes()
+
     def _apply_stable_growth_per_pool(self, multiplier: int = 1) -> None:
         scale = max(1, int(multiplier or 1))
         onramp_total = 0.0
@@ -2718,6 +2901,101 @@ class SimulationEngine:
                 amount=total,
                 meta={"pools": pool_count, "one_shot": True},
             ))
+
+    def _issuer_schedule_due_at_tick(self) -> float:
+        principal = max(0.0, float(self.cfg.bond_gross_principal_usd or 0.0))
+        if principal <= 1e-9:
+            return 0.0
+        term_ticks = max(1, int(self.cfg.bond_term_ticks or 1))
+        stride = max(1, int(self.cfg.issuer_payment_stride_ticks or 13))
+        coupon_annual = max(0.0, float(self.cfg.bond_coupon_target_annual or 0.0))
+        year_ticks = 52.0
+        total_periods = max(1, math.ceil(term_ticks / stride))
+        periods_elapsed = min(total_periods, self.tick // stride)
+        if self.tick >= term_ticks:
+            periods_elapsed = total_periods
+        if periods_elapsed <= 0:
+            return 0.0
+        principal_step = principal / total_periods
+        coupon_due = 0.0
+        principal_due = 0.0
+        previous_tick = 0
+        for period in range(1, periods_elapsed + 1):
+            payment_tick = min(term_ticks, period * stride)
+            duration = max(0, payment_tick - previous_tick)
+            outstanding_start = max(0.0, principal - principal_step * (period - 1))
+            coupon_due += outstanding_start * coupon_annual * (duration / year_ticks)
+            principal_due += principal_step
+            previous_tick = payment_tick
+        return coupon_due + min(principal, principal_due)
+
+    def _apply_quarterly_clearing(self) -> None:
+        if not bool(self.cfg.quarterly_clearing_enabled):
+            return
+        if not self.clc_pool_id or self.clc_pool_id not in self.pools:
+            return
+        stride = max(1, int(self.cfg.quarterly_clearing_stride_ticks or 13))
+        if self.tick % stride != 0:
+            return
+        scheduled_due = self._issuer_schedule_due_at_tick()
+        remaining_need = max(0.0, scheduled_due - float(self._lp_returned_usd_total or 0.0))
+        if remaining_need <= 1e-9:
+            return
+        share = max(0.0, min(1.0, float(self.cfg.quarterly_clearing_surplus_share or 0.0)))
+        if share <= 0.0:
+            return
+        clc_pool = self.pools[self.clc_pool_id]
+        stable_id = self.cfg.stable_symbol
+        lender_ids = [
+            pid for pid, amount in self._lender_recovered_stable_by_pool.items()
+            if amount > 1e-9 and pid in self.pools and self.pools[pid].policy.role == "lender"
+        ]
+        lender_ids.sort()
+        if not lender_ids:
+            return
+        before_liquidity = sum(self.pools[pid].vault.get(stable_id) for pid in lender_ids)
+        cleared = 0.0
+        pools_cleared = 0
+        for pid in lender_ids:
+            if remaining_need <= 1e-9:
+                break
+            lender = self.pools[pid]
+            eligible = self._lender_recovered_stable_by_pool.get(pid, 0.0) * share
+            surplus = max(0.0, lender.vault.get(stable_id) - lender.policy.min_stable_reserve)
+            amount = min(eligible, surplus, remaining_need)
+            if amount <= 1e-9:
+                continue
+            if not self._vault_sub(lender, stable_id, amount, "quarterly_clearing_out", clc_pool.pool_id):
+                continue
+            self._vault_add(clc_pool, stable_id, amount, "quarterly_clearing_in", lender.pool_id)
+            self._lender_recovered_stable_by_pool[pid] = max(
+                0.0,
+                self._lender_recovered_stable_by_pool.get(pid, 0.0) - amount,
+            )
+            remaining_need -= amount
+            cleared += amount
+            pools_cleared += 1
+        if cleared <= 1e-9:
+            return
+        after_liquidity = sum(self.pools[pid].vault.get(stable_id) for pid in lender_ids)
+        self._quarterly_clearing_usd_tick += cleared
+        self._quarterly_clearing_usd_total += cleared
+        self._quarterly_clearing_lender_liquidity_before_tick = before_liquidity
+        self._quarterly_clearing_lender_liquidity_after_tick = after_liquidity
+        self.log.add(Event(
+            self.tick,
+            "QUARTERLY_CLEARING_EXECUTED",
+            pool_id=clc_pool.pool_id,
+            asset_id=stable_id,
+            amount=cleared,
+            meta={
+                "pools": pools_cleared,
+                "scheduled_due": scheduled_due,
+                "remaining_need_after": remaining_need,
+                "lender_liquidity_before": before_liquidity,
+                "lender_liquidity_after": after_liquidity,
+            },
+        ))
 
     def _apply_lp_sclc_redemptions(self) -> None:
         if not self.cfg.economics_enabled:
@@ -3222,6 +3500,91 @@ class SimulationEngine:
             avg_values[asset_id] = value_totals.get(asset_id, 0.0) / amt
         return amounts, value_totals, avg_values
 
+    def _attempt_fee_voucher_conversion(
+        self,
+        clc_pool: "Pool",
+        asset_id: str,
+        amount: float,
+        avg_value: float,
+        remaining_cap_usd: Optional[float],
+    ) -> tuple[float, float, float, Optional[float]]:
+        """Materialize voucher fees in the CLC pool and try routing them to stable."""
+        if amount <= 1e-12 or avg_value <= 0.0:
+            return 0.0, 0.0, 0.0, remaining_cap_usd
+        if not bool(self.cfg.voucher_fee_conversion_enabled):
+            return 0.0, 0.0, amount * avg_value, remaining_cap_usd
+        max_swaps = max(0, int(self.cfg.voucher_fee_conversion_max_swaps_per_epoch or 0))
+        if max_swaps <= 0:
+            return 0.0, 0.0, amount * avg_value, remaining_cap_usd
+        min_usd = max(0.0, float(self.cfg.voucher_fee_conversion_min_usd or 0.0))
+        asset_usd = amount * avg_value
+        convert_usd = asset_usd
+        if remaining_cap_usd is not None:
+            convert_usd = min(convert_usd, max(0.0, remaining_cap_usd))
+        if convert_usd < min_usd:
+            self._deposit_fee_asset_to_pool(clc_pool, asset_id, amount, avg_value, "fee_kind")
+            return 0.0, 0.0, asset_usd, remaining_cap_usd
+        convert_amount = min(amount, convert_usd / avg_value)
+        remainder_amount = max(0.0, amount - convert_amount)
+        if convert_amount > 1e-12:
+            self._deposit_fee_asset_to_pool(clc_pool, asset_id, convert_amount, avg_value, "fee_convert_source")
+        if remainder_amount > 1e-12:
+            self._deposit_fee_asset_to_pool(clc_pool, asset_id, remainder_amount, avg_value, "fee_kind")
+
+        attempted_usd = convert_amount * avg_value
+        self._fee_conversion_attempted_usd_tick += attempted_usd
+        self._fee_conversion_attempted_usd_total += attempted_usd
+        success_usd = 0.0
+        failed_usd = attempted_usd
+        swaps = 0
+        amount_remaining = convert_amount
+        stable_id = self.cfg.stable_symbol
+        while swaps < max_swaps and amount_remaining * avg_value >= min_usd:
+            amount_in = amount_remaining / max(1, max_swaps - swaps)
+            before_stable = clc_pool.vault.get(stable_id)
+            plan, amount_used, used_fallback = self._find_route_with_fallback(
+                tick=self.tick,
+                start_asset=asset_id,
+                target_asset=stable_id,
+                amount_in=amount_in,
+                source_pool=clc_pool,
+            )
+            self.log.add(Event(
+                self.tick,
+                "FEE_CONVERSION_REQUESTED",
+                pool_id=clc_pool.pool_id,
+                asset_id=asset_id,
+                amount=amount_used * avg_value,
+                meta={"target_asset": stable_id, "fallback": used_fallback},
+            ))
+            if not plan.ok:
+                break
+            ok = self.execute_route_from_pool(clc_pool.pool_id, plan, amount_used)
+            if not ok:
+                break
+            after_stable = clc_pool.vault.get(stable_id)
+            gained = max(0.0, after_stable - before_stable)
+            success_usd += gained
+            amount_remaining = max(0.0, amount_remaining - amount_used)
+            swaps += 1
+        failed_usd = max(0.0, attempted_usd - success_usd)
+        self._fee_conversion_success_usd_tick += success_usd
+        self._fee_conversion_failed_usd_tick += failed_usd
+        self._fee_conversion_success_usd_total += success_usd
+        self._fee_conversion_failed_usd_total += failed_usd
+        self.log.add(Event(
+            self.tick,
+            "FEE_CONVERSION_SUMMARY",
+            pool_id=clc_pool.pool_id,
+            asset_id=asset_id,
+            amount=success_usd,
+            meta={"attempted_usd": attempted_usd, "failed_usd": failed_usd, "swaps": swaps},
+        ))
+        if remaining_cap_usd is not None:
+            remaining_cap_usd = max(0.0, remaining_cap_usd - attempted_usd)
+        kind_usd = failed_usd + (remainder_amount * avg_value)
+        return attempted_usd, success_usd, kind_usd, remaining_cap_usd
+
     def _distribute_liquidity_mandates(self, budget_usd: float) -> float:
         if budget_usd <= 1e-9 or not self.mandates_pool_id:
             return 0.0
@@ -3357,6 +3720,10 @@ class SimulationEngine:
         stable_id = self.cfg.stable_symbol
         eligible = set(self.cfg.cash_eligible_assets or [])
         slippage = max(0.0, float(self.cfg.cash_conversion_slippage_bps or 0.0)) / 10000.0
+        voucher_conversion_cap = self.cfg.voucher_fee_conversion_max_usd_per_epoch
+        remaining_voucher_conversion_cap = (
+            None if voucher_conversion_cap is None else max(0.0, float(voucher_conversion_cap))
+        )
         convertible_usd_total = sum(
             value_totals[a] for a in value_totals
             if a != stable_id and a in eligible
@@ -3376,6 +3743,20 @@ class SimulationEngine:
             asset_usd = amt * avg_value
             if asset_id == stable_id:
                 cash_usd += asset_usd
+                continue
+            if asset_id.startswith("VCHR:") and bool(self.cfg.voucher_fee_conversion_enabled):
+                _, converted_usd, remaining_kind_usd, remaining_voucher_conversion_cap = (
+                    self._attempt_fee_voucher_conversion(
+                        clc_pool,
+                        asset_id,
+                        amt,
+                        avg_value,
+                        remaining_voucher_conversion_cap,
+                    )
+                )
+                kind_usd += remaining_kind_usd
+                # Converted voucher fees are already materialized as stable in the CLC
+                # pool, so do not add them again through the cash allocation waterfall.
                 continue
             if asset_id in eligible:
                 convert_amt = amt * conversion_ratio
@@ -3686,7 +4067,25 @@ class SimulationEngine:
             self._incidents_tick = 0
             self._stable_onramp_usd_tick = 0.0
             self._stable_offramp_usd_tick = 0.0
+            self._producer_deposit_stable_usd_tick = 0.0
+            self._producer_deposit_voucher_usd_tick = 0.0
+            self._productive_credit_inflow_usd_tick = 0.0
+            self._fee_conversion_attempted_usd_tick = 0.0
+            self._fee_conversion_success_usd_tick = 0.0
+            self._fee_conversion_failed_usd_tick = 0.0
+            self._quarterly_clearing_usd_tick = 0.0
+            self._quarterly_clearing_lender_liquidity_before_tick = 0.0
+            self._quarterly_clearing_lender_liquidity_after_tick = 0.0
+            self._route_fixed_requested_tick = 0
+            self._route_fixed_found_tick = 0
+            self._route_fixed_failed_tick = 0
+            self._route_substitution_requested_tick = 0
+            self._route_substitution_found_tick = 0
+            self._route_substitution_failed_tick = 0
             self._swap_attempt_counts = {}
+
+            self._apply_productive_credit_inflows()
+            self._apply_producer_deposits()
 
             # exogenous stable inflow
             stable_stride = max(1, int(self.cfg.stable_growth_stride_ticks or 1))
@@ -3780,6 +4179,7 @@ class SimulationEngine:
                 if self.tick == 1 or self.tick % epoch == 0:
                     self._apply_waterfall()
                     self._apply_monthly_pool_offramp()
+                self._apply_quarterly_clearing()
                 self._clc_rebalance()
             self._update_clc_swap_window()
             self._apply_lp_sclc_redemptions()
@@ -3858,14 +4258,18 @@ class SimulationEngine:
         sticky_fail_threshold = max(1, int(self.cfg.sticky_fail_threshold or 1))
 
         for asset_in in asset_candidates:
-            max_targets = max(1, int(self.cfg.swap_target_retry_count or 1))
+            if bool(self.cfg.route_substitution_enabled):
+                max_targets = 1 + max(0, int(self.cfg.route_substitution_max_alternatives or 0))
+            else:
+                max_targets = max(1, int(self.cfg.swap_target_retry_count or 1))
             targets_tried: Set[str] = set()
             sticky_target = None
             if sticky_bias > 0.0:
                 sticky_target = self._sticky_target_by_pool.get((source_pool.pool_id, asset_in))
-            for _ in range(max_targets):
+            for attempt_index in range(max_targets):
                 if max_assets is not None and max_assets > 0 and attempted >= max_assets:
                     break
+                attempt_kind = "substitution" if attempt_index > 0 else "fixed"
                 if buddy_direct_only:
                     amount_in = self._sample_amount_in(source_pool, asset_in)
                     if amount_in <= 1e-9:
@@ -3877,7 +4281,7 @@ class SimulationEngine:
                         amount_in=amount_in,
                         buddy_pools=buddy_pools or set(),
                     )
-                    meta = {"target_asset": asset_out, "buddy_direct": True}
+                    meta = {"target_asset": asset_out, "buddy_direct": True, "route_attempt_kind": attempt_kind}
                     if used_fallback:
                         meta["fallback"] = True
                     self.log.add(Event(self.tick, "ROUTE_REQUESTED", pool_id=source_pool.pool_id,
@@ -3885,11 +4289,11 @@ class SimulationEngine:
                     if not plan.ok or asset_out is None:
                         self.log.add(Event(self.tick, "ROUTE_FAILED", pool_id=source_pool.pool_id,
                                            asset_id=asset_in, amount=amount_used,
-                                           meta={"reason": plan.reason, "target": asset_out, "buddy_direct": True}))
+                                           meta={"reason": plan.reason, "target": asset_out, "buddy_direct": True, "route_attempt_kind": attempt_kind}))
                         self._record_swap_attempt(source_pool.pool_id, success=False)
                         continue
                     self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
-                                       meta={"hops": [h.__dict__ for h in plan.hops], "target": asset_out, "buddy_direct": True}))
+                                       meta={"hops": [h.__dict__ for h in plan.hops], "target": asset_out, "buddy_direct": True, "route_attempt_kind": attempt_kind}))
                     ok = self.execute_route_from_pool(source_pool.pool_id, plan, amount_used)
                     self._record_swap_attempt(source_pool.pool_id, success=ok)
                     if ok:
@@ -3911,7 +4315,8 @@ class SimulationEngine:
 
                 attempted += 1
                 self.log.add(Event(self.tick, "ROUTE_REQUESTED", pool_id=source_pool.pool_id,
-                                   asset_id=asset_in, amount=amount_in, meta={"target_asset": asset_out}))
+                                   asset_id=asset_in, amount=amount_in,
+                                   meta={"target_asset": asset_out, "route_attempt_kind": attempt_kind}))
                 sticky_key = (source_pool.pool_id, asset_in, asset_out)
                 sticky_plan = self._sticky_plan_by_pool.get(sticky_key)
                 if sticky_plan and buddy_pools is not None:
@@ -3921,7 +4326,7 @@ class SimulationEngine:
                     failures = self._sticky_failures.get(sticky_key, 0)
                     if self._validate_route_plan(sticky_plan, amount_in, source_pool):
                         self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
-                                           meta={"hops": [h.__dict__ for h in sticky_plan.hops], "target": asset_out, "sticky": True}))
+                                           meta={"hops": [h.__dict__ for h in sticky_plan.hops], "target": asset_out, "sticky": True, "route_attempt_kind": attempt_kind}))
                         ok = self.execute_route_from_pool(source_pool.pool_id, sticky_plan, amount_in)
                         self._record_swap_attempt(source_pool.pool_id, success=ok)
                         if ok:
@@ -3952,16 +4357,17 @@ class SimulationEngine:
                 if used_fallback:
                     self.log.add(Event(self.tick, "ROUTE_REQUESTED", pool_id=source_pool.pool_id,
                                        asset_id=asset_in, amount=amount_used,
-                                       meta={"target_asset": asset_out, "fallback": True}))
+                                       meta={"target_asset": asset_out, "fallback": True, "route_attempt_kind": attempt_kind}))
 
                 if not plan.ok:
                     self.log.add(Event(self.tick, "ROUTE_FAILED", pool_id=source_pool.pool_id,
-                                       asset_id=asset_in, amount=amount_used, meta={"reason": plan.reason, "target": asset_out}))
+                                       asset_id=asset_in, amount=amount_used,
+                                       meta={"reason": plan.reason, "target": asset_out, "route_attempt_kind": attempt_kind}))
                     self._record_swap_attempt(source_pool.pool_id, success=False)
                     continue
 
                 self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
-                                   meta={"hops": [h.__dict__ for h in plan.hops], "target": asset_out}))
+                                   meta={"hops": [h.__dict__ for h in plan.hops], "target": asset_out, "route_attempt_kind": attempt_kind}))
 
                 # Execute with escrow:
                 ok = self.execute_route_from_pool(source_pool.pool_id, plan, amount_used)
@@ -4162,6 +4568,7 @@ class SimulationEngine:
                 self._record_swap_attempt(source_pool.pool_id, success=ok)
                 if ok:
                     amount_usd = amount_used * self._asset_value(source_pool, voucher_id)
+                    self._schedule_productive_credit_inflow(source_pool.pool_id, amount_usd, voucher_id)
                     self.log.add(Event(self.tick, "LOAN_ISSUED", pool_id=source_pool.pool_id,
                                        asset_id=self.cfg.stable_symbol, amount=amount_usd,
                                        meta={"asset_in": voucher_id, "amount_in": amount_used}))
@@ -4198,6 +4605,7 @@ class SimulationEngine:
         self._record_swap_attempt(source_pool.pool_id, success=ok)
         if ok:
             amount_usd = amount_used * self._asset_value(source_pool, voucher_id)
+            self._schedule_productive_credit_inflow(source_pool.pool_id, amount_usd, voucher_id)
             self.log.add(Event(self.tick, "LOAN_ISSUED", pool_id=source_pool.pool_id,
                                asset_id=self.cfg.stable_symbol, amount=amount_usd,
                                meta={"asset_in": voucher_id, "amount_in": amount_used}))
@@ -4266,6 +4674,16 @@ class SimulationEngine:
             self._update_pool_caches(pool, receipt.asset_out, -float(gross_out))
             self._record_fee_cumulative(receipt)
             self._record_clc_swap_cumulative(receipt)
+            if (
+                pool.policy.role == "lender"
+                and receipt.asset_in == self.cfg.stable_symbol
+                and self._is_producer_voucher(receipt.asset_out)
+            ):
+                self._record_lender_recovered_stable(
+                    pool.pool_id,
+                    float(receipt.amount_in) * self._asset_value(pool, receipt.asset_in),
+                    "stable_to_producer_voucher_swap",
+                )
             self._noam_update_edge_after_swap(
                 pool,
                 receipt.asset_in,
@@ -4305,7 +4723,7 @@ class SimulationEngine:
                 issuer_id = spec.issuer_id if spec else None
                 if issuer_id in self.agents:
                     issuer_agent = self.agents[issuer_id]
-                    issuer_agent.issuer.redeem(out_amount)
+                    issuer_agent.issuer.return_to_issuer(out_amount)
                     issuer_pool_id = issuer_agent.pool_id
                     issuer_pool = self.pools.get(issuer_pool_id)
                     if issuer_pool is not None:
@@ -4339,7 +4757,7 @@ class SimulationEngine:
         if not self._vault_sub(holder_pool, voucher_id, amount, "redeem_send", issuer.pool_id):
             return
         self._vault_add(issuer_pool, voucher_id, amount, "redeem_receive", holder_pool.pool_id)
-        issuer.issuer.redeem(amount)
+        issuer.issuer.return_to_issuer(amount)
         self.log.add(Event(self.tick, "VOUCHER_REDEEMED_CONSUMER", actor_id=issuer_id,
                            pool_id=holder_pool.pool_id, asset_id=voucher_id, amount=amount))
 
@@ -4473,6 +4891,8 @@ class SimulationEngine:
 
             redeemed_total = 0.0
             outstanding_total = sum(a.issuer.outstanding_supply for a in self.agents.values())
+            issued_total = sum(a.issuer.issued_total for a in self.agents.values())
+            issuer_returned_total = sum(a.issuer.issuer_returned_total for a in self.agents.values())
             outstanding_value_usd = 0.0
             for agent in self.agents.values():
                 outstanding = agent.issuer.outstanding_supply
@@ -4492,6 +4912,12 @@ class SimulationEngine:
             route_requested = 0
             route_found = 0
             route_failed = 0
+            route_fixed_requested = 0
+            route_fixed_found = 0
+            route_fixed_failed = 0
+            route_substitution_requested = 0
+            route_substitution_found = 0
+            route_substitution_failed = 0
             vol_usd_to_vchr = 0.0
             vol_vchr_to_usd = 0.0
             vol_vchr_to_vchr = 0.0
@@ -4548,10 +4974,25 @@ class SimulationEngine:
                             count_vchr_to_vchr += 1
                 elif e.event_type == "ROUTE_REQUESTED":
                     route_requested += 1
+                    kind = (e.meta or {}).get("route_attempt_kind", "fixed")
+                    if kind == "substitution":
+                        route_substitution_requested += 1
+                    else:
+                        route_fixed_requested += 1
                 elif e.event_type == "ROUTE_FOUND":
                     route_found += 1
+                    kind = (e.meta or {}).get("route_attempt_kind", "fixed")
+                    if kind == "substitution":
+                        route_substitution_found += 1
+                    else:
+                        route_fixed_found += 1
                 elif e.event_type == "ROUTE_FAILED":
                     route_failed += 1
+                    kind = (e.meta or {}).get("route_attempt_kind", "fixed")
+                    if kind == "substitution":
+                        route_substitution_failed += 1
+                    else:
+                        route_fixed_failed += 1
 
             swap_volume_usd_tick = float(self._swap_volume_usd_tick or 0.0)
             swap_gross_flow_value = swap_stable_flow_value + swap_voucher_flow_value
@@ -4605,6 +5046,16 @@ class SimulationEngine:
                 "redeemed_total": redeemed_total,
                 "outstanding_voucher_supply_total": outstanding_total,
                 "outstanding_voucher_value_usd": outstanding_value_usd,
+                "issued_voucher_supply_total": issued_total,
+                "issuer_returned_voucher_supply_total": issuer_returned_total,
+                "net_circulating_voucher_supply_total": outstanding_total,
+                "producer_deposit_stable_usd_tick": float(self._producer_deposit_stable_usd_tick),
+                "producer_deposit_voucher_usd_tick": float(self._producer_deposit_voucher_usd_tick),
+                "producer_deposit_stable_usd_total": float(self._producer_deposit_stable_usd_total),
+                "producer_deposit_voucher_usd_total": float(self._producer_deposit_voucher_usd_total),
+                "producer_deposit_credit_capacity_usd": float(self._producer_deposit_credit_capacity_usd()),
+                "productive_credit_inflow_usd_tick": float(self._productive_credit_inflow_usd_tick),
+                "productive_credit_inflow_usd_total": float(self._productive_credit_inflow_usd_total),
                 "repayment_volume_usd": repayment_volume_usd,
                 "loan_issuance_volume_usd": loan_issuance_usd,
                 "swap_volume_usd_tick": swap_volume_usd_tick,
@@ -4624,6 +5075,12 @@ class SimulationEngine:
                 "route_requested_tick": int(route_requested),
                 "route_found_tick": int(route_found),
                 "route_failed_tick": int(route_failed),
+                "route_fixed_requested_tick": int(route_fixed_requested),
+                "route_fixed_found_tick": int(route_fixed_found),
+                "route_fixed_failed_tick": int(route_fixed_failed),
+                "route_substitution_requested_tick": int(route_substitution_requested),
+                "route_substitution_found_tick": int(route_substitution_found),
+                "route_substitution_failed_tick": int(route_substitution_failed),
                 "noam_routing_swaps_tick": int(self._noam_routing_swaps_tick),
                 "noam_clearing_swaps_tick": int(self._noam_clearing_swaps_tick),
                 "fee_pool_total_usd": fee_pool_total_usd,
@@ -4632,6 +5089,12 @@ class SimulationEngine:
                 "fee_clc_cumulative_usd": float(self._fee_clc_cumulative_usd),
                 "fee_pool_cumulative_voucher": float(self._fee_pool_cumulative_voucher),
                 "fee_clc_cumulative_voucher": float(self._fee_clc_cumulative_voucher),
+                "fee_conversion_attempted_usd_tick": float(self._fee_conversion_attempted_usd_tick),
+                "fee_conversion_success_usd_tick": float(self._fee_conversion_success_usd_tick),
+                "fee_conversion_failed_usd_tick": float(self._fee_conversion_failed_usd_tick),
+                "fee_conversion_attempted_usd_total": float(self._fee_conversion_attempted_usd_total),
+                "fee_conversion_success_usd_total": float(self._fee_conversion_success_usd_total),
+                "fee_conversion_failed_usd_total": float(self._fee_conversion_failed_usd_total),
                 "lp_sclc_supply_total": float(lp_sclc_total),
                 "lp_injected_usd_total": float(self._lp_injected_usd_total),
                 "lp_returned_usd_total": float(self._lp_returned_usd_total),
@@ -4657,6 +5120,14 @@ class SimulationEngine:
                 "clc_pool_injected_usd_total": float(self._clc_pool_injected_usd_total),
                 "clc_pool_swapped_out_stable_total": float(self._clc_pool_swapped_out_stable_total),
                 "clc_pool_swapped_out_voucher_total": float(self._clc_pool_swapped_out_voucher_total),
+                "quarterly_clearing_usd_tick": float(self._quarterly_clearing_usd_tick),
+                "quarterly_clearing_usd_total": float(self._quarterly_clearing_usd_total),
+                "quarterly_clearing_lender_liquidity_before_tick": float(
+                    self._quarterly_clearing_lender_liquidity_before_tick
+                ),
+                "quarterly_clearing_lender_liquidity_after_tick": float(
+                    self._quarterly_clearing_lender_liquidity_after_tick
+                ),
                 "fee_access_budget_usd": float(self._waterfall_last.get("fee_access_budget_usd", 0.0)),
                 "claims_paid_usd_tick": float(self._claims_paid_usd_tick),
                 "claims_unpaid_usd_tick": float(self._claims_unpaid_usd_tick),

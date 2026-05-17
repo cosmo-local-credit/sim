@@ -67,6 +67,11 @@ Recommended gate:
 6. Run `frontier-publication` only after validation and pilot outputs look
    correct.
 
+After any calibration, accounting, routing, cashflow, or credit-behavior model
+change, rerun all validation jobs before treating frontier outputs as
+paper-facing. Old frontier outputs are not comparable across those model
+revisions.
+
 ## Batch Jobs
 
 All jobs write under `analysis/monte_carlo/` unless `OUTPUT_ROOT` or `OUTPUT`
@@ -86,6 +91,34 @@ is set.
 `analysis/monte_carlo/engine_validation/engine_validation_summary.csv`. If it
 is missing or `review`, the frontier still runs but marks outputs non-final. If
 it is `fail`, paper-facing frontier execution is refused.
+
+## Calibration Bundle
+
+Public runs use privacy-safe aggregate calibration files in
+`analysis/sarafu_calibration/`. The bundle contains no raw Sarafu IDs,
+addresses, transaction hashes, GPS data, report text, or pool labels.
+
+The revised Monte Carlo also reads aggregate tables for:
+
+- producer stable and own-voucher deposit proxies;
+- productive-credit return timing and repayment lag;
+- stable-to-voucher debt-removal purchase motifs;
+- voucher-fee-to-stable conversion capacity;
+- quarterly lender-pool clearing capacity;
+- route-substitution diagnostics.
+
+These route-substitution diagnostics are scenario anchors, not observed
+failed-route denominators. Regenerate the public bundle from the private
+research workspace after any empirical calibration change:
+
+```bash
+python scripts/export_public_sarafu_calibration.py \
+  --source ../RegenBonds/analysis \
+  --output analysis/sarafu_calibration
+```
+
+When the calibration bundle or model-relevant CLI flags change, old shards are
+ignored automatically because the shard config hash no longer matches.
 
 ## Parallelism And Resume
 
@@ -291,11 +324,35 @@ Frontier-specific parameters:
 | `CERTIFICATION_POLICY` | Certified pool policy. | `strong_moderate_capped` |
 | `FRONTIER_MODE` | `adaptive` or `grid`. | `adaptive` |
 | `FRONTIER_REFINEMENT_ROUNDS` | Adaptive midpoint rounds. | `1` |
-| `ROUTE_SUCCESS_FLOOR` | p05 route-success safety floor. | `0.85` |
+| `ROUTE_SUCCESS_MODE` | `diagnostic`, `relative`, or `absolute`. | `diagnostic` |
+| `ROUTE_SUCCESS_FLOOR` | p05 route-success safety floor, binding only when `ROUTE_SUCCESS_MODE=absolute`. | `0.85` |
 | `BOND_TERM` | Frontier term in ticks. Do not use `TERM`. | `260` |
 
 Do not use `TERM` for bond terms; shells and `tmux` use `TERM` for terminal
 type values such as `tmux-256color`.
+
+## Route Success Modes
+
+`ROUTE_SUCCESS_MODE=diagnostic` is the revised frontier default. It records
+route reliability but does not reject a cell solely because the old absolute
+`0.85` p05 route-success floor is missed. This is useful because real users may
+substitute a different ordinary purchase when one target route fails, while
+borrowing, producer self-repayment, and fee conversion remain fixed-target
+routes.
+
+`ROUTE_SUCCESS_MODE=relative` treats route success as a degradation check
+against the matched no-bond baseline. This is useful when scaled networks have
+different baseline route reliability.
+
+`ROUTE_SUCCESS_MODE=absolute` restores the older hard floor behavior:
+
+```bash
+ROUTE_SUCCESS_MODE=absolute ROUTE_SUCCESS_FLOOR=0.85 \
+  ./scripts/run_regenbond_remote_batch.sh frontier-pilot
+```
+
+Frontier run/safety CSVs now report fixed-target route success, substituted
+route success, and final operational route success separately.
 
 ## Step Commands
 
@@ -482,10 +539,22 @@ cat analysis/monte_carlo/bond_issuer_frontier/paper_integration_notes.md
 Use a distinct `OUTPUT` for runs you want to keep side by side:
 
 ```bash
-ROUTE_SUCCESS_FLOOR=0.80 OUTPUT=analysis/monte_carlo/bond_issuer_frontier_pilot_route080 \
+ROUTE_SUCCESS_MODE=absolute ROUTE_SUCCESS_FLOOR=0.80 \
+OUTPUT=analysis/monte_carlo/bond_issuer_frontier_pilot_route080 \
   ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 
-ROUTE_SUCCESS_FLOOR=0.90 OUTPUT=analysis/monte_carlo/bond_issuer_frontier_pilot_route090 \
+ROUTE_SUCCESS_MODE=absolute ROUTE_SUCCESS_FLOOR=0.90 \
+OUTPUT=analysis/monte_carlo/bond_issuer_frontier_pilot_route090 \
+  ./scripts/run_regenbond_remote_batch.sh frontier-pilot
+```
+
+Compare diagnostic and relative route treatment:
+
+```bash
+ROUTE_SUCCESS_MODE=diagnostic OUTPUT=analysis/monte_carlo/bond_issuer_frontier_pilot_route_diag \
+  ./scripts/run_regenbond_remote_batch.sh frontier-pilot
+
+ROUTE_SUCCESS_MODE=relative OUTPUT=analysis/monte_carlo/bond_issuer_frontier_pilot_route_relative \
   ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 ```
 
@@ -678,6 +747,12 @@ fig_binding_constraints_heatmap.png
 paper_integration_notes.md
 ```
 
+Revised validation and frontier CSVs also include columns for producer stable
+and voucher deposits, deposit-based credit capacity, productive-credit inflow,
+net circulating voucher obligation, voucher-fee conversion, quarterly clearing,
+lender liquidity impact, fixed-target route success, and substituted route
+success.
+
 `--no-png` skips PNG generation but still writes CSV, LaTeX, Markdown, partial
 CSV, and shard files.
 
@@ -727,7 +802,9 @@ ls -lh analysis/monte_carlo/bond_issuer_frontier_pilot/*.csv
 ```
 
 The route-success floor in the frontier is a settlement-reliability sensitivity
-parameter, not a directly observed Sarafu failed-route scalar. Frontier safety
-rows also report and guard against voucher-to-voucher decline versus the
-matched no-bond baseline. Stable-dependency anchors come from
+parameter, not a directly observed Sarafu failed-route scalar. In the revised
+default `ROUTE_SUCCESS_MODE=diagnostic`, route reliability is reported but is
+not a primary binding guardrail. Frontier safety rows still report and guard
+against voucher-to-voucher decline versus the matched no-bond baseline.
+Stable-dependency anchors come from
 `analysis/sarafu_calibration/stable_dependency_anchors.csv`.

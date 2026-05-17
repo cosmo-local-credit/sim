@@ -13,8 +13,11 @@ circulation, ROSCA-like stable-credit, same-token return, submitted-swap
 execution, and current cluster-topology metrics. The voucher circulation
 baseline file records the same motifs over the pool era and recent trailing
 windows. The stable dependency anchor file records stable/cash flow shares,
-voucher flow shares, and stable-to-voucher dependency proxies. These are
-empirical settlement motifs, not a direct failed-route denominator.
+voucher flow shares, and stable-to-voucher dependency proxies. Additional
+aggregate tables calibrate producer deposit proxies, productive-credit timing,
+debt-removal purchases, voucher-fee conversion, quarterly clearing, and route
+substitution diagnostics. These are empirical settlement motifs and scenario
+anchors, not a direct failed-route denominator.
 
 The bond-frontier safety tests use these files in three ways:
 

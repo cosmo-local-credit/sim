@@ -78,6 +78,8 @@ class ScenarioConfig:
     affinity_buddy_count: int = 6  # producer sticks to top N affinity buddies once reached
     affinity_buddy_direct_only: bool = True  # once buddies reached, skip routing and trade directly
     producer_voucher_single_lender: bool = True
+    route_substitution_enabled: bool = False
+    route_substitution_max_alternatives: int = 3
     noam_topk_pools_per_asset: int = 16
     noam_topm_out_per_pool: int = 16
     noam_beam_width: int = 40
@@ -134,6 +136,7 @@ class ScenarioConfig:
     lender_voucher_cap_in: float = 10_000.0
     lender_voucher_cap_supply_fraction: float = 0.25
     lender_voucher_cap_stable_fraction: float = 0.0
+    lender_voucher_cap_deposit_multiple: float = 5.0
     lender_stable_cap_in: float = 100_000.0
     producer_voucher_cap_in: float = 15_000.0
     producer_stable_cap_in: float = 1_000_000_000.0
@@ -147,6 +150,10 @@ class ScenarioConfig:
     cash_eligible_assets: list[str] = field(default_factory=lambda: ["USD"])
     cash_conversion_slippage_bps: float = 25.0
     cash_conversion_max_usd_per_epoch: float | None = None
+    voucher_fee_conversion_enabled: bool = False
+    voucher_fee_conversion_max_swaps_per_epoch: int = 25
+    voucher_fee_conversion_max_usd_per_epoch: float | None = None
+    voucher_fee_conversion_min_usd: float = 1.0
     core_ops_budget_usd: float = 20000.0
     insurance_max_topup_usd: float = 100000.0
     liquidity_mandate_share: float = 0.50
@@ -188,6 +195,9 @@ class ScenarioConfig:
     bond_deployed_principal_usd: float = 0.0
     issuer_reserve_share: float = 0.10
     issuer_payment_stride_ticks: int = 13
+    quarterly_clearing_enabled: bool = False
+    quarterly_clearing_stride_ticks: int = 13
+    quarterly_clearing_surplus_share: float = 1.0
     calibration_profile: str = "sarafu_empirical"
 
     # Insurance / incidents
@@ -223,6 +233,13 @@ class ScenarioConfig:
     # Loan repayment (weeks)
     loan_term_weeks: int = 4
     loan_activity_period_ticks: int = 4  # spread loan issuance/repayment across ticks
+    producer_deposits_enabled: bool = False
+    producer_deposit_stride_ticks: int = 4
+    producer_stable_deposit_rate_per_month: float = 0.0
+    producer_voucher_deposit_rate_per_month: float = 0.0
+    productive_credit_enabled: bool = False
+    productive_credit_return_rate: float = 0.0
+    productive_credit_lag_ticks: int = 2
 
     # Swap sizing (share of pool value, per attempt)
     swap_size_mean_frac: float = 0.02

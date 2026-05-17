@@ -40,6 +40,7 @@ echo "[batch] calibration_dir=$CALIBRATION_DIR"
 echo "[batch] output_root=$OUTPUT_ROOT"
 echo "[batch] workers=$WORKERS_VALUE"
 echo "[batch] resume=${RESUME:-1}"
+echo "[batch] route_success_mode=${ROUTE_SUCCESS_MODE:-diagnostic}"
 
 run_engine_validation() {
   local default_runs="$1"
@@ -80,6 +81,7 @@ run_frontier() {
     --certification-policy "${CERTIFICATION_POLICY:-strong_moderate_capped}" \
     --frontier-mode "${FRONTIER_MODE:-adaptive}" \
     --frontier-refinement-rounds "${FRONTIER_REFINEMENT_ROUNDS:-1}" \
+    --route-success-mode "${ROUTE_SUCCESS_MODE:-diagnostic}" \
     --route-success-floor "${ROUTE_SUCCESS_FLOOR:-0.85}" \
     --runs "${RUNS:-$default_runs}" \
     --ticks "${TICKS:-$default_ticks}" \

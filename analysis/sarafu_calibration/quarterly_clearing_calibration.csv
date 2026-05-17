@@ -1,0 +1,4 @@
+metric,value,denominator,claim_boundary
+surplus_clearable_share,1.000000,,"Clearing is capped in the simulator by recovered stable, lender surplus, and issuer scheduled need."
+stable_purchase_cash_value,77954.521158,606,Empirical stable-to-voucher purchase proxy available for debt-removal clearing calibration.
+borrow_proxy_later_return_rate,0.448203,3311,Borrow-proxy closure anchor for conservative quarterly clearing sensitivity.

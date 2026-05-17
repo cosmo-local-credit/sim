@@ -65,14 +65,25 @@ class VoucherSpec:
 class IssuerLedger:
     voucher_id: str
     outstanding_supply: float = 0.0
+    issued_total: float = 0.0
     redeemed_total: float = 0.0
+    issuer_returned_total: float = 0.0
 
     def issue(self, amount: float) -> None:
-        self.outstanding_supply += amount
+        amt = max(0.0, float(amount))
+        self.issued_total += amt
+        self.outstanding_supply += amt
 
     def redeem(self, amount: float) -> None:
-        amt = min(amount, self.outstanding_supply) if self.outstanding_supply > 0.0 else amount
+        amt = max(0.0, float(amount))
+        amt = min(amt, max(0.0, self.outstanding_supply))
         self.redeemed_total += amt
+        self.outstanding_supply = max(0.0, self.outstanding_supply - amt)
+
+    def return_to_issuer(self, amount: float) -> None:
+        amt = max(0.0, float(amount))
+        self.issuer_returned_total += amt
+        self.redeem(amt)
 
 
 # -----------------------------

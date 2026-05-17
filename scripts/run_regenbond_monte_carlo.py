@@ -156,6 +156,12 @@ class Calibration:
     impact_rows: list[ImpactProjection]
     voucher_circulation_baselines: dict[str, dict[str, float]]
     stable_dependency_anchors: dict[str, dict[str, float]]
+    producer_deposit_by_tier: dict[str, dict[str, float]]
+    productive_credit_by_tier: dict[str, dict[str, float]]
+    debt_removal_calibration: dict[str, float]
+    fee_conversion_calibration: dict[str, float]
+    quarterly_clearing_calibration: dict[str, float]
+    route_substitution_diagnostics: dict[str, float]
 
 
 def parse_args() -> argparse.Namespace:
@@ -240,6 +246,16 @@ def parse_args() -> argparse.Namespace:
             "Bond-frontier p05 route-success safety floor. This is a model "
             "settlement-reliability sensitivity parameter, not a directly "
             "observed Sarafu failed-route calibration moment."
+        ),
+    )
+    parser.add_argument(
+        "--route-success-mode",
+        default="diagnostic",
+        choices=("diagnostic", "relative", "absolute"),
+        help=(
+            "How route success participates in frontier safety: diagnostic records "
+            "it without binding, relative binds on degradation versus matched "
+            "no-bond baseline, absolute applies --route-success-floor."
         ),
     )
     parser.add_argument(
@@ -413,6 +429,7 @@ SHARD_CONFIG_KEYS = (
     "frontier_mode",
     "frontier_refinement_rounds",
     "route_success_floor",
+    "route_success_mode",
     "calibration_dir",
     "max_active_pools_per_tick",
     "pool_metrics_stride",
@@ -760,6 +777,48 @@ def load_calibration(calibration_dir: Path) -> Calibration:
                 "denominator": safe_float(row.get("denominator")),
             }
 
+    producer_deposit_by_tier: dict[str, dict[str, float]] = {}
+    producer_deposit_path = calibration_dir / "producer_deposit_calibration.csv"
+    if producer_deposit_path.exists():
+        for row in read_csv(producer_deposit_path):
+            tier = str(row.get("tier", "")).strip().lower()
+            if tier:
+                producer_deposit_by_tier[tier] = {key: safe_float(value) for key, value in row.items() if key != "tier"}
+
+    productive_credit_by_tier: dict[str, dict[str, float]] = {}
+    productive_credit_path = calibration_dir / "productive_credit_calibration.csv"
+    if productive_credit_path.exists():
+        for row in read_csv(productive_credit_path):
+            tier = str(row.get("tier", "")).strip().lower()
+            if tier:
+                productive_credit_by_tier[tier] = {key: safe_float(value) for key, value in row.items() if key != "tier"}
+    for tier, rate in borrow_return_by_tier.items():
+        productive_credit_by_tier.setdefault(
+            tier,
+            {
+                "productive_credit_return_rate": rate,
+                "productive_credit_lag_ticks_p50": 2.0,
+                "productive_credit_lag_ticks_p90": 12.0,
+            },
+        )
+
+    def load_metric_table(name: str) -> dict[str, float]:
+        path = calibration_dir / name
+        values: dict[str, float] = {}
+        if not path.exists():
+            return values
+        for row in read_csv(path):
+            metric = str(row.get("metric", row.get("parameter", ""))).strip()
+            if not metric:
+                continue
+            values[metric] = safe_float(row.get("value"))
+        return values
+
+    debt_removal_calibration = load_metric_table("debt_removal_calibration.csv")
+    fee_conversion_calibration = load_metric_table("fee_conversion_calibration.csv")
+    quarterly_clearing_calibration = load_metric_table("quarterly_clearing_calibration.csv")
+    route_substitution_diagnostics = load_metric_table("route_substitution_diagnostics.csv")
+
     return Calibration(
         params=params,
         repayment_by_tier_asset=repayment_by_tier_asset,
@@ -771,6 +830,12 @@ def load_calibration(calibration_dir: Path) -> Calibration:
         impact_rows=impact_rows,
         voucher_circulation_baselines=voucher_circulation_baselines,
         stable_dependency_anchors=stable_dependency_anchors,
+        producer_deposit_by_tier=producer_deposit_by_tier,
+        productive_credit_by_tier=productive_credit_by_tier,
+        debt_removal_calibration=debt_removal_calibration,
+        fee_conversion_calibration=fee_conversion_calibration,
+        quarterly_clearing_calibration=quarterly_clearing_calibration,
+        route_substitution_diagnostics=route_substitution_diagnostics,
     )
 
 
@@ -914,6 +979,37 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
     setattr(args, f"_{prefix}_swap_sustain_max_rounds", 2)
     setattr(args, f"_{prefix}_historical_backing_total_usd", empirical_total_backing)
     setattr(args, f"_{prefix}_backing_shock_per_pool", empirical_total_backing / base_pool_count)
+    stable_deposit_rate = 0.0
+    voucher_deposit_rate = 0.0
+    productive_return_rate = 0.0
+    productive_lag_ticks = 0.0
+    weight_total = 0.0
+    for tier in TIER_ORDER:
+        weight = calibration.tier_probs.get(tier, 0.0)
+        if weight <= 0.0:
+            continue
+        dep = calibration.producer_deposit_by_tier.get(tier, {})
+        stable_deposit_rate += weight * safe_float(dep.get("stable_deposit_rate_per_month"))
+        voucher_deposit_rate += weight * safe_float(dep.get("voucher_deposit_rate_per_month"))
+        prod = calibration.productive_credit_by_tier.get(tier, {})
+        productive_return_rate += weight * safe_float(
+            prod.get("productive_credit_return_rate", calibration.borrow_return_by_tier.get(tier, 0.0))
+        )
+        productive_lag_ticks += weight * safe_float(prod.get("productive_credit_lag_ticks_p50", 2.0))
+        weight_total += weight
+    if weight_total > 1e-9:
+        productive_lag_ticks = productive_lag_ticks / weight_total
+    else:
+        productive_lag_ticks = 2.0
+    setattr(args, f"_{prefix}_producer_stable_deposit_rate_per_month", stable_deposit_rate)
+    setattr(args, f"_{prefix}_producer_voucher_deposit_rate_per_month", voucher_deposit_rate)
+    setattr(args, f"_{prefix}_productive_credit_return_rate", productive_return_rate)
+    setattr(args, f"_{prefix}_productive_credit_lag_ticks", max(1, int(round(productive_lag_ticks))))
+    setattr(
+        args,
+        f"_{prefix}_quarterly_clearing_surplus_share",
+        calibration.quarterly_clearing_calibration.get("surplus_clearable_share", 1.0),
+    )
 
 
 def certified_pool_capacity(calibration: Calibration, network_scale: str, policy: str) -> dict[str, float]:
@@ -1058,6 +1154,30 @@ def scenario_config(
         cfg.stable_inflow_per_tick = 0.0
         cfg.stable_supply_growth_rate = 0.0
         cfg.stable_supply_noise = 0.0
+        cfg.producer_deposits_enabled = True
+        cfg.producer_deposit_stride_ticks = 4
+        cfg.producer_stable_deposit_rate_per_month = max(
+            0.0, float(getattr(args, "_frontier_producer_stable_deposit_rate_per_month", 0.0))
+        )
+        cfg.producer_voucher_deposit_rate_per_month = max(
+            0.0, float(getattr(args, "_frontier_producer_voucher_deposit_rate_per_month", 0.0))
+        )
+        cfg.lender_voucher_cap_deposit_multiple = 5.0
+        cfg.productive_credit_enabled = True
+        cfg.productive_credit_return_rate = max(
+            0.0, float(getattr(args, "_frontier_productive_credit_return_rate", 0.0))
+        )
+        cfg.productive_credit_lag_ticks = max(
+            1, int(getattr(args, "_frontier_productive_credit_lag_ticks", 2))
+        )
+        cfg.voucher_fee_conversion_enabled = True
+        cfg.quarterly_clearing_enabled = True
+        cfg.quarterly_clearing_stride_ticks = max(1, int(getattr(args, "issuer_payment_stride", 13)))
+        cfg.quarterly_clearing_surplus_share = max(
+            0.0, min(1.0, float(getattr(args, "_frontier_quarterly_clearing_surplus_share", 1.0)))
+        )
+        cfg.route_substitution_enabled = True
+        cfg.route_substitution_max_alternatives = 3
         route_request_base = int(getattr(args, "_frontier_route_requests_per_tick", 1))
         cfg.random_route_requests_per_tick = max(1, int(round(route_request_base * math.sqrt(factor))))
         frontier_floor = int(math.ceil(int(getattr(args, "_frontier_swap_floor_per_tick", 0)) * factor))
@@ -1546,6 +1666,10 @@ def run_one(
         failed_tick = safe_float(latest.get("route_failed_tick"))
         cumulative["route_found"] += int(found_tick)
         cumulative["route_failed"] += int(failed_tick)
+        cumulative["route_fixed_found"] += int(safe_float(latest.get("route_fixed_found_tick")))
+        cumulative["route_fixed_failed"] += int(safe_float(latest.get("route_fixed_failed_tick")))
+        cumulative["route_substitution_found"] += int(safe_float(latest.get("route_substitution_found_tick")))
+        cumulative["route_substitution_failed"] += int(safe_float(latest.get("route_substitution_failed_tick")))
         cumulative["transactions"] += int(safe_float(latest.get("transactions_per_tick")))
         for metric in (
             "swap_volume_usd_tick",
@@ -1561,6 +1685,13 @@ def run_one(
             "loan_issuance_volume_usd",
             "stable_onramp_usd_tick",
             "stable_offramp_usd_tick",
+            "producer_deposit_stable_usd_tick",
+            "producer_deposit_voucher_usd_tick",
+            "productive_credit_inflow_usd_tick",
+            "fee_conversion_attempted_usd_tick",
+            "fee_conversion_success_usd_tick",
+            "fee_conversion_failed_usd_tick",
+            "quarterly_clearing_usd_tick",
         ):
             cumulative_float[metric] += safe_float(latest.get(metric))
         analysis_stride = max(1, int(args.analysis_stride))
@@ -1578,6 +1709,20 @@ def run_one(
         bmetrics = bond_metrics(latest, cfg, tick)
         route_attempts_total = cumulative["route_found"] + cumulative["route_failed"]
         route_success_total = cumulative["route_found"] / route_attempts_total if route_attempts_total else 0.0
+        fixed_route_attempts_total = cumulative["route_fixed_found"] + cumulative["route_fixed_failed"]
+        fixed_route_success_total = (
+            cumulative["route_fixed_found"] / fixed_route_attempts_total
+            if fixed_route_attempts_total
+            else 0.0
+        )
+        substitution_route_attempts_total = (
+            cumulative["route_substitution_found"] + cumulative["route_substitution_failed"]
+        )
+        substitution_route_success_total = (
+            cumulative["route_substitution_found"] / substitution_route_attempts_total
+            if substitution_route_attempts_total
+            else 0.0
+        )
         stress_ratio = safe_float(latest.get("pools_under_stable_reserve")) / max(
             1.0, safe_float(latest.get("num_pools"), 1.0)
         )
@@ -1641,6 +1786,12 @@ def run_one(
             "route_success_rate_cumulative": route_success_total,
             "route_found_total": cumulative["route_found"],
             "route_failed_total": cumulative["route_failed"],
+            "route_fixed_success_rate_cumulative": fixed_route_success_total,
+            "route_fixed_found_total": cumulative["route_fixed_found"],
+            "route_fixed_failed_total": cumulative["route_fixed_failed"],
+            "route_substitution_success_rate_cumulative": substitution_route_success_total,
+            "route_substitution_found_total": cumulative["route_substitution_found"],
+            "route_substitution_failed_total": cumulative["route_substitution_failed"],
             "noam_routing_swaps_tick": latest.get("noam_routing_swaps_tick", 0),
             "noam_clearing_swaps_tick": latest.get("noam_clearing_swaps_tick", 0),
             "repayment_volume_usd": latest.get("repayment_volume_usd", 0.0),
@@ -1648,8 +1799,32 @@ def run_one(
             "loan_issuance_volume_usd": latest.get("loan_issuance_volume_usd", 0.0),
             "loan_issuance_volume_usd_total": cumulative_float["loan_issuance_volume_usd"],
             "debt_outstanding_usd": latest.get("debt_outstanding_usd", 0.0),
+            "issued_voucher_supply_total": latest.get("issued_voucher_supply_total", 0.0),
+            "issuer_returned_voucher_supply_total": latest.get("issuer_returned_voucher_supply_total", 0.0),
+            "net_circulating_voucher_supply_total": latest.get("net_circulating_voucher_supply_total", 0.0),
+            "producer_deposit_stable_usd": latest.get("producer_deposit_stable_usd_tick", 0.0),
+            "producer_deposit_stable_usd_total": cumulative_float["producer_deposit_stable_usd_tick"],
+            "producer_deposit_voucher_usd": latest.get("producer_deposit_voucher_usd_tick", 0.0),
+            "producer_deposit_voucher_usd_total": cumulative_float["producer_deposit_voucher_usd_tick"],
+            "producer_deposit_credit_capacity_usd": latest.get("producer_deposit_credit_capacity_usd", 0.0),
+            "productive_credit_inflow_usd": latest.get("productive_credit_inflow_usd_tick", 0.0),
+            "productive_credit_inflow_usd_total": cumulative_float["productive_credit_inflow_usd_tick"],
             "fee_pool_cumulative_usd": latest.get("fee_pool_cumulative_usd", 0.0),
             "fee_clc_cumulative_usd": latest.get("fee_clc_cumulative_usd", 0.0),
+            "fee_conversion_attempted_usd": latest.get("fee_conversion_attempted_usd_tick", 0.0),
+            "fee_conversion_attempted_usd_total": cumulative_float["fee_conversion_attempted_usd_tick"],
+            "fee_conversion_success_usd": latest.get("fee_conversion_success_usd_tick", 0.0),
+            "fee_conversion_success_usd_total": cumulative_float["fee_conversion_success_usd_tick"],
+            "fee_conversion_failed_usd": latest.get("fee_conversion_failed_usd_tick", 0.0),
+            "fee_conversion_failed_usd_total": cumulative_float["fee_conversion_failed_usd_tick"],
+            "quarterly_clearing_usd": latest.get("quarterly_clearing_usd_tick", 0.0),
+            "quarterly_clearing_usd_total": cumulative_float["quarterly_clearing_usd_tick"],
+            "quarterly_clearing_lender_liquidity_before_tick": latest.get(
+                "quarterly_clearing_lender_liquidity_before_tick", 0.0
+            ),
+            "quarterly_clearing_lender_liquidity_after_tick": latest.get(
+                "quarterly_clearing_lender_liquidity_after_tick", 0.0
+            ),
             "claims_unpaid_usd_tick": latest.get("claims_unpaid_usd_tick", 0.0),
             "stable_onramp_usd_tick": latest.get("stable_onramp_usd_tick", 0.0),
             "stable_onramp_usd_total": cumulative_float["stable_onramp_usd_tick"],
@@ -3257,10 +3432,15 @@ def summarize_frontier_cell(
     rows: list[dict[str, object]],
     baseline: dict[str, float],
     route_success_floor: float,
+    route_success_mode: str,
 ) -> dict[str, object]:
     principal_values = [safe_float(row.get("bond_principal_usd")) for row in rows]
     service_values = [service_coverage(row) for row in rows]
     route_values = [safe_float(row.get("route_success_rate_cumulative")) for row in rows]
+    fixed_route_values = [safe_float(row.get("route_fixed_success_rate_cumulative")) for row in rows]
+    substitution_route_values = [
+        safe_float(row.get("route_substitution_success_rate_cumulative")) for row in rows
+    ]
     stress_values = [safe_float(row.get("household_cash_stress_ratio")) for row in rows]
     leakage_values = [safe_float(row.get("stable_liquidity_leakage_ratio_cumulative")) for row in rows]
     claims_ratios = [
@@ -3337,8 +3517,11 @@ def summarize_frontier_cell(
     if percentile(service_values, 0.05) < 1.00:
         constraints.append("p05_service_coverage")
     route_success_floor = max(0.0, min(1.0, float(route_success_floor)))
-    if percentile(route_values, 0.05) < route_success_floor:
+    route_success_mode = str(route_success_mode or "diagnostic").strip().lower()
+    if route_success_mode == "absolute" and percentile(route_values, 0.05) < route_success_floor:
         constraints.append("p05_route_success")
+    elif route_success_mode == "relative" and route_p50 < baseline.get("route_success_p50", 0.0) - 0.05:
+        constraints.append("route_success_decline_vs_no_bond")
     if stress_delta_p95 > 0.20:
         constraints.append("p95_household_cash_stress_delta")
     if leakage_delta_p95 > 0.15:
@@ -3374,7 +3557,13 @@ def summarize_frontier_cell(
         "issuer_reserve_draw_p95": percentile(reserve_draw_values, 0.95),
         "issuer_unpaid_scheduled_claim_p95": percentile(unpaid_values, 0.95),
         "route_success_p05": percentile(route_values, 0.05),
+        "route_success_p50": route_p50,
         "route_success_floor": route_success_floor,
+        "route_success_mode": route_success_mode,
+        "route_fixed_success_p05": percentile(fixed_route_values, 0.05),
+        "route_fixed_success_p50": percentile(fixed_route_values, 0.50),
+        "route_substitution_success_p05": percentile(substitution_route_values, 0.05),
+        "route_substitution_success_p50": percentile(substitution_route_values, 0.50),
         "household_cash_stress_p95": stress_p95,
         "household_cash_stress_delta_p95": stress_delta_p95,
         "liquidity_leakage_p95": leakage_p95,
@@ -3942,6 +4131,7 @@ def frontier_safety_from_results(
     cell_results: list[dict[str, object]],
     baseline_by_scale: dict[str, dict[str, float]],
     route_success_floor: float,
+    route_success_mode: str,
 ) -> list[dict[str, object]]:
     safety_rows = []
     seen: set[tuple[str, float, float, float]] = set()
@@ -3961,7 +4151,7 @@ def frontier_safety_from_results(
         baseline = baseline_by_scale.get(key[0])
         if baseline is None:
             continue
-        safety_rows.append(summarize_frontier_cell(rows, baseline, route_success_floor))
+        safety_rows.append(summarize_frontier_cell(rows, baseline, route_success_floor, route_success_mode))
         seen.add(key)
     return sorted_frontier_safety_rows(safety_rows)
 
@@ -4127,6 +4317,7 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
             cell_results,
             baseline_by_scale,
             safe_float(args.route_success_floor),
+            str(getattr(args, "route_success_mode", "diagnostic")),
         )
         return baseline_by_scale, safety_rows
 
@@ -4185,6 +4376,7 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
             cell_results,
             baseline_by_scale,
             safe_float(args.route_success_floor),
+            str(getattr(args, "route_success_mode", "diagnostic")),
         )
         write_frontier_aggregate(
             args,
@@ -4251,6 +4443,7 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
                 all_cell_results,
                 baseline_by_scale,
                 safe_float(args.route_success_floor),
+                str(getattr(args, "route_success_mode", "diagnostic")),
             )
             safety_by_key = {
                 frontier_cell_key(

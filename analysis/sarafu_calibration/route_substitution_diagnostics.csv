@@ -1,0 +1,4 @@
+metric,value,denominator,claim_boundary
+route_like_multi_pool_transactions,0,0,This is not a failed-route denominator; substitution remains a scenario diagnostic.
+bridge_voucher_tokens,294,1704,"Bridge voucher tokens indicate route potential, not participant intent."
+shared_voucher_pool_pool_edges,1111,274,Shared listing topology supports substitution diagnostics but does not observe rejected purchases.
