@@ -1,5 +1,7 @@
+import argparse
 import unittest
 
+from scripts.run_regenbond_monte_carlo import scenario_config
 from sim.config import ScenarioConfig
 from sim.core import Event, IssuerLedger
 from sim.engine import SimulationEngine
@@ -97,6 +99,57 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(latest["lender_stable_total_usd"], 100.0)
         self.assertAlmostEqual(latest["lender_stable_reserve_usd"], 25.0)
         self.assertAlmostEqual(latest["lender_stable_available_above_reserve_usd"], 75.0)
+
+    def test_frontier_bond_principal_is_seeded_directly_to_lenders(self):
+        args = argparse.Namespace(
+            pool_metrics_stride=0,
+            max_active_pools_per_tick=None,
+            _calibration_kes_per_usd=128.0,
+            _voucher_unit_value_usd=1.0 / 128.0,
+            _current_principal_usd=1000.0,
+            _current_scale_factor=1.0,
+            _current_bond_fee_service_share=1.0,
+            _current_initial_lenders=4,
+            _current_initial_producers=2,
+            _current_initial_consumers=3,
+            issuer_reserve_share=0.10,
+            issuer_payment_stride=13,
+            _frontier_producer_stable_deposit_rate_per_month=0.0,
+            _frontier_producer_voucher_deposit_rate_per_month=0.0,
+            _frontier_productive_credit_return_rate=0.0,
+            _frontier_productive_credit_lag_ticks=2,
+            _frontier_producer_debt_maturity_recovery_rate=0.0,
+            _frontier_quarterly_clearing_surplus_share=1.0,
+            _frontier_route_requests_per_tick=1,
+            _frontier_swap_floor_per_tick=0,
+            _frontier_historical_cash_backing_total_usd=0.0,
+            _frontier_historical_voucher_backing_total_usd=0.0,
+        )
+
+        cfg = scenario_config("bond_issuer_frontier", 0.06, 260, args)
+
+        self.assertEqual(cfg.initial_liquidity_providers, 0)
+        self.assertAlmostEqual(cfg.lp_initial_stable_mean, 0.0)
+        self.assertAlmostEqual(cfg.lender_initial_stable_mean, 250.0)
+        self.assertAlmostEqual(cfg.bond_gross_principal_usd, 1000.0)
+        self.assertAlmostEqual(cfg.bond_deployed_principal_usd, 1000.0)
+        self.assertAlmostEqual(cfg.issuer_reserve_share, 0.0)
+        self.assertEqual(cfg.max_pools, 9)
+
+        engine = SimulationEngine(cfg, seed=7)
+        stable_id = cfg.stable_symbol
+        lenders = [
+            pool for pool in engine.pools.values()
+            if not pool.policy.system_pool and pool.policy.role == "lender"
+        ]
+        liquidity_providers = [
+            pool for pool in engine.pools.values()
+            if not pool.policy.system_pool and pool.policy.role == "liquidity_provider"
+        ]
+
+        self.assertEqual(len(lenders), 4)
+        self.assertEqual(len(liquidity_providers), 0)
+        self.assertAlmostEqual(sum(pool.vault.get(stable_id) for pool in lenders), 1000.0)
 
     def test_voucher_unit_value_prices_one_ksh_voucher_against_usd_stable(self):
         engine = SimulationEngine(small_config(kes_per_usd=128.0, voucher_unit_value_usd=1.0 / 128.0))
@@ -313,6 +366,32 @@ class RegenBondRevisionTests(unittest.TestCase):
 
         self.assertAlmostEqual(engine._quarterly_clearing_usd_total, 50.0)
         self.assertAlmostEqual(clc_pool.vault.get(engine.cfg.stable_symbol) - clc_before, 50.0)
+        self.assertAlmostEqual(lender_pool.vault.get(engine.cfg.stable_symbol), 50.0)
+
+    def test_issuer_cashflow_clearing_pays_bondholders_without_clc_waterfall(self):
+        engine = SimulationEngine(
+            small_config(
+                quarterly_clearing_enabled=True,
+                quarterly_clearing_stride_ticks=13,
+                bond_return_mode="issuer_cashflow",
+                bond_gross_principal_usd=1000.0,
+                bond_term_ticks=260,
+            )
+        )
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        clc_pool = engine.pools[engine.clc_pool_id]
+        engine._vault_add(lender_pool, engine.cfg.stable_symbol, 100.0, "test_seed", "test")
+        lender_pool.policy.min_stable_reserve = 25.0
+        engine._lender_recovered_stable_by_pool[lender_pool.pool_id] = 80.0
+        engine.tick = 13
+        clc_before = clc_pool.vault.get(engine.cfg.stable_symbol)
+
+        engine._apply_quarterly_clearing()
+
+        self.assertAlmostEqual(engine._quarterly_clearing_usd_total, 50.0)
+        self.assertAlmostEqual(engine._lp_returned_usd_total, 50.0)
+        self.assertAlmostEqual(engine._stable_offramp_usd_tick, 50.0)
+        self.assertAlmostEqual(clc_pool.vault.get(engine.cfg.stable_symbol), clc_before)
         self.assertAlmostEqual(lender_pool.vault.get(engine.cfg.stable_symbol), 50.0)
 
     def test_producer_debt_maturity_repayment_recovers_lender_stable(self):

@@ -223,7 +223,10 @@ def parse_args() -> argparse.Namespace:
         "--issuer-reserve-share",
         type=float,
         default=0.10,
-        help="Share of gross bond principal withheld as issuer debt-service reserve.",
+        help=(
+            "Legacy reserve-share parameter. The bond_issuer_frontier setup now "
+            "deploys 100% of gross principal directly to lender pools."
+        ),
     )
     parser.add_argument(
         "--issuer-payment-stride",
@@ -1228,11 +1231,9 @@ def scenario_config(
         cfg.calibration_profile = "sarafu_empirical"
     elif scenario == "bond_issuer_frontier":
         gross_principal = max(0.0, float(getattr(args, "_current_principal_usd", 0.0)))
-        reserve_share = max(0.0, min(0.95, float(getattr(args, "issuer_reserve_share", 0.10))))
-        deployed_principal = gross_principal * (1.0 - reserve_share)
+        reserve_share = 0.0
+        deployed_principal = gross_principal
         factor = max(1.0, float(getattr(args, "_current_scale_factor", 1.0)))
-        cfg.initial_liquidity_providers = 1 if deployed_principal > 1e-9 else 0
-        cfg.lp_initial_stable_mean = deployed_principal
         cfg.bond_fee_service_share = max(
             0.0, min(1.0, float(getattr(args, "_current_bond_fee_service_share", 1.0)))
         )
@@ -1244,6 +1245,13 @@ def scenario_config(
         cfg.initial_lenders = int(getattr(args, "_current_initial_lenders", cfg.initial_lenders))
         cfg.initial_producers = int(getattr(args, "_current_initial_producers", cfg.initial_producers))
         cfg.initial_consumers = int(getattr(args, "_current_initial_consumers", cfg.initial_consumers))
+        if gross_principal > 1e-9 and cfg.initial_lenders <= 0:
+            cfg.initial_lenders = 1
+        cfg.initial_liquidity_providers = 0
+        cfg.lp_initial_stable_mean = 0.0
+        cfg.lender_initial_stable_mean = (
+            deployed_principal / max(1, cfg.initial_lenders) if deployed_principal > 1e-9 else 0.0
+        )
         cfg.max_pools = (
             cfg.initial_lenders
             + cfg.initial_producers
@@ -4357,10 +4365,10 @@ def write_frontier_notes(output_dir: Path, args: argparse.Namespace, summary_row
         f"- Full engine-validation gate status: `{validation_status}`.",
         f"- Frontier mode: `{args.frontier_mode}` with {args.frontier_refinement_rounds} refinement round(s).",
         f"- Certification policy: `{args.certification_policy}`.",
-        f"- Issuer reserve share: {args.issuer_reserve_share:.2%}.",
+        "- Issuer reserve share: 0.00%; the frontier setup deploys 100% of gross principal directly to lender pools.",
         f"- Issuer payment stride: {args.issuer_payment_stride} weekly ticks.",
         f"- p05 route-success floor: {max(0.0, min(1.0, float(args.route_success_floor))):.1%}.",
-        "- Gross bond principal is the bond amount; the issuer withholds the reserve and deploys the remainder as pool liquidity.",
+        "- Gross bond principal is the bond amount; it is divided evenly across lender pools as lendable stable at initialization, bypassing the startup waterfall.",
         "- Strong pools are eligible at full weight; moderate pools are capped; weak pools are excluded from base runs unless another policy is explicitly selected.",
         "",
         "## Non-Extraction Gate",

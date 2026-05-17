@@ -3544,6 +3544,7 @@ class SimulationEngine:
         lender_ids.sort()
         if not lender_ids:
             return
+        direct_issuer_cashflow = str(self.cfg.bond_return_mode or "") == "issuer_cashflow"
         before_liquidity = sum(self.pools[pid].vault.get(stable_id) for pid in lender_ids)
         cleared = 0.0
         pools_cleared = 0
@@ -3558,7 +3559,14 @@ class SimulationEngine:
                 continue
             if not self._vault_sub(lender, stable_id, amount, "quarterly_clearing_out", clc_pool.pool_id):
                 continue
-            self._vault_add(clc_pool, stable_id, amount, "quarterly_clearing_in", lender.pool_id)
+            if direct_issuer_cashflow:
+                self._lp_returned_usd_by_pool["issuer_cashflow"] = (
+                    self._lp_returned_usd_by_pool.get("issuer_cashflow", 0.0) + amount
+                )
+                self._lp_returned_usd_total += amount
+                self._stable_offramp_usd_tick += amount
+            else:
+                self._vault_add(clc_pool, stable_id, amount, "quarterly_clearing_in", lender.pool_id)
             self._lender_recovered_stable_by_pool[pid] = max(
                 0.0,
                 self._lender_recovered_stable_by_pool.get(pid, 0.0) - amount,
@@ -3585,6 +3593,7 @@ class SimulationEngine:
                 "remaining_need_after": remaining_need,
                 "lender_liquidity_before": before_liquidity,
                 "lender_liquidity_after": after_liquidity,
+                "direct_issuer_cashflow": direct_issuer_cashflow,
             },
         ))
 
