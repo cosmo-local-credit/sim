@@ -24,21 +24,24 @@ capacity.
 The voucher circulation
 baseline file records the same motifs over the pool era and recent trailing
 windows. The stable dependency anchor file records stable/cash flow shares,
-voucher flow shares, and stable-to-voucher dependency proxies. Additional
-aggregate tables calibrate producer deposit proxies, productive-credit timing,
-debt-removal purchases, voucher-fee conversion, quarterly clearing, and route
-substitution diagnostics. These are empirical settlement motifs and scenario
-anchors, not a direct failed-route denominator.
+voucher flow shares, and stable-to-voucher dependency proxies under both the
+legacy metadata-weighted voucher valuation and the simulator-comparable strict
+1 voucher = 1 KSh convention. Additional aggregate tables calibrate producer
+deposit proxies, productive-credit timing, debt-removal purchases, voucher-fee
+conversion, quarterly clearing, and route substitution diagnostics. These are
+empirical settlement motifs and scenario anchors, not direct pool inventory
+snapshots or a failed-route denominator.
 
 The bond-frontier safety tests use these files in three ways:
 
-- engine validation reports voucher-to-voucher and stable-flow shares as
-  calibration diagnostics;
+- engine validation reports voucher-to-voucher motifs, strict 1 KSh stable-flow
+  shares, and separate active-pool inventory snapshots as calibration
+  diagnostics;
 - frontier cells are rejected when bond liquidity materially degrades
   voucher-to-voucher circulation versus the matched no-bond baseline;
 - frontier cells are rejected when stable/bond liquidity materially increases
-  active-pool stable dependency or reduces active-pool voucher value share
-  versus the matched no-bond baseline.
+  active-pool stable inventory dependency or reduces active-pool voucher
+  inventory value share versus the matched no-bond baseline.
 
 Regenerate from the research workspace with:
 

@@ -4922,6 +4922,8 @@ class SimulationEngine:
             vol_vchr_to_vchr = 0.0
             swap_stable_flow_value = 0.0
             swap_voucher_flow_value = 0.0
+            swap_stable_net_flow_value = 0.0
+            swap_voucher_net_flow_value = 0.0
             count_usd_to_vchr = 0
             count_vchr_to_usd = 0
             count_vchr_to_vchr = 0
@@ -4948,20 +4950,24 @@ class SimulationEngine:
                         pool = self.pools.get(pool_id)
                         value_in = pool.values.get_value(asset_in) if pool is not None else 1.0
                         if value_in <= 0.0:
-                            value_in = 1.0
+                            value_in = self._default_asset_value(asset_in)
                         value_out = pool.values.get_value(asset_out) if pool is not None else 1.0
                         if value_out <= 0.0:
-                            value_out = 1.0
+                            value_out = self._default_asset_value(asset_out)
                         usd = amount_in * value_in
                         out_value = amount_out * value_out
                         if asset_in == cfg.stable_symbol:
                             swap_stable_flow_value += usd
+                            swap_stable_net_flow_value += usd
                         elif asset_in.startswith("VCHR:"):
                             swap_voucher_flow_value += usd
+                            swap_voucher_net_flow_value += usd
                         if asset_out == cfg.stable_symbol:
                             swap_stable_flow_value += out_value
+                            swap_stable_net_flow_value -= out_value
                         elif asset_out.startswith("VCHR:"):
                             swap_voucher_flow_value += out_value
+                            swap_voucher_net_flow_value -= out_value
                         if asset_in == cfg.stable_symbol and asset_out.startswith("VCHR:"):
                             vol_usd_to_vchr += usd
                             count_usd_to_vchr += 1
@@ -5064,6 +5070,8 @@ class SimulationEngine:
                 "swap_stable_flow_value_tick": swap_stable_flow_value,
                 "swap_voucher_flow_value_tick": swap_voucher_flow_value,
                 "swap_stable_flow_share_tick": swap_stable_flow_share,
+                "swap_stable_net_flow_value_tick": swap_stable_net_flow_value,
+                "swap_voucher_net_flow_value_tick": swap_voucher_net_flow_value,
                 "swap_count_usd_to_vchr_tick": count_usd_to_vchr,
                 "swap_count_vchr_to_usd_tick": count_vchr_to_usd,
                 "swap_count_vchr_to_vchr_tick": count_vchr_to_vchr,

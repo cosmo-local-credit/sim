@@ -300,6 +300,19 @@ def parse_args() -> argparse.Namespace:
         help="Print run progress every N ticks. Use 0 to disable progress logging.",
     )
     parser.add_argument(
+        "--unit-diagnostics",
+        dest="unit_diagnostics",
+        action="store_true",
+        default=True,
+        help="Print first-run unit/value diagnostics for each job.",
+    )
+    parser.add_argument(
+        "--no-unit-diagnostics",
+        dest="unit_diagnostics",
+        action="store_false",
+        help="Suppress first-run unit/value diagnostics.",
+    )
+    parser.add_argument(
         "--workers",
         default="auto",
         help="Parallel worker count. Use 'auto' for min(cpu_count - 1, 8), or an integer.",
@@ -1675,6 +1688,83 @@ def maybe_print_run_progress(
     )
 
 
+def unit_value_diagnostics(engine: SimulationEngine, args: argparse.Namespace) -> dict[str, object]:
+    producer = next((agent for agent in engine.agents.values() if agent.role == "producer"), None)
+    consumer = next((agent for agent in engine.agents.values() if agent.role == "consumer"), None)
+
+    def voucher_value(agent) -> tuple[str, float]:
+        if agent is None:
+            return "", 0.0
+        voucher_id = agent.voucher_spec.voucher_id
+        pool = engine.pools.get(agent.pool_id)
+        value = pool.values.get_value(voucher_id) if pool is not None else 0.0
+        if value <= 0.0:
+            value = engine._default_asset_value(voucher_id)
+        return voucher_id, value
+
+    producer_voucher_id, producer_value = voucher_value(producer)
+    consumer_voucher_id, consumer_value = voucher_value(consumer)
+    active_stable_value = sum(
+        pool.vault.get(engine.cfg.stable_symbol)
+        for pool in engine.pools.values()
+        if not pool.policy.system_pool
+    )
+    active_voucher_value = sum(
+        engine._pool_voucher_value_usd(pool)
+        for pool in engine.pools.values()
+        if not pool.policy.system_pool
+    )
+    active_total = active_stable_value + active_voucher_value
+    return {
+        "stable_symbol": engine.cfg.stable_symbol,
+        "stable_unit_value_usd": 1.0,
+        "kes_per_usd": getattr(args, "_calibration_kes_per_usd", 0.0),
+        "voucher_unit_value_usd": engine.cfg.voucher_unit_value_usd,
+        "sample_producer_voucher_id": producer_voucher_id,
+        "sample_producer_voucher_value_usd": producer_value,
+        "sample_consumer_voucher_id": consumer_voucher_id,
+        "sample_consumer_voucher_value_usd": consumer_value,
+        "initial_active_stable_inventory_usd": active_stable_value,
+        "initial_active_voucher_inventory_usd": active_voucher_value,
+        "initial_active_stable_inventory_share": active_stable_value / max(1e-9, active_total),
+    }
+
+
+def maybe_print_unit_diagnostics(
+    scenario: str,
+    run_index: int,
+    seed: int,
+    diagnostics: dict[str, object],
+    args: argparse.Namespace,
+) -> None:
+    if not bool(getattr(args, "unit_diagnostics", True)) or run_index != 1:
+        return
+    print(
+        "[unit-diagnostic] scenario={scenario} run={run} seed={seed} "
+        "stable={stable}@1.0USD kes_per_usd={kes:.6f} voucher_unit_value_usd={voucher:.12f} "
+        "producer_voucher={producer} producer_value_usd={producer_value:.12f} "
+        "consumer_voucher={consumer} consumer_value_usd={consumer_value:.12f} "
+        "initial_active_stable_usd={stable_inventory:.6f} "
+        "initial_active_voucher_usd={voucher_inventory:.6f} "
+        "initial_active_stable_share={stable_share:.6f}".format(
+            scenario=scenario,
+            run=run_index,
+            seed=seed,
+            stable=diagnostics.get("stable_symbol", ""),
+            kes=safe_float(diagnostics.get("kes_per_usd")),
+            voucher=safe_float(diagnostics.get("voucher_unit_value_usd")),
+            producer=diagnostics.get("sample_producer_voucher_id", ""),
+            producer_value=safe_float(diagnostics.get("sample_producer_voucher_value_usd")),
+            consumer=diagnostics.get("sample_consumer_voucher_id", ""),
+            consumer_value=safe_float(diagnostics.get("sample_consumer_voucher_value_usd")),
+            stable_inventory=safe_float(diagnostics.get("initial_active_stable_inventory_usd")),
+            voucher_inventory=safe_float(diagnostics.get("initial_active_voucher_inventory_usd")),
+            stable_share=safe_float(diagnostics.get("initial_active_stable_inventory_share")),
+        ),
+        flush=True,
+    )
+
+
 def run_one(
     scenario: str,
     coupon: float,
@@ -1686,6 +1776,8 @@ def run_one(
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
     cfg = scenario_config(scenario, coupon, term_ticks, args)
     engine = SimulationEngine(cfg=cfg, seed=seed)
+    unit_diagnostics = unit_value_diagnostics(engine, args)
+    maybe_print_unit_diagnostics(scenario, run_index, seed, unit_diagnostics, args)
     tier_rng = random.Random(seed + 7919)
     pool_tiers: dict[str, str] = {}
     realized_edges: dict[tuple[str, str], float] = {}
@@ -1729,6 +1821,8 @@ def run_one(
             "swap_volume_vchr_to_vchr_tick",
             "swap_stable_flow_value_tick",
             "swap_voucher_flow_value_tick",
+            "swap_stable_net_flow_value_tick",
+            "swap_voucher_net_flow_value_tick",
             "swap_count_usd_to_vchr_tick",
             "swap_count_vchr_to_usd_tick",
             "swap_count_vchr_to_vchr_tick",
@@ -1786,6 +1880,21 @@ def run_one(
         cumulative_swap_stable_flow = cumulative_float["swap_stable_flow_value_tick"]
         cumulative_swap_voucher_flow = cumulative_float["swap_voucher_flow_value_tick"]
         cumulative_swap_gross_flow = cumulative_swap_stable_flow + cumulative_swap_voucher_flow
+        cumulative_stable_flow_net = (
+            cumulative_float["stable_onramp_usd_tick"]
+            - cumulative_float["stable_offramp_usd_tick"]
+            + cumulative_float["swap_stable_net_flow_value_tick"]
+        )
+        cumulative_voucher_flow_net = (
+            cumulative_float["producer_deposit_voucher_usd_tick"]
+            + cumulative_float["swap_voucher_net_flow_value_tick"]
+        )
+        cumulative_stable_flow_positive = max(0.0, cumulative_stable_flow_net)
+        cumulative_voucher_flow_positive = max(0.0, cumulative_voucher_flow_net)
+        cumulative_positive_flow_total = cumulative_stable_flow_positive + cumulative_voucher_flow_positive
+        cumulative_positive_flow_stable_share = (
+            cumulative_stable_flow_positive / max(1e-9, cumulative_positive_flow_total)
+        )
 
         common = {
             "scenario": scenario,
@@ -1800,6 +1909,25 @@ def run_one(
             "certified_backing_capacity_usd": getattr(args, "_current_certified_capacity_usd", 0.0),
             "kes_per_usd": getattr(args, "_calibration_kes_per_usd", 0.0),
             "voucher_unit_value_usd": getattr(args, "_voucher_unit_value_usd", 1.0),
+            "stable_symbol": unit_diagnostics.get("stable_symbol", ""),
+            "stable_unit_value_usd": unit_diagnostics.get("stable_unit_value_usd", 1.0),
+            "sample_producer_voucher_id": unit_diagnostics.get("sample_producer_voucher_id", ""),
+            "sample_producer_voucher_value_usd": unit_diagnostics.get(
+                "sample_producer_voucher_value_usd", 0.0
+            ),
+            "sample_consumer_voucher_id": unit_diagnostics.get("sample_consumer_voucher_id", ""),
+            "sample_consumer_voucher_value_usd": unit_diagnostics.get(
+                "sample_consumer_voucher_value_usd", 0.0
+            ),
+            "initial_active_stable_inventory_usd": unit_diagnostics.get(
+                "initial_active_stable_inventory_usd", 0.0
+            ),
+            "initial_active_voucher_inventory_usd": unit_diagnostics.get(
+                "initial_active_voucher_inventory_usd", 0.0
+            ),
+            "initial_active_stable_inventory_share": unit_diagnostics.get(
+                "initial_active_stable_inventory_share", 0.0
+            ),
             "coupon_target_annual": float(cfg.bond_coupon_target_annual),
             "bond_term_ticks": int(cfg.bond_term_ticks),
             "tick": tick,
@@ -1829,6 +1957,15 @@ def run_one(
             "swap_voucher_flow_value_total": cumulative_swap_voucher_flow,
             "swap_stable_flow_share_tick": latest.get("swap_stable_flow_share_tick", 0.0),
             "swap_stable_flow_share_total": cumulative_swap_stable_flow / max(1e-9, cumulative_swap_gross_flow),
+            "swap_stable_net_flow_value_tick": latest.get("swap_stable_net_flow_value_tick", 0.0),
+            "swap_stable_net_flow_value_total": cumulative_float["swap_stable_net_flow_value_tick"],
+            "swap_voucher_net_flow_value_tick": latest.get("swap_voucher_net_flow_value_tick", 0.0),
+            "swap_voucher_net_flow_value_total": cumulative_float["swap_voucher_net_flow_value_tick"],
+            "engine_flow_stable_net_usd_total": cumulative_stable_flow_net,
+            "engine_flow_voucher_net_usd_total": cumulative_voucher_flow_net,
+            "engine_flow_positive_stable_usd_total": cumulative_stable_flow_positive,
+            "engine_flow_positive_voucher_usd_total": cumulative_voucher_flow_positive,
+            "engine_positive_net_flow_stable_share_total": cumulative_positive_flow_stable_share,
             "swap_count_usd_to_vchr_tick": latest.get("swap_count_usd_to_vchr_tick", 0),
             "swap_count_usd_to_vchr_total": cumulative_float["swap_count_usd_to_vchr_tick"],
             "swap_count_vchr_to_usd_tick": latest.get("swap_count_vchr_to_usd_tick", 0),
@@ -2798,12 +2935,17 @@ def engine_validation_moments(
         ) / empirical_borrow_events
     current_circulation = calibration.voucher_circulation_baselines.get("trailing_90d", {})
     stable_anchors = calibration.stable_dependency_anchors
-    empirical_active_stable_share = stable_anchors.get(
+    empirical_metadata_stable_share = stable_anchors.get(
         "net_positive_flow_balance_stable_share_aggregate", {}
     ).get("value", "")
-    empirical_active_voucher_share = ""
-    if empirical_active_stable_share != "":
-        empirical_active_voucher_share = max(0.0, 1.0 - safe_float(empirical_active_stable_share))
+    empirical_strict_stable_share = stable_anchors.get(
+        "net_positive_flow_balance_stable_share_aggregate_strict_1ksh", {}
+    ).get("value", "")
+    empirical_flow_stable_share = (
+        empirical_strict_stable_share
+        if empirical_strict_stable_share != ""
+        else empirical_metadata_stable_share
+    )
     empirical_stable_involved_swap_share = (
         safe_float(current_circulation.get("voucher_to_stable_share"))
         + safe_float(current_circulation.get("stable_to_voucher_share"))
@@ -2875,7 +3017,16 @@ def engine_validation_moments(
         ),
         (
             "all",
-            "gross_stable_flow_share",
+            "gross_stable_flow_share_strict_1ksh",
+            "settlement",
+            stable_anchors.get("gross_stable_flow_share_strict_1ksh", {}).get("value", ""),
+            [safe_float(row.get("swap_stable_flow_share_total")) for row in summaries],
+            None,
+            False,
+        ),
+        (
+            "all",
+            "gross_stable_flow_share_metadata_weighted",
             "settlement",
             stable_anchors.get("gross_stable_flow_share", {}).get("value", ""),
             [safe_float(row.get("swap_stable_flow_share_total")) for row in summaries],
@@ -2884,18 +3035,36 @@ def engine_validation_moments(
         ),
         (
             "all",
-            "active_pool_stable_value_share",
+            "positive_net_flow_stable_share_strict_1ksh",
             "settlement",
-            empirical_active_stable_share,
+            empirical_flow_stable_share,
+            [safe_float(row.get("engine_positive_net_flow_stable_share_total")) for row in summaries],
+            None,
+            False,
+        ),
+        (
+            "all",
+            "positive_net_flow_stable_share_metadata_weighted",
+            "settlement",
+            empirical_metadata_stable_share,
+            [safe_float(row.get("engine_positive_net_flow_stable_share_total")) for row in summaries],
+            None,
+            False,
+        ),
+        (
+            "all",
+            "active_pool_stable_value_share_inventory_snapshot",
+            "settlement",
+            "",
             [safe_float(row.get("stable_value_share_in_active_pools")) for row in summaries],
             None,
             False,
         ),
         (
             "all",
-            "active_pool_voucher_value_share",
+            "active_pool_voucher_value_share_inventory_snapshot",
             "settlement",
-            empirical_active_voucher_share,
+            "",
             [safe_float(row.get("voucher_value_share_in_active_pools")) for row in summaries],
             None,
             False,
