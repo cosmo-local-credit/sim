@@ -52,6 +52,19 @@ class RegenBondRevisionTests(unittest.TestCase):
 
         self.assertAlmostEqual(engine._lender_voucher_cap(voucher_id, lender_pool), 500.0)
 
+    def test_voucher_unit_value_prices_one_ksh_voucher_against_usd_stable(self):
+        engine = SimulationEngine(small_config(kes_per_usd=128.0, voucher_unit_value_usd=1.0 / 128.0))
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        voucher_id = producer.voucher_spec.voucher_id
+
+        self.assertAlmostEqual(producer_pool.values.get_value(voucher_id), 1.0 / 128.0)
+        ok, reason, amount_out, fee = producer_pool.quote_swap(engine.cfg.stable_symbol, 1.0, voucher_id)
+
+        self.assertTrue(ok, reason)
+        self.assertAlmostEqual(amount_out + fee, 128.0)
+        self.assertAlmostEqual(amount_out, 125.44)
+
     def test_productive_credit_inflow_is_scheduled_and_recorded_as_deposit(self):
         engine = SimulationEngine(
             small_config(

@@ -34,6 +34,28 @@ case "${RESUME:-1}" in
 esac
 mkdir -p "$OUTPUT_ROOT"
 
+REQUIRED_CALIBRATION_FILES=(
+  monte_carlo_calibration_parameters.csv
+  pool_report_activity.csv
+  producer_deposit_calibration.csv
+  productive_credit_calibration.csv
+  debt_removal_calibration.csv
+  fee_conversion_calibration.csv
+  quarterly_clearing_calibration.csv
+  route_substitution_diagnostics.csv
+  unit_normalization_calibration.csv
+)
+for required_file in "${REQUIRED_CALIBRATION_FILES[@]}"; do
+  if [[ ! -f "$CALIBRATION_DIR/$required_file" ]]; then
+    echo "[batch] missing calibration file: $CALIBRATION_DIR/$required_file" >&2
+    echo "[batch] rerun/export the public Sarafu calibration bundle before this batch." >&2
+    exit 2
+  fi
+done
+
+KES_PER_USD="$(awk -F, '$1 == "kes_per_usd" { print $2; exit }' "$CALIBRATION_DIR/unit_normalization_calibration.csv")"
+VOUCHER_KES_VALUE="$(awk -F, '$1 == "individual_voucher_kes_value_default" { print $2; exit }' "$CALIBRATION_DIR/unit_normalization_calibration.csv")"
+
 echo "[batch] job=$JOB"
 echo "[batch] python=$PYTHON_BIN"
 echo "[batch] calibration_dir=$CALIBRATION_DIR"
@@ -41,6 +63,8 @@ echo "[batch] output_root=$OUTPUT_ROOT"
 echo "[batch] workers=$WORKERS_VALUE"
 echo "[batch] resume=${RESUME:-1}"
 echo "[batch] route_success_mode=${ROUTE_SUCCESS_MODE:-diagnostic}"
+echo "[batch] kes_per_usd=${KES_PER_USD:-missing}"
+echo "[batch] voucher_kes_value=${VOUCHER_KES_VALUE:-missing}"
 
 run_engine_validation() {
   local default_runs="$1"

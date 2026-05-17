@@ -54,6 +54,8 @@ class ScenarioConfig:
     stable_inflow_activity_share: float = 0.6
     stable_inflow_activity_window_ticks: int = 12
     voucher_inflow_share: float = 0.5  # voucher USD value minted per USD stable inflow
+    kes_per_usd: float = 1.0
+    voucher_unit_value_usd: float = 1.0  # USD value of one local voucher unit.
     offramps_enabled: bool = True
     offramp_rate_min_per_tick: float = 0.0
     offramp_rate_max_per_tick: float = 0.02

@@ -22,11 +22,51 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 2
 fi
 
-COMMAND="cd '$PWD' && ./scripts/run_regenbond_remote_batch.sh '$JOB' 2>&1 | tee '$LOG_FILE'"
+FORWARDED_ENV_KEYS=(
+  PYTHON_BIN
+  CALIBRATION_DIR
+  OUTPUT_ROOT
+  OUTPUT
+  WORKERS
+  MONTE_CARLO_WORKERS
+  RESUME
+  SHARD_DIR
+  PARTIAL_AGGREGATE_STRIDE
+  ROUTE_SUCCESS_MODE
+  ROUTE_SUCCESS_FLOOR
+  RUNS
+  TICKS
+  SEED
+  ANALYSIS_STRIDE
+  POOL_METRICS_STRIDE
+  PROGRESS_STRIDE
+  NETWORK_SCALES
+  PRINCIPAL_RATIOS
+  COUPON_TARGETS
+  BOND_FEE_SERVICE_SHARES
+  CERTIFICATION_POLICY
+  FRONTIER_MODE
+  FRONTIER_REFINEMENT_ROUNDS
+  BOND_TERM
+)
+ENV_PREFIX=""
+for key in "${FORWARDED_ENV_KEYS[@]}"; do
+  if [[ -v "$key" ]]; then
+    printf -v quoted_env "%q" "$key=${!key}"
+    ENV_PREFIX+=" $quoted_env"
+  fi
+done
+
+printf -v quoted_pwd "%q" "$PWD"
+printf -v quoted_job "%q" "$JOB"
+printf -v quoted_log "%q" "$LOG_FILE"
+COMMAND="cd $quoted_pwd && env$ENV_PREFIX ./scripts/run_regenbond_remote_batch.sh $quoted_job 2>&1 | tee $quoted_log"
 tmux new-session -d -s "$SESSION" "$COMMAND"
 
 echo "Started detached tmux session: $SESSION"
 echo "Job: $JOB"
 echo "Log: $LOG_FILE"
+echo "Workers: ${WORKERS:-${MONTE_CARLO_WORKERS:-auto}}"
+echo "Resume: ${RESUME:-1}"
 echo "Tail: tail -f $LOG_FILE"
 echo "Attach: tmux attach -t $SESSION"

@@ -146,6 +146,7 @@ class PoolCalibration:
 
 @dataclass
 class Calibration:
+    calibration_hash: str
     params: dict[str, float]
     repayment_by_tier_asset: dict[tuple[str, str], float]
     repayment_out_value_by_tier_asset: dict[tuple[str, str], float]
@@ -162,6 +163,7 @@ class Calibration:
     fee_conversion_calibration: dict[str, float]
     quarterly_clearing_calibration: dict[str, float]
     route_substitution_diagnostics: dict[str, float]
+    unit_normalization: dict[str, float]
 
 
 def parse_args() -> argparse.Namespace:
@@ -431,6 +433,7 @@ SHARD_CONFIG_KEYS = (
     "route_success_floor",
     "route_success_mode",
     "calibration_dir",
+    "calibration_hash",
     "max_active_pools_per_tick",
     "pool_metrics_stride",
     "analysis_stride",
@@ -509,6 +512,16 @@ def read_rows(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
     return read_csv(path)
+
+
+def calibration_bundle_hash(calibration_dir: Path) -> str:
+    payload: dict[str, str] = {}
+    for path in sorted(calibration_dir.glob("*.csv")):
+        payload[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    readme = calibration_dir / "README.md"
+    if readme.exists():
+        payload[readme.name] = hashlib.sha256(readme.read_bytes()).hexdigest()
+    return canonical_hash(payload)
 
 
 def sorted_run_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -676,6 +689,7 @@ def run_sharded_jobs(
 
 
 def load_calibration(calibration_dir: Path) -> Calibration:
+    bundle_hash = calibration_bundle_hash(calibration_dir)
     params = {}
     for row in read_csv(calibration_dir / "monte_carlo_calibration_parameters.csv"):
         params[row["parameter"]] = safe_float(row["value"])
@@ -818,8 +832,10 @@ def load_calibration(calibration_dir: Path) -> Calibration:
     fee_conversion_calibration = load_metric_table("fee_conversion_calibration.csv")
     quarterly_clearing_calibration = load_metric_table("quarterly_clearing_calibration.csv")
     route_substitution_diagnostics = load_metric_table("route_substitution_diagnostics.csv")
+    unit_normalization = load_metric_table("unit_normalization_calibration.csv")
 
     return Calibration(
+        calibration_hash=bundle_hash,
         params=params,
         repayment_by_tier_asset=repayment_by_tier_asset,
         repayment_out_value_by_tier_asset=tier_asset_out_values,
@@ -836,7 +852,17 @@ def load_calibration(calibration_dir: Path) -> Calibration:
         fee_conversion_calibration=fee_conversion_calibration,
         quarterly_clearing_calibration=quarterly_clearing_calibration,
         route_substitution_diagnostics=route_substitution_diagnostics,
+        unit_normalization=unit_normalization,
     )
+
+
+def apply_unit_normalization_context(args: argparse.Namespace, calibration: Calibration) -> None:
+    kes_per_usd = safe_float(calibration.unit_normalization.get("kes_per_usd"))
+    voucher_kes_value = safe_float(
+        calibration.unit_normalization.get("individual_voucher_kes_value_default")
+    ) or 1.0
+    args._calibration_kes_per_usd = kes_per_usd
+    args._voucher_unit_value_usd = (voucher_kes_value / kes_per_usd) if kes_per_usd > 0.0 else 1.0
 
 
 def mean(values: Iterable[float]) -> float:
@@ -1072,6 +1098,11 @@ def scenario_config(
         calibration_profile="sarafu_empirical",
     )
     cfg.max_active_pools_per_tick = args.max_active_pools_per_tick
+    cfg.kes_per_usd = max(0.0, float(getattr(args, "_calibration_kes_per_usd", 0.0)))
+    cfg.voucher_unit_value_usd = max(
+        1e-12,
+        float(getattr(args, "_voucher_unit_value_usd", 1.0)),
+    )
 
     if scenario == "mutual_aid_only":
         cfg.economics_enabled = False
@@ -1747,6 +1778,8 @@ def run_one(
             "certification_policy": getattr(args, "_current_certification_policy", ""),
             "certified_pool_count": getattr(args, "_current_certified_pool_count", 0.0),
             "certified_backing_capacity_usd": getattr(args, "_current_certified_capacity_usd", 0.0),
+            "kes_per_usd": getattr(args, "_calibration_kes_per_usd", 0.0),
+            "voucher_unit_value_usd": getattr(args, "_voucher_unit_value_usd", 1.0),
             "coupon_target_annual": float(cfg.bond_coupon_target_annual),
             "bond_term_ticks": int(cfg.bond_term_ticks),
             "tick": tick,
@@ -3209,6 +3242,7 @@ def run_validation_shard(
     started_at = time.time()
     try:
         args = namespace_from_payload(args_data)
+        apply_unit_normalization_context(args, calibration)
         apply_network_context(
             args,
             calibration=calibration,
@@ -4008,6 +4042,7 @@ def run_frontier_cell_shard(
     started_at = time.time()
     try:
         args = namespace_from_payload(args_data)
+        apply_unit_normalization_context(args, calibration)
         configure_sarafu_activity_controls(args, calibration, int(args.ticks), "frontier")
         scale = str(job["network_scale"])
         ratio = safe_float(job["principal_ratio"])
@@ -4494,6 +4529,7 @@ def run_legacy_shard(
     started_at = time.time()
     try:
         args = namespace_from_payload(args_data)
+        apply_unit_normalization_context(args, calibration)
         scenario = str(job["scenario_name"])
         coupon = safe_float(job["coupon"])
         term_ticks = int(job["term_ticks"])
@@ -4625,6 +4661,8 @@ def main() -> int:
     terms = selected_terms(args)
     output_dir = Path(args.output).resolve()
     calibration = load_calibration(Path(args.calibration_dir).resolve())
+    args.calibration_hash = calibration.calibration_hash
+    apply_unit_normalization_context(args, calibration)
 
     if args.scenario == "sarafu_engine_validation":
         return run_sarafu_engine_validation(args, calibration, output_dir)

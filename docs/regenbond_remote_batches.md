@@ -18,6 +18,24 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
+After a fresh clone, confirm that the public calibration bundle includes the
+revised aggregate tables:
+
+```bash
+ls analysis/sarafu_calibration/producer_deposit_calibration.csv
+ls analysis/sarafu_calibration/productive_credit_calibration.csv
+ls analysis/sarafu_calibration/debt_removal_calibration.csv
+ls analysis/sarafu_calibration/fee_conversion_calibration.csv
+ls analysis/sarafu_calibration/quarterly_clearing_calibration.csv
+ls analysis/sarafu_calibration/route_substitution_diagnostics.csv
+ls analysis/sarafu_calibration/unit_normalization_calibration.csv
+```
+
+The remote server normally does not run the private empirical calibration
+pipeline. That pipeline uses `RegenBonds/cleaned_data/data/csv` and should be
+run in the private research workspace, then exported into this repo as the
+public-safe `analysis/sarafu_calibration/` bundle before pushing.
+
 For later runs:
 
 ```bash
@@ -25,6 +43,54 @@ cd ~/sim
 git pull
 .venv/bin/python -m pip install -r requirements.txt
 ```
+
+## Fresh Remote Start For A Model Redo
+
+If you are starting over on the remote, a clean clone is usually simpler than
+cleaning old output directories:
+
+```bash
+cd ~
+git clone https://github.com/cosmo-local-credit/sim.git sim
+cd ~/sim
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+If `~/sim` already exists and you want to keep the old run for comparison, use
+a separate directory:
+
+```bash
+cd ~
+git clone https://github.com/cosmo-local-credit/sim.git sim-revised
+cd ~/sim-revised
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+Run a local smoke on the remote checkout before long jobs:
+
+```bash
+.venv/bin/python -m unittest discover -s tests
+RUNS=2 TICKS=4 WORKERS=2 RESUME=0 ./scripts/run_regenbond_remote_batch.sh validation-smoke
+```
+
+For the official redo, use the standard `~/sim` checkout and standard output
+directories because frontier jobs read the validation gate from
+`analysis/monte_carlo/engine_validation/engine_validation_summary.csv`.
+
+Recommended redo sequence:
+
+```bash
+WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh validation-1mo
+WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh validation-smoke
+WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh validation-pilot
+WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh validation-full
+WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-smoke
+WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-pilot
+```
+
+Run `frontier-publication` only after the revised pilot is reviewed.
 
 Run batches from the repo root. The wrapper defaults to parallel, resumable
 execution:
@@ -106,6 +172,8 @@ The revised Monte Carlo also reads aggregate tables for:
 - voucher-fee-to-stable conversion capacity;
 - quarterly lender-pool clearing capacity;
 - route-substitution diagnostics.
+- unit normalization for KES/KSh vouchers against USD stable, including the
+  simulator convention `1 voucher = 1 KSh`.
 
 These route-substitution diagnostics are scenario anchors, not observed
 failed-route denominators. Regenerate the public bundle from the private
@@ -249,6 +317,10 @@ The helper starts a detached `tmux` session named `regenbond` and writes:
 ```text
 analysis/monte_carlo/<job>.log
 ```
+
+The helper explicitly forwards the same batch environment used by the direct
+runner, including `WORKERS`, `RESUME`, `CALIBRATION_DIR`, `OUTPUT_ROOT`,
+frontier grid overrides, and route-success settings.
 
 Check progress:
 
@@ -602,6 +674,22 @@ rsync -av \
 ```
 
 Only use `scp -r` if you intentionally want to copy `_shards/` too.
+
+Pull the output directory that matches the job you just ran:
+
+| Job | Remote output directory | Remote log | Local destination |
+| --- | --- | --- | --- |
+| `validation-1mo` | `~/sim/analysis/monte_carlo/engine_validation_1mo_test/` | `~/sim/analysis/monte_carlo/validation-1mo.log` | `RegenBonds/analysis/monte_carlo/engine_validation_1mo_test/` |
+| `validation-smoke` | `~/sim/analysis/monte_carlo/engine_validation_smoke/` | `~/sim/analysis/monte_carlo/validation-smoke.log` | `RegenBonds/analysis/monte_carlo/engine_validation_smoke/` |
+| `validation-pilot` | `~/sim/analysis/monte_carlo/engine_validation_20run/` | `~/sim/analysis/monte_carlo/validation-pilot.log` | `RegenBonds/analysis/monte_carlo/engine_validation_20run/` |
+| `validation-full` | `~/sim/analysis/monte_carlo/engine_validation/` | `~/sim/analysis/monte_carlo/validation-full.log` | `RegenBonds/analysis/monte_carlo/engine_validation/` |
+| `frontier-smoke` | `~/sim/analysis/monte_carlo/bond_issuer_frontier_smoke/` | `~/sim/analysis/monte_carlo/frontier-smoke.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier_smoke/` |
+| `frontier-pilot` | `~/sim/analysis/monte_carlo/bond_issuer_frontier_pilot/` | `~/sim/analysis/monte_carlo/frontier-pilot.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/` |
+| `frontier-publication` | `~/sim/analysis/monte_carlo/bond_issuer_frontier/` | `~/sim/analysis/monte_carlo/frontier-publication.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier/` |
+
+Keep the trailing slash on remote output directories. It copies the contents of
+the job directory into the matching local directory and avoids creating nested
+duplicate directories.
 
 ### Validation Outputs
 

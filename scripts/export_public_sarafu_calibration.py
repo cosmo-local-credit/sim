@@ -18,6 +18,7 @@ COPY_FILES = (
     "repayment_calibration_by_tier_asset.csv",
     "borrow_repayment_by_tier.csv",
     "settlement_reliability_anchors.csv",
+    "unit_normalization_calibration.csv",
     "voucher_circulation_baseline.csv",
     "stable_dependency_anchors.csv",
     "producer_deposit_calibration.csv",
@@ -97,7 +98,11 @@ IDs. The simulator uses these templates only for tier mix, activity rates,
 repayment/return priors, backing-liquidity scale, and impact-report exposure.
 The settlement reliability anchor file adds aggregate ROLA-like voucher
 circulation, ROSCA-like stable-credit, same-token return, submitted-swap
-execution, and current cluster-topology metrics. The voucher circulation
+execution, and current cluster-topology metrics. The unit-normalization file
+records how KES/KSh voucher obligations are converted to USD-equivalent for
+bond-accounting columns, using successful KES/USD pool swaps and the current
+simulator convention that individual voucher units are 1 voucher = 1 KSh.
+The voucher circulation
 baseline file records the same motifs over the pool era and recent trailing
 windows. The stable dependency anchor file records stable/cash flow shares,
 voucher flow shares, and stable-to-voucher dependency proxies. Additional

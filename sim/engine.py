@@ -291,7 +291,14 @@ class SimulationEngine:
 
     def _asset_value(self, pool: "Pool", asset_id: str) -> float:
         v = pool.values.get_value(asset_id)
-        return v if v > 0.0 else 1.0
+        return v if v > 0.0 else self._default_asset_value(asset_id)
+
+    def _default_asset_value(self, asset_id: str) -> float:
+        if asset_id == self.cfg.stable_symbol or asset_id == self.cfg.sclc_symbol:
+            return 1.0
+        if asset_id.startswith("VCHR:"):
+            return max(1e-12, float(self.cfg.voucher_unit_value_usd or 1.0))
+        return 1.0
 
     def _rebuild_pool_value_cache(self, pool: "Pool") -> float:
         total = 0.0
@@ -312,7 +319,7 @@ class SimulationEngine:
                 continue
             value = pool.values.get_value(asset)
             if value <= 0.0:
-                value = 1.0
+                value = self._default_asset_value(asset)
             total += amt * value
         self._pool_voucher_value_cache[pool.pool_id] = total
         return total
@@ -337,7 +344,7 @@ class SimulationEngine:
             else:
                 value = pool.values.get_value(asset)
                 if value <= 0.0:
-                    value = 1.0
+                    value = self._default_asset_value(asset)
                 total = self._pool_voucher_value_cache.get(pool_id, 0.0) + (delta_amount * value)
                 if total <= 1e-9:
                     total = 0.0
@@ -379,8 +386,8 @@ class SimulationEngine:
                     spec = self.factory.voucher_specs.get(voucher_id)
                     issuer = self.agents.get(spec.issuer_id) if spec else None
                     issuer_pool = self.pools.get(issuer.pool_id) if issuer else None
-                    value = issuer_pool.values.get_value(voucher_id) if issuer_pool is not None else 1.0
-            value = value if value and value > 0.0 else 1.0
+                    value = issuer_pool.values.get_value(voucher_id) if issuer_pool is not None else self._default_asset_value(voucher_id)
+            value = value if value and value > 0.0 else self._default_asset_value(voucher_id)
             return max(0.0, (deposit_value * deposit_multiple) / value)
         fraction = max(0.0, float(self.cfg.lender_voucher_cap_supply_fraction or 0.0))
         if fraction <= 0.0:
@@ -418,7 +425,7 @@ class SimulationEngine:
             if issuer_pool is not None:
                 value = issuer_pool.values.get_value(voucher_id)
         if value <= 0.0:
-            value = float(max(0.05, np.random.lognormal(mean=0.0, sigma=0.35)))
+            value = self._default_asset_value(voucher_id)
         cap_in = self._lender_voucher_cap(voucher_id, lender_pool=lender_pool, value_override=value)
         lender_pool.list_asset_with_value_and_limit(
             voucher_id,
@@ -851,7 +858,7 @@ class SimulationEngine:
                         continue
                     value = pool.values.get_value(asset_out)
                     if value <= 0.0:
-                        value = 1.0
+                        value = self._default_asset_value(asset_out)
                     candidates.append((amt * value, asset_out))
                 if not candidates:
                     continue
@@ -1786,7 +1793,7 @@ class SimulationEngine:
                 continue
             value = pool.values.get_value(asset_id)
             if value <= 0.0:
-                continue
+                value = self._default_asset_value(asset_id)
             inv_value = pool.vault.get(asset_id) * value
             weight = inv_value if inv_value > 0.0 else value
             candidates.append(asset_id)
@@ -1808,7 +1815,7 @@ class SimulationEngine:
         voucher_id = agent.voucher_spec.voucher_id
         if voucher_id is None:
             return 0.0
-        value = pool.values.get_value(voucher_id)
+        value = self._asset_value(pool, voucher_id)
         if value <= 0.0:
             return 0.0
         amount = usd_value / value
@@ -2403,7 +2410,7 @@ class SimulationEngine:
         self.log.add(Event(self.tick, "POOL_CREATED", actor_id=agent.agent_id, pool_id=pool.pool_id))
 
         def list_voucher(asset_id: str, cap_in: float, *, value_override: Optional[float] = None) -> None:
-            v = value_override if value_override is not None else float(max(0.05, np.random.lognormal(mean=0.0, sigma=0.35)))
+            v = value_override if value_override is not None else self._default_asset_value(asset_id)
             pool.list_asset_with_value_and_limit(asset_id, value=v, window_len=cfg.default_window_len, cap_in=cap_in)
 
         stable_cap_in = cfg.default_cap_in
@@ -2427,7 +2434,7 @@ class SimulationEngine:
                 if a != cfg.stable_symbol and not self._is_producer_voucher(a)
             ]
             for a in wanted:
-                v = float(max(0.05, np.random.lognormal(mean=0.0, sigma=0.35)))
+                v = self._default_asset_value(a)
                 list_voucher(a, cap_in=self._lender_voucher_cap(a, lender_pool=pool, value_override=v), value_override=v)
 
             offer_k = max(1, int(np.random.poisson(cfg.add_pool_offer_assets_mean)))
@@ -2437,7 +2444,7 @@ class SimulationEngine:
             ]
             for a in offered:
                 if a not in wanted:
-                    v = float(max(0.05, np.random.lognormal(mean=0.0, sigma=0.35)))
+                    v = self._default_asset_value(a)
                     list_voucher(a, cap_in=self._lender_voucher_cap(a, lender_pool=pool, value_override=v), value_override=v)
 
             stable_seed = float(max(0.0, cfg.lender_initial_stable_mean))
@@ -2651,7 +2658,7 @@ class SimulationEngine:
                 chosen = candidates
 
             for asset_id in chosen:
-                value = float(max(0.05, np.random.lognormal(mean=0.0, sigma=0.35)))
+                value = self._default_asset_value(asset_id)
                 cap_in = float(self.cfg.default_cap_in)
                 if p.policy.role == "lender":
                     cap_in = self._lender_voucher_cap(asset_id, lender_pool=p, value_override=value)
@@ -3455,16 +3462,12 @@ class SimulationEngine:
             for asset_id, amt in p.fee_ledger_clc.items():
                 if amt <= 1e-12:
                     continue
-                value = p.values.get_value(asset_id)
-                if value <= 0.0:
-                    value = 1.0
+                value = self._asset_value(p, asset_id)
                 clc_fee_usd += amt * value
             for asset_id, amt in p.fee_ledger_pool.items():
                 if amt <= 1e-12:
                     continue
-                value = p.values.get_value(asset_id)
-                if value <= 0.0:
-                    value = 1.0
+                value = self._asset_value(p, asset_id)
                 pool_fee_usd += amt * value
 
             # For waterfall inflows, use either pool fees or CLC fees (not both).
@@ -3472,9 +3475,7 @@ class SimulationEngine:
             for asset_id, amt in inflow_ledger.items():
                 if amt <= 1e-12:
                     continue
-                value = p.values.get_value(asset_id)
-                if value <= 0.0:
-                    value = 1.0
+                value = self._asset_value(p, asset_id)
                 amounts[asset_id] = amounts.get(asset_id, 0.0) + amt
                 value_totals[asset_id] = value_totals.get(asset_id, 0.0) + amt * value
 
@@ -3485,7 +3486,7 @@ class SimulationEngine:
             for asset_id, amt in self._waterfall_external_inflows.items():
                 if amt <= 1e-12:
                     continue
-                value = 1.0
+                value = self._default_asset_value(asset_id)
                 if asset_id != stable_id and self.clc_pool_id and self.clc_pool_id in self.pools:
                     v = self.pools[self.clc_pool_id].values.get_value(asset_id)
                     if v > 0.0:
@@ -4531,9 +4532,7 @@ class SimulationEngine:
                 max_cap = cap
             available_stable = pool.vault.get(stable_id) - pool.policy.min_stable_reserve
             if available_stable > 1e-9:
-                value = pool.values.get_value(voucher_id)
-                if value <= 0.0:
-                    value = 1.0
+                value = self._asset_value(pool, voucher_id)
                 max_amount = available_stable / value
                 if max_amount > max_by_stable:
                     max_by_stable = max_amount
@@ -4886,7 +4885,7 @@ class SimulationEngine:
                     debt_outstanding_units += amt
                     value = p.values.get_value(asset_id)
                     if value <= 0.0:
-                        value = 1.0
+                        value = self._default_asset_value(asset_id)
                     debt_outstanding_usd += amt * value
 
             redeemed_total = 0.0
@@ -4903,7 +4902,7 @@ class SimulationEngine:
                 if issuer_pool is not None:
                     value = issuer_pool.values.get_value(agent.voucher_spec.voucher_id)
                 if value <= 0.0:
-                    value = 1.0
+                    value = self._default_asset_value(agent.voucher_spec.voucher_id)
                 outstanding_value_usd += outstanding * value
 
             repayment_volume_usd = 0.0

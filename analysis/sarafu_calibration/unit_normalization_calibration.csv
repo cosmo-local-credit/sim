@@ -1,0 +1,7 @@
+metric,value,denominator,period,source,claim_boundary
+kes_per_usd,130.376678,3285,2024-04-17 to 2026-05-14,successful_kes_usd_pool_swaps,KES/KSh voucher amounts are converted to USD-equivalent for bond accounting only; voucher settlement and motif shares remain local-unit phenomena.
+kes_per_usd_simple_average,130.122009,3285,2024-04-17 to 2026-05-14,successful_kes_usd_pool_swaps,Unweighted average from successful KES/USD pool swaps.
+kes_per_usd_median,129.648241,3285,2024-04-17 to 2026-05-14,successful_kes_usd_pool_swaps,Median observed KES/USD pool-swap conversion.
+kes_per_usd_p05,127.000004,3285,2024-04-17 to 2026-05-14,successful_kes_usd_pool_swaps,Lower-tail observed pool-swap conversion diagnostic.
+kes_per_usd_p95,133.487437,3285,2024-04-17 to 2026-05-14,successful_kes_usd_pool_swaps,Upper-tail observed pool-swap conversion diagnostic.
+individual_voucher_kes_value_default,1.000000,,2024-04-17 to 2026-05-14,Sarafu individual voucher convention,Simulator individual vouchers are treated as 1 voucher = 1 KSh.
