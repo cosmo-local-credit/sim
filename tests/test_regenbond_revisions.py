@@ -52,6 +52,52 @@ class RegenBondRevisionTests(unittest.TestCase):
 
         self.assertAlmostEqual(engine._lender_voucher_cap(voucher_id, lender_pool), 500.0)
 
+    def test_producer_loan_diagnostics_capture_live_limit_clipping(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_deposits_enabled=True,
+                swap_size_min_usd=100.0,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        producer_pool.values.set_value(voucher_id, 1.0)
+        lender_pool.list_asset_with_value_and_limit(voucher_id, value=1.0, window_len=10, cap_in=5.0)
+        lender_pool.policy.min_stable_reserve = 0.0
+        engine._producer_deposit_value_by_voucher[voucher_id] = 1000.0
+        engine._vault_add(producer_pool, voucher_id, 200.0, "test_seed", "test")
+        engine._vault_add(lender_pool, stable_id, 1000.0, "test_seed", "test")
+        engine.tick = 1
+
+        attempted = engine._attempt_new_loan(producer_pool, voucher_id)
+
+        self.assertTrue(attempted)
+        self.assertEqual(engine._producer_loan_attempts_tick, 1)
+        self.assertAlmostEqual(engine._producer_loan_lender_remaining_cap_usd_tick, 5.0)
+        self.assertGreater(engine._producer_loan_clipped_lender_remaining_usd_tick, 0.0)
+        self.assertLessEqual(engine._producer_loan_attempted_usd_tick, 5.0 + 1e-9)
+
+    def test_snapshot_reports_lender_stable_available_above_reserve(self):
+        engine = SimulationEngine(small_config())
+        stable_id = engine.cfg.stable_symbol
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        current_stable = lender_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(lender_pool, stable_id, current_stable, "test_clear", "test")
+        lender_pool.policy.min_stable_reserve = 25.0
+        engine._vault_add(lender_pool, stable_id, 100.0, "test_seed", "test")
+        engine.tick = 1
+
+        engine.snapshot_metrics(force_network=True)
+        latest = engine.metrics.network_rows[-1]
+
+        self.assertAlmostEqual(latest["lender_stable_total_usd"], 100.0)
+        self.assertAlmostEqual(latest["lender_stable_reserve_usd"], 25.0)
+        self.assertAlmostEqual(latest["lender_stable_available_above_reserve_usd"], 75.0)
+
     def test_voucher_unit_value_prices_one_ksh_voucher_against_usd_stable(self):
         engine = SimulationEngine(small_config(kes_per_usd=128.0, voucher_unit_value_usd=1.0 / 128.0))
         producer = next(agent for agent in engine.agents.values() if agent.role == "producer")

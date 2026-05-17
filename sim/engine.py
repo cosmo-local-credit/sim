@@ -167,6 +167,25 @@ class SimulationEngine:
         self._producer_debt_defaulted_usd_total: float = 0.0
         self._producer_debt_closed_by_circulation_usd_tick: float = 0.0
         self._producer_debt_closed_by_circulation_usd_total: float = 0.0
+        self._producer_loan_attempts_tick: int = 0
+        self._producer_loan_no_lender_tick: int = 0
+        self._producer_loan_no_inventory_tick: int = 0
+        self._producer_loan_zero_amount_tick: int = 0
+        self._producer_loan_route_found_tick: int = 0
+        self._producer_loan_route_failed_tick: int = 0
+        self._producer_loan_executed_tick: int = 0
+        self._producer_loan_execution_failed_tick: int = 0
+        self._producer_loan_sampled_usd_tick: float = 0.0
+        self._producer_loan_attempted_usd_tick: float = 0.0
+        self._producer_loan_executed_usd_tick: float = 0.0
+        self._producer_loan_clipped_inventory_usd_tick: float = 0.0
+        self._producer_loan_clipped_lender_cap_usd_tick: float = 0.0
+        self._producer_loan_clipped_lender_remaining_usd_tick: float = 0.0
+        self._producer_loan_clipped_lender_stable_usd_tick: float = 0.0
+        self._producer_loan_clipped_combined_lender_usd_tick: float = 0.0
+        self._producer_loan_lender_collateral_cap_usd_tick: float = 0.0
+        self._producer_loan_lender_remaining_cap_usd_tick: float = 0.0
+        self._producer_loan_lender_stable_available_usd_tick: float = 0.0
         self._fee_conversion_attempted_usd_tick: float = 0.0
         self._fee_conversion_success_usd_tick: float = 0.0
         self._fee_conversion_failed_usd_tick: float = 0.0
@@ -4700,6 +4719,25 @@ class SimulationEngine:
             self._producer_debt_repaid_usd_tick = 0.0
             self._producer_debt_defaulted_usd_tick = 0.0
             self._producer_debt_closed_by_circulation_usd_tick = 0.0
+            self._producer_loan_attempts_tick = 0
+            self._producer_loan_no_lender_tick = 0
+            self._producer_loan_no_inventory_tick = 0
+            self._producer_loan_zero_amount_tick = 0
+            self._producer_loan_route_found_tick = 0
+            self._producer_loan_route_failed_tick = 0
+            self._producer_loan_executed_tick = 0
+            self._producer_loan_execution_failed_tick = 0
+            self._producer_loan_sampled_usd_tick = 0.0
+            self._producer_loan_attempted_usd_tick = 0.0
+            self._producer_loan_executed_usd_tick = 0.0
+            self._producer_loan_clipped_inventory_usd_tick = 0.0
+            self._producer_loan_clipped_lender_cap_usd_tick = 0.0
+            self._producer_loan_clipped_lender_remaining_usd_tick = 0.0
+            self._producer_loan_clipped_lender_stable_usd_tick = 0.0
+            self._producer_loan_clipped_combined_lender_usd_tick = 0.0
+            self._producer_loan_lender_collateral_cap_usd_tick = 0.0
+            self._producer_loan_lender_remaining_cap_usd_tick = 0.0
+            self._producer_loan_lender_stable_available_usd_tick = 0.0
             self._fee_conversion_attempted_usd_tick = 0.0
             self._fee_conversion_success_usd_tick = 0.0
             self._fee_conversion_failed_usd_tick = 0.0
@@ -5132,6 +5170,7 @@ class SimulationEngine:
         return debt
 
     def _attempt_new_loan(self, source_pool: "Pool", voucher_id: str) -> bool:
+        self._producer_loan_attempts_tick += 1
         lenders = {
             pid for pid, p in self.pools.items()
             if p.policy.role == "lender"
@@ -5139,19 +5178,27 @@ class SimulationEngine:
             and p.registry.is_listed(voucher_id)
         }
         if not lenders:
+            self._producer_loan_no_lender_tick += 1
             return False
 
+        value = self._asset_value(source_pool, voucher_id)
         amount_in = self._sample_amount_in(source_pool, voucher_id)
+        self._producer_loan_sampled_usd_tick += amount_in * value
         have = source_pool.vault.get(voucher_id)
         if have <= 1e-9:
+            self._producer_loan_no_inventory_tick += 1
             return False
-        if amount_in <= 1e-9:
+        if amount_in <= 1e-9 or value <= 1e-12:
+            self._producer_loan_zero_amount_tick += 1
             return False
         if amount_in > have:
+            self._producer_loan_clipped_inventory_usd_tick += (amount_in - have) * value
             amount_in = have
 
         max_cap = 0.0
+        max_remaining = 0.0
         max_by_stable = 0.0
+        max_borrowable = 0.0
         stable_id = self.cfg.stable_symbol
         for pid in lenders:
             pool = self.pools.get(pid)
@@ -5160,18 +5207,49 @@ class SimulationEngine:
             cap = self._lender_voucher_cap(voucher_id, lender_pool=pool)
             if cap > max_cap:
                 max_cap = cap
+            if pool.policy.limits_enabled:
+                remaining = pool.limiter.remaining(self.tick, voucher_id)
+            else:
+                remaining = math.inf
+            finite_remaining = remaining if math.isfinite(remaining) else cap
+            if finite_remaining > max_remaining:
+                max_remaining = finite_remaining
             available_stable = pool.vault.get(stable_id) - pool.policy.min_stable_reserve
+            stable_limited_amount = 0.0
             if available_stable > 1e-9:
-                value = self._asset_value(pool, voucher_id)
-                max_amount = available_stable / value
-                if max_amount > max_by_stable:
-                    max_by_stable = max_amount
+                lender_value = self._asset_value(pool, voucher_id)
+                if lender_value <= 1e-12:
+                    lender_value = value
+                stable_limited_amount = available_stable / lender_value
+                if stable_limited_amount > max_by_stable:
+                    max_by_stable = stable_limited_amount
+            lender_borrowable = min(max(0.0, cap), max(0.0, finite_remaining), max(0.0, stable_limited_amount))
+            if lender_borrowable > max_borrowable:
+                max_borrowable = lender_borrowable
+
+        self._producer_loan_lender_collateral_cap_usd_tick += max_cap * value
+        self._producer_loan_lender_remaining_cap_usd_tick += max_remaining * value
+        self._producer_loan_lender_stable_available_usd_tick += max_by_stable * value
         if max_cap > 1e-9 and amount_in > max_cap:
+            self._producer_loan_clipped_lender_cap_usd_tick += (amount_in - max_cap) * value
             amount_in = max_cap
+        if max_remaining > 1e-9 and amount_in > max_remaining:
+            self._producer_loan_clipped_lender_remaining_usd_tick += (amount_in - max_remaining) * value
+            amount_in = max_remaining
         if max_by_stable > 1e-9 and amount_in > max_by_stable:
+            self._producer_loan_clipped_lender_stable_usd_tick += (amount_in - max_by_stable) * value
             amount_in = max_by_stable
-        if amount_in <= 1e-9:
+        if max_borrowable <= 1e-9:
+            self._producer_loan_clipped_combined_lender_usd_tick += amount_in * value
+            self._producer_loan_zero_amount_tick += 1
             return False
+        if amount_in > max_borrowable:
+            self._producer_loan_clipped_combined_lender_usd_tick += (amount_in - max_borrowable) * value
+            amount_in = max_borrowable
+        if amount_in <= 1e-9:
+            self._producer_loan_zero_amount_tick += 1
+            return False
+        self._producer_loan_attempted_usd_tick += amount_in * value
 
         buddy_pools = None
         if bool(self.cfg.affinity_buddy_direct_only):
@@ -5193,14 +5271,19 @@ class SimulationEngine:
                 self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
                                    meta={"hops": [h.__dict__ for h in plan.hops],
                                          "target": asset_out, "borrow": True, "buddy_direct": True}))
+                self._producer_loan_route_found_tick += 1
                 ok = self.execute_route_from_pool(source_pool.pool_id, plan, amount_used)
                 self._record_swap_attempt(source_pool.pool_id, success=ok)
                 if ok:
                     amount_usd = amount_used * self._asset_value(source_pool, voucher_id)
+                    self._producer_loan_executed_tick += 1
+                    self._producer_loan_executed_usd_tick += amount_usd
                     self._schedule_productive_credit_inflow(source_pool.pool_id, amount_usd, voucher_id)
                     self.log.add(Event(self.tick, "LOAN_ISSUED", pool_id=source_pool.pool_id,
                                        asset_id=self.cfg.stable_symbol, amount=amount_usd,
                                        meta={"asset_in": voucher_id, "amount_in": amount_used}))
+                else:
+                    self._producer_loan_execution_failed_tick += 1
                 return True
 
         self.log.add(Event(self.tick, "ROUTE_REQUESTED", pool_id=source_pool.pool_id,
@@ -5224,20 +5307,26 @@ class SimulationEngine:
             self.log.add(Event(self.tick, "ROUTE_FAILED", pool_id=source_pool.pool_id,
                                asset_id=voucher_id, amount=amount_used,
                                meta={"reason": plan.reason, "target": self.cfg.stable_symbol, "borrow": True}))
+            self._producer_loan_route_failed_tick += 1
             self._record_swap_attempt(source_pool.pool_id, success=False)
             return True
 
         self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
                            meta={"hops": [h.__dict__ for h in plan.hops],
                                  "target": self.cfg.stable_symbol, "borrow": True}))
+        self._producer_loan_route_found_tick += 1
         ok = self.execute_route_from_pool(source_pool.pool_id, plan, amount_used)
         self._record_swap_attempt(source_pool.pool_id, success=ok)
         if ok:
             amount_usd = amount_used * self._asset_value(source_pool, voucher_id)
+            self._producer_loan_executed_tick += 1
+            self._producer_loan_executed_usd_tick += amount_usd
             self._schedule_productive_credit_inflow(source_pool.pool_id, amount_usd, voucher_id)
             self.log.add(Event(self.tick, "LOAN_ISSUED", pool_id=source_pool.pool_id,
                                asset_id=self.cfg.stable_symbol, amount=amount_usd,
                                meta={"asset_in": voucher_id, "amount_in": amount_used}))
+        else:
+            self._producer_loan_execution_failed_tick += 1
         return True
 
     def execute_route_from_pool(self, source_pool_id: str, plan: RoutePlan, amount_in: float) -> bool:
@@ -5708,6 +5797,17 @@ class SimulationEngine:
                 if obligation.remaining_voucher_units > 1e-9
             )
             producer_debt_active_usd = self._producer_debt_active_usd()
+            lender_stable_total_usd = 0.0
+            lender_stable_reserve_usd = 0.0
+            lender_stable_available_above_reserve_usd = 0.0
+            for pool in self.pools.values():
+                if pool.policy.system_pool or pool.policy.role != "lender":
+                    continue
+                stable_units = pool.vault.get(cfg.stable_symbol)
+                reserve_units = max(0.0, pool.policy.min_stable_reserve)
+                lender_stable_total_usd += stable_units
+                lender_stable_reserve_usd += reserve_units
+                lender_stable_available_above_reserve_usd += max(0.0, stable_units - reserve_units)
             self.metrics.add_network({
                 "tick": self.tick,
                 "num_pools": num_active,
@@ -5740,6 +5840,46 @@ class SimulationEngine:
                 "productive_credit_inflow_usd_total": float(self._productive_credit_inflow_usd_total),
                 "producer_debt_active_obligations": int(producer_debt_active_count),
                 "producer_debt_active_usd": float(producer_debt_active_usd),
+                "lender_stable_total_usd": float(lender_stable_total_usd),
+                "lender_stable_reserve_usd": float(lender_stable_reserve_usd),
+                "lender_stable_available_above_reserve_usd": float(
+                    lender_stable_available_above_reserve_usd
+                ),
+                "producer_loan_attempts_tick": int(self._producer_loan_attempts_tick),
+                "producer_loan_no_lender_tick": int(self._producer_loan_no_lender_tick),
+                "producer_loan_no_inventory_tick": int(self._producer_loan_no_inventory_tick),
+                "producer_loan_zero_amount_tick": int(self._producer_loan_zero_amount_tick),
+                "producer_loan_route_found_tick": int(self._producer_loan_route_found_tick),
+                "producer_loan_route_failed_tick": int(self._producer_loan_route_failed_tick),
+                "producer_loan_executed_tick": int(self._producer_loan_executed_tick),
+                "producer_loan_execution_failed_tick": int(self._producer_loan_execution_failed_tick),
+                "producer_loan_sampled_usd_tick": float(self._producer_loan_sampled_usd_tick),
+                "producer_loan_attempted_usd_tick": float(self._producer_loan_attempted_usd_tick),
+                "producer_loan_executed_usd_tick": float(self._producer_loan_executed_usd_tick),
+                "producer_loan_clipped_inventory_usd_tick": float(
+                    self._producer_loan_clipped_inventory_usd_tick
+                ),
+                "producer_loan_clipped_lender_cap_usd_tick": float(
+                    self._producer_loan_clipped_lender_cap_usd_tick
+                ),
+                "producer_loan_clipped_lender_remaining_usd_tick": float(
+                    self._producer_loan_clipped_lender_remaining_usd_tick
+                ),
+                "producer_loan_clipped_lender_stable_usd_tick": float(
+                    self._producer_loan_clipped_lender_stable_usd_tick
+                ),
+                "producer_loan_clipped_combined_lender_usd_tick": float(
+                    self._producer_loan_clipped_combined_lender_usd_tick
+                ),
+                "producer_loan_lender_collateral_cap_usd_tick": float(
+                    self._producer_loan_lender_collateral_cap_usd_tick
+                ),
+                "producer_loan_lender_remaining_cap_usd_tick": float(
+                    self._producer_loan_lender_remaining_cap_usd_tick
+                ),
+                "producer_loan_lender_stable_available_usd_tick": float(
+                    self._producer_loan_lender_stable_available_usd_tick
+                ),
                 "producer_debt_matured_usd_tick": float(self._producer_debt_matured_usd_tick),
                 "producer_debt_matured_usd_total": float(self._producer_debt_matured_usd_total),
                 "producer_debt_repaid_usd_tick": float(self._producer_debt_repaid_usd_tick),

@@ -1906,6 +1906,25 @@ def run_one(
             "producer_debt_repaid_usd_tick",
             "producer_debt_defaulted_usd_tick",
             "producer_debt_closed_by_circulation_usd_tick",
+            "producer_loan_attempts_tick",
+            "producer_loan_no_lender_tick",
+            "producer_loan_no_inventory_tick",
+            "producer_loan_zero_amount_tick",
+            "producer_loan_route_found_tick",
+            "producer_loan_route_failed_tick",
+            "producer_loan_executed_tick",
+            "producer_loan_execution_failed_tick",
+            "producer_loan_sampled_usd_tick",
+            "producer_loan_attempted_usd_tick",
+            "producer_loan_executed_usd_tick",
+            "producer_loan_clipped_inventory_usd_tick",
+            "producer_loan_clipped_lender_cap_usd_tick",
+            "producer_loan_clipped_lender_remaining_usd_tick",
+            "producer_loan_clipped_lender_stable_usd_tick",
+            "producer_loan_clipped_combined_lender_usd_tick",
+            "producer_loan_lender_collateral_cap_usd_tick",
+            "producer_loan_lender_remaining_cap_usd_tick",
+            "producer_loan_lender_stable_available_usd_tick",
             "fee_conversion_attempted_usd_tick",
             "fee_conversion_success_usd_tick",
             "fee_conversion_failed_usd_tick",
@@ -2109,6 +2128,85 @@ def run_one(
             "repayment_volume_usd_total": cumulative_float["repayment_volume_usd"],
             "loan_issuance_volume_usd": latest.get("loan_issuance_volume_usd", 0.0),
             "loan_issuance_volume_usd_total": cumulative_float["loan_issuance_volume_usd"],
+            "producer_loan_attempts": latest.get("producer_loan_attempts_tick", 0),
+            "producer_loan_attempts_total": cumulative_float["producer_loan_attempts_tick"],
+            "producer_loan_no_lender": latest.get("producer_loan_no_lender_tick", 0),
+            "producer_loan_no_lender_total": cumulative_float["producer_loan_no_lender_tick"],
+            "producer_loan_no_inventory": latest.get("producer_loan_no_inventory_tick", 0),
+            "producer_loan_no_inventory_total": cumulative_float["producer_loan_no_inventory_tick"],
+            "producer_loan_zero_amount": latest.get("producer_loan_zero_amount_tick", 0),
+            "producer_loan_zero_amount_total": cumulative_float["producer_loan_zero_amount_tick"],
+            "producer_loan_route_found": latest.get("producer_loan_route_found_tick", 0),
+            "producer_loan_route_found_total": cumulative_float["producer_loan_route_found_tick"],
+            "producer_loan_route_failed": latest.get("producer_loan_route_failed_tick", 0),
+            "producer_loan_route_failed_total": cumulative_float["producer_loan_route_failed_tick"],
+            "producer_loan_executed": latest.get("producer_loan_executed_tick", 0),
+            "producer_loan_executed_total": cumulative_float["producer_loan_executed_tick"],
+            "producer_loan_execution_failed": latest.get("producer_loan_execution_failed_tick", 0),
+            "producer_loan_execution_failed_total": cumulative_float[
+                "producer_loan_execution_failed_tick"
+            ],
+            "producer_loan_sampled_usd": latest.get("producer_loan_sampled_usd_tick", 0.0),
+            "producer_loan_sampled_usd_total": cumulative_float["producer_loan_sampled_usd_tick"],
+            "producer_loan_attempted_usd": latest.get("producer_loan_attempted_usd_tick", 0.0),
+            "producer_loan_attempted_usd_total": cumulative_float[
+                "producer_loan_attempted_usd_tick"
+            ],
+            "producer_loan_executed_usd": latest.get("producer_loan_executed_usd_tick", 0.0),
+            "producer_loan_executed_usd_total": cumulative_float["producer_loan_executed_usd_tick"],
+            "producer_loan_clipped_inventory_usd": latest.get(
+                "producer_loan_clipped_inventory_usd_tick", 0.0
+            ),
+            "producer_loan_clipped_inventory_usd_total": cumulative_float[
+                "producer_loan_clipped_inventory_usd_tick"
+            ],
+            "producer_loan_clipped_lender_cap_usd": latest.get(
+                "producer_loan_clipped_lender_cap_usd_tick", 0.0
+            ),
+            "producer_loan_clipped_lender_cap_usd_total": cumulative_float[
+                "producer_loan_clipped_lender_cap_usd_tick"
+            ],
+            "producer_loan_clipped_lender_remaining_usd": latest.get(
+                "producer_loan_clipped_lender_remaining_usd_tick", 0.0
+            ),
+            "producer_loan_clipped_lender_remaining_usd_total": cumulative_float[
+                "producer_loan_clipped_lender_remaining_usd_tick"
+            ],
+            "producer_loan_clipped_lender_stable_usd": latest.get(
+                "producer_loan_clipped_lender_stable_usd_tick", 0.0
+            ),
+            "producer_loan_clipped_lender_stable_usd_total": cumulative_float[
+                "producer_loan_clipped_lender_stable_usd_tick"
+            ],
+            "producer_loan_clipped_combined_lender_usd": latest.get(
+                "producer_loan_clipped_combined_lender_usd_tick", 0.0
+            ),
+            "producer_loan_clipped_combined_lender_usd_total": cumulative_float[
+                "producer_loan_clipped_combined_lender_usd_tick"
+            ],
+            "producer_loan_lender_collateral_cap_usd": latest.get(
+                "producer_loan_lender_collateral_cap_usd_tick", 0.0
+            ),
+            "producer_loan_lender_collateral_cap_usd_total": cumulative_float[
+                "producer_loan_lender_collateral_cap_usd_tick"
+            ],
+            "producer_loan_lender_remaining_cap_usd": latest.get(
+                "producer_loan_lender_remaining_cap_usd_tick", 0.0
+            ),
+            "producer_loan_lender_remaining_cap_usd_total": cumulative_float[
+                "producer_loan_lender_remaining_cap_usd_tick"
+            ],
+            "producer_loan_lender_stable_available_usd": latest.get(
+                "producer_loan_lender_stable_available_usd_tick", 0.0
+            ),
+            "producer_loan_lender_stable_available_usd_total": cumulative_float[
+                "producer_loan_lender_stable_available_usd_tick"
+            ],
+            "lender_stable_total_usd": latest.get("lender_stable_total_usd", 0.0),
+            "lender_stable_reserve_usd": latest.get("lender_stable_reserve_usd", 0.0),
+            "lender_stable_available_above_reserve_usd": latest.get(
+                "lender_stable_available_above_reserve_usd", 0.0
+            ),
             "debt_outstanding_usd": latest.get("debt_outstanding_usd", 0.0),
             "issued_voucher_supply_total": latest.get("issued_voucher_supply_total", 0.0),
             "issuer_returned_voucher_supply_total": latest.get("issuer_returned_voucher_supply_total", 0.0),
@@ -3858,6 +3956,46 @@ def summarize_frontier_cell(
     producer_debt_closed_values = [
         safe_float(row.get("producer_debt_closed_by_circulation_usd_total")) for row in rows
     ]
+    producer_credit_capacity_values = [
+        safe_float(row.get("producer_deposit_credit_capacity_usd")) for row in rows
+    ]
+    loan_issuance_volume_values = [
+        safe_float(row.get("loan_issuance_volume_usd_total")) for row in rows
+    ]
+    loan_issuance_to_capacity_values = [
+        loan / max(1e-9, capacity)
+        for loan, capacity in zip(loan_issuance_volume_values, producer_credit_capacity_values)
+    ]
+    principal_to_credit_capacity_values = [
+        principal / max(1e-9, capacity)
+        for principal, capacity in zip(principal_values, producer_credit_capacity_values)
+    ]
+    producer_loan_attempt_values = [safe_float(row.get("producer_loan_attempts_total")) for row in rows]
+    producer_loan_executed_values = [safe_float(row.get("producer_loan_executed_total")) for row in rows]
+    producer_loan_route_failed_values = [
+        safe_float(row.get("producer_loan_route_failed_total")) for row in rows
+    ]
+    producer_loan_attempted_usd_values = [
+        safe_float(row.get("producer_loan_attempted_usd_total")) for row in rows
+    ]
+    producer_loan_executed_usd_values = [
+        safe_float(row.get("producer_loan_executed_usd_total")) for row in rows
+    ]
+    producer_loan_clipped_lender_cap_values = [
+        safe_float(row.get("producer_loan_clipped_lender_cap_usd_total")) for row in rows
+    ]
+    producer_loan_clipped_lender_remaining_values = [
+        safe_float(row.get("producer_loan_clipped_lender_remaining_usd_total")) for row in rows
+    ]
+    producer_loan_clipped_lender_stable_values = [
+        safe_float(row.get("producer_loan_clipped_lender_stable_usd_total")) for row in rows
+    ]
+    producer_loan_clipped_combined_lender_values = [
+        safe_float(row.get("producer_loan_clipped_combined_lender_usd_total")) for row in rows
+    ]
+    producer_loan_lender_available_stable_values = [
+        safe_float(row.get("lender_stable_available_above_reserve_usd")) for row in rows
+    ]
     v2v_share_values = [
         v2v / max(1e-9, total) for v2v, total in zip(v2v_count_values, transaction_values)
     ]
@@ -3977,6 +4115,30 @@ def summarize_frontier_cell(
         "producer_debt_repaid_usd_total_p50": percentile(producer_debt_repaid_values, 0.50),
         "producer_debt_defaulted_usd_total_p50": percentile(producer_debt_defaulted_values, 0.50),
         "producer_debt_closed_by_circulation_usd_total_p50": percentile(producer_debt_closed_values, 0.50),
+        "producer_deposit_credit_capacity_usd_p50": percentile(producer_credit_capacity_values, 0.50),
+        "loan_issuance_volume_usd_total_p50": percentile(loan_issuance_volume_values, 0.50),
+        "loan_issuance_to_credit_capacity_p50": percentile(loan_issuance_to_capacity_values, 0.50),
+        "bond_principal_to_credit_capacity_p50": percentile(principal_to_credit_capacity_values, 0.50),
+        "producer_loan_attempts_total_p50": percentile(producer_loan_attempt_values, 0.50),
+        "producer_loan_executed_total_p50": percentile(producer_loan_executed_values, 0.50),
+        "producer_loan_route_failed_total_p50": percentile(producer_loan_route_failed_values, 0.50),
+        "producer_loan_attempted_usd_total_p50": percentile(producer_loan_attempted_usd_values, 0.50),
+        "producer_loan_executed_usd_total_p50": percentile(producer_loan_executed_usd_values, 0.50),
+        "producer_loan_clipped_lender_cap_usd_total_p50": percentile(
+            producer_loan_clipped_lender_cap_values, 0.50
+        ),
+        "producer_loan_clipped_lender_remaining_usd_total_p50": percentile(
+            producer_loan_clipped_lender_remaining_values, 0.50
+        ),
+        "producer_loan_clipped_lender_stable_usd_total_p50": percentile(
+            producer_loan_clipped_lender_stable_values, 0.50
+        ),
+        "producer_loan_clipped_combined_lender_usd_total_p50": percentile(
+            producer_loan_clipped_combined_lender_values, 0.50
+        ),
+        "lender_stable_available_above_reserve_usd_p50": percentile(
+            producer_loan_lender_available_stable_values, 0.50
+        ),
         "baseline_route_success_p50": baseline.get("route_success_p50", 0.0),
         "baseline_swap_volume_p50": baseline.get("swap_volume_p50", 0.0),
         "baseline_voucher_to_voucher_count_p50": baseline_v2v_count_p50,
