@@ -122,6 +122,8 @@ class PoolCalibration:
     swaps_per_active_week: float
     total_users: float
     backing_inflow: float
+    backing_cash_inflow: float
+    backing_voucher_inflow: float
     tagged_voucher_tokens: float
     verified_report_exposure: float
     same_token_return_rate: float
@@ -715,6 +717,10 @@ def load_calibration(calibration_dir: Path) -> Calibration:
                 swaps_per_active_week=safe_float(row.get("swaps_per_active_week")),
                 total_users=safe_float(row.get("total_users")),
                 backing_inflow=safe_float(row.get("backing_inflow")),
+                backing_cash_inflow=safe_float(
+                    row.get("backing_cash_inflow", row.get("backing_inflow", 0.0))
+                ),
+                backing_voucher_inflow=safe_float(row.get("backing_voucher_inflow", 0.0)),
                 tagged_voucher_tokens=safe_float(row.get("tagged_voucher_tokens")),
                 verified_report_exposure=safe_float(row.get("verified_report_exposure")),
                 same_token_return_rate=safe_float(row.get("same_token_return_rate")),
@@ -932,7 +938,10 @@ def empirical_tier_targets(calibration: Calibration, ticks: int) -> list[dict[st
                 "cash_return_coverage": calibration.repayment_by_tier_asset.get((tier, "cash"), 0.0),
                 "voucher_return_coverage": calibration.voucher_coverage_by_tier.get(tier, 0.0),
                 "borrow_proxy_closure": calibration.borrow_return_by_tier.get(tier, 0.0),
-                "backing_liquidity_inflow": sum(pool.backing_inflow for pool in pools),
+                "backing_total_inflow": sum(pool.backing_inflow for pool in pools),
+                "backing_liquidity_inflow": sum(pool.backing_cash_inflow for pool in pools),
+                "backing_cash_inflow": sum(pool.backing_cash_inflow for pool in pools),
+                "backing_voucher_inflow": sum(pool.backing_voucher_inflow for pool in pools),
             }
         )
     return rows
@@ -994,7 +1003,12 @@ def apply_network_context(
 def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Calibration, ticks: int, prefix: str) -> None:
     empirical_targets = empirical_tier_targets(calibration, int(ticks))
     empirical_total_swaps = sum(safe_float(row["total_swap_events_horizon"]) for row in empirical_targets)
-    empirical_total_backing = sum(safe_float(row["backing_liquidity_inflow"]) for row in empirical_targets)
+    empirical_total_backing = sum(safe_float(row.get("backing_total_inflow")) for row in empirical_targets)
+    empirical_cash_backing = sum(
+        safe_float(row.get("backing_cash_inflow", row.get("backing_liquidity_inflow")))
+        for row in empirical_targets
+    )
+    empirical_voucher_backing = sum(safe_float(row.get("backing_voucher_inflow")) for row in empirical_targets)
     base_pool_count = max(1, len(calibration.pool_rows))
     swap_floor = int(math.ceil((empirical_total_swaps / max(1, int(ticks))) * 0.90))
     setattr(args, f"_{prefix}_swap_floor_per_tick", swap_floor)
@@ -1004,7 +1018,9 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
     setattr(args, f"_{prefix}_swap_sustain_max_extra_attempts", max(600, int(math.ceil(swap_floor * 1.50))))
     setattr(args, f"_{prefix}_swap_sustain_max_rounds", 2)
     setattr(args, f"_{prefix}_historical_backing_total_usd", empirical_total_backing)
-    setattr(args, f"_{prefix}_backing_shock_per_pool", empirical_total_backing / base_pool_count)
+    setattr(args, f"_{prefix}_historical_cash_backing_total_usd", empirical_cash_backing)
+    setattr(args, f"_{prefix}_historical_voucher_backing_total_usd", empirical_voucher_backing)
+    setattr(args, f"_{prefix}_backing_shock_per_pool", empirical_cash_backing / base_pool_count)
     stable_deposit_rate = 0.0
     voucher_deposit_rate = 0.0
     productive_return_rate = 0.0
@@ -1240,10 +1256,14 @@ def scenario_config(
             cfg.p_offer_overlap = min(0.95, cfg.p_offer_overlap + 0.06 * math.log2(factor))
             cfg.p_want_overlap = min(0.97, cfg.p_want_overlap + 0.04 * math.log2(factor))
             cfg.desired_assets_growth_per_asset = min(0.50, cfg.desired_assets_growth_per_asset + 0.05 * math.log2(factor))
-        historical_backing_total = float(getattr(args, "_frontier_historical_backing_total_usd", 0.0))
-        if historical_backing_total > 0.0:
+        historical_cash_backing_total = float(
+            getattr(args, "_frontier_historical_cash_backing_total_usd", 0.0)
+        )
+        if historical_cash_backing_total > 0.0:
             cfg.stable_shock_tick = 1
-            cfg.stable_shock_amount = (historical_backing_total * factor) / max(1, int(cfg.max_pools or 1))
+            cfg.stable_shock_amount = (
+                historical_cash_backing_total * factor
+            ) / max(1, int(cfg.max_pools or 1))
         cfg.calibration_profile = "bond_issuer_frontier"
     elif scenario == "stress_weak_pool_repayment":
         cfg.initial_liquidity_providers = 1

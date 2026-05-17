@@ -41,6 +41,8 @@ POOL_COLUMNS = (
     "swaps_per_active_week",
     "total_users",
     "backing_inflow",
+    "backing_cash_inflow",
+    "backing_voucher_inflow",
     "tagged_voucher_tokens",
     "verified_report_exposure",
     "approved_report_exposure",
@@ -96,12 +98,19 @@ The per-pool calibration file is anonymized into synthetic template rows. It
 does not include raw transactions, addresses, report text, pool labels, or pool
 IDs. The simulator uses these templates only for tier mix, activity rates,
 repayment/return priors, backing-liquidity scale, and impact-report exposure.
+The paper calibration cohort is Kenyan KSh/KES individual voucher pools:
+cash/stable tokens and KSh/KES-denominated individual vouchers are retained,
+while USD/non-KSh/global voucher systems are excluded from the public paper
+cohort or handled separately in private review files.
 The settlement reliability anchor file adds aggregate ROLA-like voucher
 circulation, ROSCA-like stable-credit, same-token return, submitted-swap
 execution, and current cluster-topology metrics. The unit-normalization file
 records how KES/KSh voucher obligations are converted to USD-equivalent for
 bond-accounting columns, using successful KES/USD pool swaps and the current
 simulator convention that individual voucher units are 1 voucher = 1 KSh.
+Pool backing is split into cash/stable backing and KSh/KES voucher backing so
+cash injections can be calibrated separately from voucher-denominated credit
+capacity.
 The voucher circulation
 baseline file records the same motifs over the pool era and recent trailing
 windows. The stable dependency anchor file records stable/cash flow shares,

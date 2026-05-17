@@ -1,5 +1,5 @@
 metric,value,denominator,claim_boundary
-stable_to_voucher_purchase_events,606,,"Stable-to-voucher swaps are debt-removal purchase proxies, not verified household intent."
-stable_to_voucher_purchase_cash_value,77954.521158,,Cash/stable input value in debt-removal purchase motifs.
-voucher_obligation_removed_proxy_value,1025239.417786,,Voucher output value acquired in stable-to-voucher debt-removal motifs.
-purchase_proxy_later_return_rate,0.450495,606,Later issuer returns support settlement closure but do not prove welfare outcomes.
+stable_to_voucher_purchase_events,518,,"Stable-to-voucher swaps are debt-removal purchase proxies, not verified household intent."
+stable_to_voucher_purchase_cash_value,20062.682278,,Cash/stable input value in debt-removal purchase motifs.
+voucher_obligation_removed_proxy_value,35623.402311,,Voucher output value acquired in stable-to-voucher debt-removal motifs.
+purchase_proxy_later_return_rate,0.416988,518,Later issuer returns support settlement closure but do not prove welfare outcomes.

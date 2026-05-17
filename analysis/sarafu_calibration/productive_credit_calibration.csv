@@ -1,2 +1,2 @@
 tier,borrow_proxy_events,borrow_proxy_events_with_later_return,productive_credit_return_rate,productive_credit_lag_ticks_p50,productive_credit_lag_ticks_p90,claim_boundary
-all,3311,1484,0.448203,2.142857,11.671429,Productive-credit timing is inferred from borrow-proxy later issuer returns; it is not causal proof of business growth.
+all,2679,1294,0.483016,1.857143,9.0,Productive-credit timing is inferred from borrow-proxy later issuer returns; it is not causal proof of business growth.

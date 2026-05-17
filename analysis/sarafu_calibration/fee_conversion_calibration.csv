@@ -1,3 +1,3 @@
 metric,value,denominator,claim_boundary
-voucher_to_stable_conversion_value_ratio,0.160071,2172968.827715,"Uses observed voucher-to-stable swap value as an upper-bound conversion anchor, not guaranteed fee liquidity."
-voucher_fee_conversion_success_prior,0.160071,2172968.827715,Scenario prior for voucher-denominated fee conversion stress tests.
+voucher_to_stable_conversion_value_ratio,0.904561,76418.317715,"Uses observed voucher-to-stable swap value as an upper-bound conversion anchor, not guaranteed fee liquidity."
+voucher_fee_conversion_success_prior,0.904561,76418.317715,Scenario prior for voucher-denominated fee conversion stress tests.
