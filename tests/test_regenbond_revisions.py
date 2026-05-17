@@ -134,6 +134,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.bond_gross_principal_usd, 1000.0)
         self.assertAlmostEqual(cfg.bond_deployed_principal_usd, 1000.0)
         self.assertAlmostEqual(cfg.issuer_reserve_share, 0.0)
+        self.assertAlmostEqual(cfg.producer_debt_maturity_recovery_rate, 1.0)
         self.assertEqual(cfg.max_pools, 9)
 
         engine = SimulationEngine(cfg, seed=7)
@@ -426,7 +427,11 @@ class RegenBondRevisionTests(unittest.TestCase):
 
         self.assertAlmostEqual(lender_pool.vault.get(stable_id) - lender_stable_before, 50.0)
         self.assertAlmostEqual(engine._lender_recovered_stable_by_pool[lender_pool.pool_id], 50.0)
+        self.assertAlmostEqual(engine._lender_recovered_stable_usd_total, 50.0)
+        self.assertAlmostEqual(engine._lender_recovered_stable_borrower_maturity_usd_total, 50.0)
         self.assertAlmostEqual(engine._producer_debt_repaid_usd_total, 50.0)
+        self.assertAlmostEqual(engine._producer_debt_repaid_maturity_usd_total, 50.0)
+        self.assertAlmostEqual(engine._producer_debt_stable_recovered_usd_total, 50.0)
         self.assertAlmostEqual(engine._producer_debt_defaulted_usd_total, 0.0)
         self.assertEqual(len(engine._producer_debt_obligations), 0)
 
@@ -489,6 +494,57 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(reduced, 40.0)
         self.assertAlmostEqual(engine._producer_debt_obligations[0].remaining_voucher_units, 60.0)
         self.assertAlmostEqual(engine._producer_debt_closed_by_circulation_usd_total, 40.0)
+
+    def test_producer_debt_reduction_splits_stable_and_circulation_paths(self):
+        engine = SimulationEngine(small_config(producer_debt_maturity_enabled=True))
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        lender_pool.values.set_value(voucher_id, 1.0)
+        engine.tick = 1
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+        )
+
+        borrower_units = engine._reduce_producer_debt_obligations(
+            lender_pool.pool_id,
+            voucher_id,
+            40.0,
+            "borrower_stable_repayment",
+            source_pool_id=producer_pool.pool_id,
+            source_role="producer",
+        )
+        consumer_units = engine._reduce_producer_debt_obligations(
+            lender_pool.pool_id,
+            voucher_id,
+            25.0,
+            "consumer_stable_purchase",
+            source_pool_id="consumer:test",
+            source_role="consumer",
+        )
+        voucher_swap_units = engine._reduce_producer_debt_obligations(
+            lender_pool.pool_id,
+            voucher_id,
+            10.0,
+            "producer_voucher_swap_out",
+            source_pool_id="producer:other",
+            source_role="producer",
+        )
+
+        self.assertAlmostEqual(borrower_units, 40.0)
+        self.assertAlmostEqual(consumer_units, 25.0)
+        self.assertAlmostEqual(voucher_swap_units, 10.0)
+        self.assertAlmostEqual(engine._producer_debt_repaid_usd_total, 40.0)
+        self.assertAlmostEqual(engine._producer_debt_repaid_regular_usd_total, 40.0)
+        self.assertAlmostEqual(engine._producer_debt_stable_recovered_usd_total, 65.0)
+        self.assertAlmostEqual(engine._producer_debt_consumer_stable_purchase_usd_total, 25.0)
+        self.assertAlmostEqual(engine._producer_debt_closed_by_voucher_swap_usd_total, 10.0)
+        self.assertAlmostEqual(engine._producer_debt_closed_by_circulation_usd_total, 10.0)
 
     def test_route_metrics_separate_fixed_and_substituted_attempts(self):
         engine = SimulationEngine(small_config())

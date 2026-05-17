@@ -1282,19 +1282,7 @@ def scenario_config(
         )
         cfg.producer_debt_maturity_enabled = True
         cfg.producer_debt_maturity_ticks = max(1, int(getattr(args, "issuer_payment_stride", 13)))
-        cfg.producer_debt_maturity_recovery_rate = max(
-            0.0,
-            min(
-                1.0,
-                float(
-                    getattr(
-                        args,
-                        "_frontier_producer_debt_maturity_recovery_rate",
-                        cfg.productive_credit_return_rate,
-                    )
-                ),
-            ),
-        )
+        cfg.producer_debt_maturity_recovery_rate = 1.0
         cfg.producer_debt_maturity_preserve_reserve = True
         cfg.loan_term_weeks = cfg.producer_debt_maturity_ticks
         cfg.voucher_fee_conversion_enabled = True
@@ -1905,6 +1893,12 @@ def run_one(
             "swap_count_vchr_to_vchr_tick",
             "repayment_volume_usd",
             "loan_issuance_volume_usd",
+            "lender_recovered_stable_usd_tick",
+            "lender_recovered_stable_borrower_regular_usd_tick",
+            "lender_recovered_stable_borrower_maturity_usd_tick",
+            "lender_recovered_stable_consumer_purchase_usd_tick",
+            "lender_recovered_stable_third_party_purchase_usd_tick",
+            "lender_recovered_stable_other_usd_tick",
             "stable_onramp_usd_tick",
             "stable_offramp_usd_tick",
             "producer_deposit_stable_usd_tick",
@@ -1912,8 +1906,15 @@ def run_one(
             "productive_credit_inflow_usd_tick",
             "producer_debt_matured_usd_tick",
             "producer_debt_repaid_usd_tick",
+            "producer_debt_repaid_regular_usd_tick",
+            "producer_debt_repaid_maturity_usd_tick",
+            "producer_debt_stable_recovered_usd_tick",
+            "producer_debt_consumer_stable_purchase_usd_tick",
+            "producer_debt_third_party_stable_purchase_usd_tick",
             "producer_debt_defaulted_usd_tick",
             "producer_debt_closed_by_circulation_usd_tick",
+            "producer_debt_closed_by_voucher_swap_usd_tick",
+            "producer_debt_closed_not_held_at_maturity_usd_tick",
             "producer_loan_attempts_tick",
             "producer_loan_no_lender_tick",
             "producer_loan_no_inventory_tick",
@@ -2215,6 +2216,40 @@ def run_one(
             "lender_stable_available_above_reserve_usd": latest.get(
                 "lender_stable_available_above_reserve_usd", 0.0
             ),
+            "lender_recovered_stable_usd": latest.get("lender_recovered_stable_usd_tick", 0.0),
+            "lender_recovered_stable_usd_total": cumulative_float[
+                "lender_recovered_stable_usd_tick"
+            ],
+            "lender_recovered_stable_borrower_regular_usd": latest.get(
+                "lender_recovered_stable_borrower_regular_usd_tick", 0.0
+            ),
+            "lender_recovered_stable_borrower_regular_usd_total": cumulative_float[
+                "lender_recovered_stable_borrower_regular_usd_tick"
+            ],
+            "lender_recovered_stable_borrower_maturity_usd": latest.get(
+                "lender_recovered_stable_borrower_maturity_usd_tick", 0.0
+            ),
+            "lender_recovered_stable_borrower_maturity_usd_total": cumulative_float[
+                "lender_recovered_stable_borrower_maturity_usd_tick"
+            ],
+            "lender_recovered_stable_consumer_purchase_usd": latest.get(
+                "lender_recovered_stable_consumer_purchase_usd_tick", 0.0
+            ),
+            "lender_recovered_stable_consumer_purchase_usd_total": cumulative_float[
+                "lender_recovered_stable_consumer_purchase_usd_tick"
+            ],
+            "lender_recovered_stable_third_party_purchase_usd": latest.get(
+                "lender_recovered_stable_third_party_purchase_usd_tick", 0.0
+            ),
+            "lender_recovered_stable_third_party_purchase_usd_total": cumulative_float[
+                "lender_recovered_stable_third_party_purchase_usd_tick"
+            ],
+            "lender_recovered_stable_other_usd": latest.get(
+                "lender_recovered_stable_other_usd_tick", 0.0
+            ),
+            "lender_recovered_stable_other_usd_total": cumulative_float[
+                "lender_recovered_stable_other_usd_tick"
+            ],
             "debt_outstanding_usd": latest.get("debt_outstanding_usd", 0.0),
             "issued_voucher_supply_total": latest.get("issued_voucher_supply_total", 0.0),
             "issuer_returned_voucher_supply_total": latest.get("issuer_returned_voucher_supply_total", 0.0),
@@ -2232,6 +2267,36 @@ def run_one(
             "producer_debt_matured_usd_total": cumulative_float["producer_debt_matured_usd_tick"],
             "producer_debt_repaid_usd": latest.get("producer_debt_repaid_usd_tick", 0.0),
             "producer_debt_repaid_usd_total": cumulative_float["producer_debt_repaid_usd_tick"],
+            "producer_debt_repaid_regular_usd": latest.get(
+                "producer_debt_repaid_regular_usd_tick", 0.0
+            ),
+            "producer_debt_repaid_regular_usd_total": cumulative_float[
+                "producer_debt_repaid_regular_usd_tick"
+            ],
+            "producer_debt_repaid_maturity_usd": latest.get(
+                "producer_debt_repaid_maturity_usd_tick", 0.0
+            ),
+            "producer_debt_repaid_maturity_usd_total": cumulative_float[
+                "producer_debt_repaid_maturity_usd_tick"
+            ],
+            "producer_debt_stable_recovered_usd": latest.get(
+                "producer_debt_stable_recovered_usd_tick", 0.0
+            ),
+            "producer_debt_stable_recovered_usd_total": cumulative_float[
+                "producer_debt_stable_recovered_usd_tick"
+            ],
+            "producer_debt_consumer_stable_purchase_usd": latest.get(
+                "producer_debt_consumer_stable_purchase_usd_tick", 0.0
+            ),
+            "producer_debt_consumer_stable_purchase_usd_total": cumulative_float[
+                "producer_debt_consumer_stable_purchase_usd_tick"
+            ],
+            "producer_debt_third_party_stable_purchase_usd": latest.get(
+                "producer_debt_third_party_stable_purchase_usd_tick", 0.0
+            ),
+            "producer_debt_third_party_stable_purchase_usd_total": cumulative_float[
+                "producer_debt_third_party_stable_purchase_usd_tick"
+            ],
             "producer_debt_defaulted_usd": latest.get("producer_debt_defaulted_usd_tick", 0.0),
             "producer_debt_defaulted_usd_total": cumulative_float["producer_debt_defaulted_usd_tick"],
             "producer_debt_closed_by_circulation_usd": latest.get(
@@ -2239,6 +2304,18 @@ def run_one(
             ),
             "producer_debt_closed_by_circulation_usd_total": cumulative_float[
                 "producer_debt_closed_by_circulation_usd_tick"
+            ],
+            "producer_debt_closed_by_voucher_swap_usd": latest.get(
+                "producer_debt_closed_by_voucher_swap_usd_tick", 0.0
+            ),
+            "producer_debt_closed_by_voucher_swap_usd_total": cumulative_float[
+                "producer_debt_closed_by_voucher_swap_usd_tick"
+            ],
+            "producer_debt_closed_not_held_at_maturity_usd": latest.get(
+                "producer_debt_closed_not_held_at_maturity_usd_tick", 0.0
+            ),
+            "producer_debt_closed_not_held_at_maturity_usd_total": cumulative_float[
+                "producer_debt_closed_not_held_at_maturity_usd_tick"
             ],
             "producer_debt_maturity_recovery_rate": latest.get(
                 "producer_debt_maturity_recovery_rate", 0.0
@@ -2435,6 +2512,23 @@ def run_one(
             "top_impact_activity": max(impact_latest, key=impact_latest.get) if impact_latest else "",
             "top_impact_expected_exposure": max(impact_latest.values()) if impact_latest else 0.0,
             "initial_stable_total": float(getattr(engine, "initial_stable_total", 0.0)),
+            "lender_recovered_stable_by_pool_json": json.dumps(
+                getattr(engine, "_lender_recovered_stable_total_by_pool", {}),
+                sort_keys=True,
+            ),
+            "lender_recovered_stable_pending_by_pool_json": json.dumps(
+                getattr(engine, "_lender_recovered_stable_by_pool", {}),
+                sort_keys=True,
+            ),
+            "lender_recovered_stable_by_pool_reason_json": json.dumps(
+                {
+                    f"{pool_id}|{reason}": amount
+                    for (pool_id, reason), amount in getattr(
+                        engine, "_lender_recovered_stable_total_by_pool_reason", {}
+                    ).items()
+                },
+                sort_keys=True,
+            ),
             **tier_summary_fields,
         },
     }
@@ -3960,9 +4054,30 @@ def summarize_frontier_cell(
     ]
     producer_debt_matured_values = [safe_float(row.get("producer_debt_matured_usd_total")) for row in rows]
     producer_debt_repaid_values = [safe_float(row.get("producer_debt_repaid_usd_total")) for row in rows]
+    producer_debt_repaid_regular_values = [
+        safe_float(row.get("producer_debt_repaid_regular_usd_total")) for row in rows
+    ]
+    producer_debt_repaid_maturity_values = [
+        safe_float(row.get("producer_debt_repaid_maturity_usd_total")) for row in rows
+    ]
+    producer_debt_stable_recovered_values = [
+        safe_float(row.get("producer_debt_stable_recovered_usd_total")) for row in rows
+    ]
+    producer_debt_consumer_stable_purchase_values = [
+        safe_float(row.get("producer_debt_consumer_stable_purchase_usd_total")) for row in rows
+    ]
+    producer_debt_third_party_stable_purchase_values = [
+        safe_float(row.get("producer_debt_third_party_stable_purchase_usd_total")) for row in rows
+    ]
     producer_debt_defaulted_values = [safe_float(row.get("producer_debt_defaulted_usd_total")) for row in rows]
     producer_debt_closed_values = [
         safe_float(row.get("producer_debt_closed_by_circulation_usd_total")) for row in rows
+    ]
+    producer_debt_closed_by_voucher_swap_values = [
+        safe_float(row.get("producer_debt_closed_by_voucher_swap_usd_total")) for row in rows
+    ]
+    producer_debt_closed_not_held_at_maturity_values = [
+        safe_float(row.get("producer_debt_closed_not_held_at_maturity_usd_total")) for row in rows
     ]
     producer_credit_capacity_values = [
         safe_float(row.get("producer_deposit_credit_capacity_usd")) for row in rows
@@ -4003,6 +4118,24 @@ def summarize_frontier_cell(
     ]
     producer_loan_lender_available_stable_values = [
         safe_float(row.get("lender_stable_available_above_reserve_usd")) for row in rows
+    ]
+    lender_recovered_stable_values = [
+        safe_float(row.get("lender_recovered_stable_usd_total")) for row in rows
+    ]
+    lender_recovered_stable_borrower_regular_values = [
+        safe_float(row.get("lender_recovered_stable_borrower_regular_usd_total")) for row in rows
+    ]
+    lender_recovered_stable_borrower_maturity_values = [
+        safe_float(row.get("lender_recovered_stable_borrower_maturity_usd_total")) for row in rows
+    ]
+    lender_recovered_stable_consumer_purchase_values = [
+        safe_float(row.get("lender_recovered_stable_consumer_purchase_usd_total")) for row in rows
+    ]
+    lender_recovered_stable_third_party_purchase_values = [
+        safe_float(row.get("lender_recovered_stable_third_party_purchase_usd_total")) for row in rows
+    ]
+    lender_recovered_stable_other_values = [
+        safe_float(row.get("lender_recovered_stable_other_usd_total")) for row in rows
     ]
     v2v_share_values = [
         v2v / max(1e-9, total) for v2v, total in zip(v2v_count_values, transaction_values)
@@ -4121,8 +4254,29 @@ def summarize_frontier_cell(
         "stable_to_voucher_value_ratio_p50": percentile(stable_to_voucher_ratio_values, 0.50),
         "producer_debt_matured_usd_total_p50": percentile(producer_debt_matured_values, 0.50),
         "producer_debt_repaid_usd_total_p50": percentile(producer_debt_repaid_values, 0.50),
+        "producer_debt_repaid_regular_usd_total_p50": percentile(
+            producer_debt_repaid_regular_values, 0.50
+        ),
+        "producer_debt_repaid_maturity_usd_total_p50": percentile(
+            producer_debt_repaid_maturity_values, 0.50
+        ),
+        "producer_debt_stable_recovered_usd_total_p50": percentile(
+            producer_debt_stable_recovered_values, 0.50
+        ),
+        "producer_debt_consumer_stable_purchase_usd_total_p50": percentile(
+            producer_debt_consumer_stable_purchase_values, 0.50
+        ),
+        "producer_debt_third_party_stable_purchase_usd_total_p50": percentile(
+            producer_debt_third_party_stable_purchase_values, 0.50
+        ),
         "producer_debt_defaulted_usd_total_p50": percentile(producer_debt_defaulted_values, 0.50),
         "producer_debt_closed_by_circulation_usd_total_p50": percentile(producer_debt_closed_values, 0.50),
+        "producer_debt_closed_by_voucher_swap_usd_total_p50": percentile(
+            producer_debt_closed_by_voucher_swap_values, 0.50
+        ),
+        "producer_debt_closed_not_held_at_maturity_usd_total_p50": percentile(
+            producer_debt_closed_not_held_at_maturity_values, 0.50
+        ),
         "producer_deposit_credit_capacity_usd_p50": percentile(producer_credit_capacity_values, 0.50),
         "loan_issuance_volume_usd_total_p50": percentile(loan_issuance_volume_values, 0.50),
         "loan_issuance_to_credit_capacity_p50": percentile(loan_issuance_to_capacity_values, 0.50),
@@ -4146,6 +4300,22 @@ def summarize_frontier_cell(
         ),
         "lender_stable_available_above_reserve_usd_p50": percentile(
             producer_loan_lender_available_stable_values, 0.50
+        ),
+        "lender_recovered_stable_usd_total_p50": percentile(lender_recovered_stable_values, 0.50),
+        "lender_recovered_stable_borrower_regular_usd_total_p50": percentile(
+            lender_recovered_stable_borrower_regular_values, 0.50
+        ),
+        "lender_recovered_stable_borrower_maturity_usd_total_p50": percentile(
+            lender_recovered_stable_borrower_maturity_values, 0.50
+        ),
+        "lender_recovered_stable_consumer_purchase_usd_total_p50": percentile(
+            lender_recovered_stable_consumer_purchase_values, 0.50
+        ),
+        "lender_recovered_stable_third_party_purchase_usd_total_p50": percentile(
+            lender_recovered_stable_third_party_purchase_values, 0.50
+        ),
+        "lender_recovered_stable_other_usd_total_p50": percentile(
+            lender_recovered_stable_other_values, 0.50
         ),
         "baseline_route_success_p50": baseline.get("route_success_p50", 0.0),
         "baseline_swap_volume_p50": baseline.get("swap_volume_p50", 0.0),
