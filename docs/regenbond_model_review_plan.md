@@ -22,6 +22,7 @@ Implemented changes:
 - Updated voucher ledger accounting so net circulating obligation is tracked separately from cumulative issued, returned, and redeemed totals.
 - Added producer deposits of stable and own vouchers, with producer credit capacity based on deposited value using the default `5x` multiple.
 - Added productive-credit stable inflow after producer borrowing, calibrated from aggregate borrow-return timing where available.
+- Added dated producer-debt obligations for frontier runs: producer voucher borrowing creates a maturity record, lender-held vouchers can close through normal circulation, and any remaining obligation at the 13-tick maturity is repaid in stable or written off under the calibrated recovery/default rate.
 - Added routed conversion attempts for voucher-denominated fees, with successful stable conversion entering issuer/CLC service capacity and failures retained as voucher fee inventory.
 - Added quarterly clearing of eligible recovered stable from lender pools, capped by scheduled issuer need and lender surplus.
 - Added route-substitution diagnostics for ordinary purchase/exchange attempts while keeping borrowing, repayment, and fee conversion as fixed-target routes.
@@ -135,7 +136,7 @@ Review tasks:
 
 ### Credit And Repayment
 
-Producer borrowing is modeled as swapping the producer's own voucher for an accepted asset. The creditor pool then holds the producer's obligation. Repayment or closure occurs when the producer voucher leaves the creditor pool through an accepted return asset, acquisition by another participant, issuer return, burn, or redemption proxy.
+Producer borrowing is modeled as swapping the producer's own voucher for an accepted asset. The creditor pool then holds the producer's obligation. Repayment or closure occurs when the producer voucher leaves the creditor pool through an accepted return asset, acquisition by another participant, issuer return, burn, or redemption proxy. In bond-frontier runs this is now explicit: each producer-voucher borrowing event creates a dated obligation, ordinary circulation reduces the obligation before maturity, and unresolved voucher debt at maturity triggers stable repayment from the producer subject to the calibrated recovery rate. Unrecovered units are written off as defaulted producer debt rather than silently remaining as serviceable bond cashflow.
 
 Review tasks:
 
@@ -145,6 +146,7 @@ Review tasks:
 - Model productive credit: a producer loan should be able to increase future producer stable income or productive capacity according to calibrated or explicit scenario assumptions.
 - Model regular producer deposits of stable and vouchers into the producer's pool.
 - Review credit-limit logic so producer borrowing capacity can depend on deposited stable/voucher value, with an explicit proposed multiple of `5x` deposited value.
+- Track `producer_debt_matured`, `producer_debt_repaid`, `producer_debt_defaulted`, and `producer_debt_closed_by_circulation` alongside quarterly clearing so the bond-service channel can be separated into fees, recovered principal, and defaults.
 - Treat consumer voucher purchases and redemption as settlement/closure of producer obligations even when they are not counted as producer self-repayment.
 - Preserve ROLA-like voucher borrowing and redemption as a primary strength mechanism: producer vouchers can be used to acquire other producers' vouchers, which are then redeemed for goods, services, production inputs, or cash savings.
 

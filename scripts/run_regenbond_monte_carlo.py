@@ -164,6 +164,7 @@ class Calibration:
     debt_removal_calibration: dict[str, float]
     fee_conversion_calibration: dict[str, float]
     quarterly_clearing_calibration: dict[str, float]
+    settlement_reliability_anchors: dict[str, float]
     route_substitution_diagnostics: dict[str, float]
     unit_normalization: dict[str, float]
 
@@ -850,6 +851,7 @@ def load_calibration(calibration_dir: Path) -> Calibration:
     debt_removal_calibration = load_metric_table("debt_removal_calibration.csv")
     fee_conversion_calibration = load_metric_table("fee_conversion_calibration.csv")
     quarterly_clearing_calibration = load_metric_table("quarterly_clearing_calibration.csv")
+    settlement_reliability_anchors = load_metric_table("settlement_reliability_anchors.csv")
     route_substitution_diagnostics = load_metric_table("route_substitution_diagnostics.csv")
     unit_normalization = load_metric_table("unit_normalization_calibration.csv")
 
@@ -870,6 +872,7 @@ def load_calibration(calibration_dir: Path) -> Calibration:
         debt_removal_calibration=debt_removal_calibration,
         fee_conversion_calibration=fee_conversion_calibration,
         quarterly_clearing_calibration=quarterly_clearing_calibration,
+        settlement_reliability_anchors=settlement_reliability_anchors,
         route_substitution_diagnostics=route_substitution_diagnostics,
         unit_normalization=unit_normalization,
     )
@@ -1059,6 +1062,20 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
     setattr(args, f"_{prefix}_producer_voucher_deposit_rate_per_month", voucher_deposit_rate)
     setattr(args, f"_{prefix}_productive_credit_return_rate", productive_return_rate)
     setattr(args, f"_{prefix}_productive_credit_lag_ticks", max(1, int(round(productive_lag_ticks))))
+    debt_maturity_recovery_rate = safe_float(
+        calibration.settlement_reliability_anchors.get("mature_borrow_proxy_value_support_rate")
+    )
+    if debt_maturity_recovery_rate <= 0.0:
+        debt_maturity_recovery_rate = safe_float(
+            calibration.settlement_reliability_anchors.get("mature_borrow_proxy_event_return_rate")
+        )
+    if debt_maturity_recovery_rate <= 0.0:
+        debt_maturity_recovery_rate = productive_return_rate
+    setattr(
+        args,
+        f"_{prefix}_producer_debt_maturity_recovery_rate",
+        max(0.0, min(1.0, debt_maturity_recovery_rate)),
+    )
     setattr(
         args,
         f"_{prefix}_quarterly_clearing_surplus_share",
@@ -1255,6 +1272,23 @@ def scenario_config(
         cfg.productive_credit_lag_ticks = max(
             1, int(getattr(args, "_frontier_productive_credit_lag_ticks", 2))
         )
+        cfg.producer_debt_maturity_enabled = True
+        cfg.producer_debt_maturity_ticks = max(1, int(getattr(args, "issuer_payment_stride", 13)))
+        cfg.producer_debt_maturity_recovery_rate = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        args,
+                        "_frontier_producer_debt_maturity_recovery_rate",
+                        cfg.productive_credit_return_rate,
+                    )
+                ),
+            ),
+        )
+        cfg.producer_debt_maturity_preserve_reserve = True
+        cfg.loan_term_weeks = cfg.producer_debt_maturity_ticks
         cfg.voucher_fee_conversion_enabled = True
         cfg.quarterly_clearing_enabled = True
         cfg.quarterly_clearing_stride_ticks = max(1, int(getattr(args, "issuer_payment_stride", 13)))
@@ -1868,6 +1902,10 @@ def run_one(
             "producer_deposit_stable_usd_tick",
             "producer_deposit_voucher_usd_tick",
             "productive_credit_inflow_usd_tick",
+            "producer_debt_matured_usd_tick",
+            "producer_debt_repaid_usd_tick",
+            "producer_debt_defaulted_usd_tick",
+            "producer_debt_closed_by_circulation_usd_tick",
             "fee_conversion_attempted_usd_tick",
             "fee_conversion_success_usd_tick",
             "fee_conversion_failed_usd_tick",
@@ -2082,6 +2120,23 @@ def run_one(
             "producer_deposit_credit_capacity_usd": latest.get("producer_deposit_credit_capacity_usd", 0.0),
             "productive_credit_inflow_usd": latest.get("productive_credit_inflow_usd_tick", 0.0),
             "productive_credit_inflow_usd_total": cumulative_float["productive_credit_inflow_usd_tick"],
+            "producer_debt_active_obligations": latest.get("producer_debt_active_obligations", 0),
+            "producer_debt_active_usd": latest.get("producer_debt_active_usd", 0.0),
+            "producer_debt_matured_usd": latest.get("producer_debt_matured_usd_tick", 0.0),
+            "producer_debt_matured_usd_total": cumulative_float["producer_debt_matured_usd_tick"],
+            "producer_debt_repaid_usd": latest.get("producer_debt_repaid_usd_tick", 0.0),
+            "producer_debt_repaid_usd_total": cumulative_float["producer_debt_repaid_usd_tick"],
+            "producer_debt_defaulted_usd": latest.get("producer_debt_defaulted_usd_tick", 0.0),
+            "producer_debt_defaulted_usd_total": cumulative_float["producer_debt_defaulted_usd_tick"],
+            "producer_debt_closed_by_circulation_usd": latest.get(
+                "producer_debt_closed_by_circulation_usd_tick", 0.0
+            ),
+            "producer_debt_closed_by_circulation_usd_total": cumulative_float[
+                "producer_debt_closed_by_circulation_usd_tick"
+            ],
+            "producer_debt_maturity_recovery_rate": latest.get(
+                "producer_debt_maturity_recovery_rate", 0.0
+            ),
             "fee_pool_cumulative_usd": latest.get("fee_pool_cumulative_usd", 0.0),
             "fee_clc_cumulative_usd": latest.get("fee_clc_cumulative_usd", 0.0),
             "fee_conversion_attempted_usd": latest.get("fee_conversion_attempted_usd_tick", 0.0),
@@ -3797,6 +3852,12 @@ def summarize_frontier_cell(
     stable_to_voucher_ratio_values = [
         safe_float(row.get("stable_to_voucher_value_ratio_in_active_pools")) for row in rows
     ]
+    producer_debt_matured_values = [safe_float(row.get("producer_debt_matured_usd_total")) for row in rows]
+    producer_debt_repaid_values = [safe_float(row.get("producer_debt_repaid_usd_total")) for row in rows]
+    producer_debt_defaulted_values = [safe_float(row.get("producer_debt_defaulted_usd_total")) for row in rows]
+    producer_debt_closed_values = [
+        safe_float(row.get("producer_debt_closed_by_circulation_usd_total")) for row in rows
+    ]
     v2v_share_values = [
         v2v / max(1e-9, total) for v2v, total in zip(v2v_count_values, transaction_values)
     ]
@@ -3912,6 +3973,10 @@ def summarize_frontier_cell(
         "stable_value_share_p95": stable_share_p95,
         "voucher_value_share_p50": voucher_share_p50,
         "stable_to_voucher_value_ratio_p50": percentile(stable_to_voucher_ratio_values, 0.50),
+        "producer_debt_matured_usd_total_p50": percentile(producer_debt_matured_values, 0.50),
+        "producer_debt_repaid_usd_total_p50": percentile(producer_debt_repaid_values, 0.50),
+        "producer_debt_defaulted_usd_total_p50": percentile(producer_debt_defaulted_values, 0.50),
+        "producer_debt_closed_by_circulation_usd_total_p50": percentile(producer_debt_closed_values, 0.50),
         "baseline_route_success_p50": baseline.get("route_success_p50", 0.0),
         "baseline_swap_volume_p50": baseline.get("swap_volume_p50", 0.0),
         "baseline_voucher_to_voucher_count_p50": baseline_v2v_count_p50,

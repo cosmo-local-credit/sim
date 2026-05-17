@@ -52,6 +52,18 @@ class NoamClearingCycle:
     score: float
     cap_value: float
 
+@dataclass(slots=True)
+class ProducerDebtObligation:
+    obligation_id: int
+    producer_pool_id: str
+    lender_pool_id: str
+    voucher_id: str
+    issued_tick: int
+    due_tick: int
+    original_voucher_units: float
+    remaining_voucher_units: float
+    borrowed_usd: float
+
 class SimulationEngine:
     def __init__(self, cfg: ScenarioConfig, seed: int = 1) -> None:
         self.cfg = cfg
@@ -145,6 +157,16 @@ class SimulationEngine:
         self._productive_credit_inflow_usd_tick: float = 0.0
         self._productive_credit_inflow_usd_total: float = 0.0
         self._productive_credit_queue: Dict[int, list[Tuple[str, float, str]]] = {}
+        self._producer_debt_obligations: list[ProducerDebtObligation] = []
+        self._next_producer_debt_obligation_id: int = 1
+        self._producer_debt_matured_usd_tick: float = 0.0
+        self._producer_debt_matured_usd_total: float = 0.0
+        self._producer_debt_repaid_usd_tick: float = 0.0
+        self._producer_debt_repaid_usd_total: float = 0.0
+        self._producer_debt_defaulted_usd_tick: float = 0.0
+        self._producer_debt_defaulted_usd_total: float = 0.0
+        self._producer_debt_closed_by_circulation_usd_tick: float = 0.0
+        self._producer_debt_closed_by_circulation_usd_total: float = 0.0
         self._fee_conversion_attempted_usd_tick: float = 0.0
         self._fee_conversion_success_usd_tick: float = 0.0
         self._fee_conversion_failed_usd_tick: float = 0.0
@@ -2774,6 +2796,99 @@ class SimulationEngine:
             meta={"reason": reason},
         ))
 
+    def _register_producer_debt_obligation(
+        self,
+        producer_pool_id: str,
+        lender_pool_id: str,
+        voucher_id: str,
+        voucher_units: float,
+        borrowed_usd: float,
+    ) -> None:
+        if not bool(self.cfg.producer_debt_maturity_enabled):
+            return
+        if voucher_units <= 1e-9 or borrowed_usd <= 1e-9:
+            return
+        producer_pool = self.pools.get(producer_pool_id)
+        lender_pool = self.pools.get(lender_pool_id)
+        if producer_pool is None or lender_pool is None:
+            return
+        if producer_pool.policy.role != "producer" or lender_pool.policy.role != "lender":
+            return
+        spec = self.factory.voucher_specs.get(voucher_id)
+        if spec is None or spec.issuer_id != producer_pool.steward_id:
+            return
+        maturity = max(1, int(self.cfg.producer_debt_maturity_ticks or 1))
+        obligation = ProducerDebtObligation(
+            obligation_id=self._next_producer_debt_obligation_id,
+            producer_pool_id=producer_pool_id,
+            lender_pool_id=lender_pool_id,
+            voucher_id=voucher_id,
+            issued_tick=self.tick,
+            due_tick=self.tick + maturity,
+            original_voucher_units=float(voucher_units),
+            remaining_voucher_units=float(voucher_units),
+            borrowed_usd=float(borrowed_usd),
+        )
+        self._next_producer_debt_obligation_id += 1
+        self._producer_debt_obligations.append(obligation)
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_DEBT_OBLIGATION_CREATED",
+            pool_id=lender_pool_id,
+            asset_id=voucher_id,
+            amount=float(borrowed_usd),
+            meta={
+                "obligation_id": obligation.obligation_id,
+                "producer_pool_id": producer_pool_id,
+                "voucher_units": float(voucher_units),
+                "due_tick": obligation.due_tick,
+            },
+        ))
+
+    def _reduce_producer_debt_obligations(
+        self,
+        lender_pool_id: str,
+        voucher_id: str,
+        voucher_units: float,
+        reason: str,
+    ) -> float:
+        if voucher_units <= 1e-9:
+            return 0.0
+        lender_pool = self.pools.get(lender_pool_id)
+        if lender_pool is None:
+            return 0.0
+        remaining = float(voucher_units)
+        reduced_units = 0.0
+        for obligation in sorted(
+            self._producer_debt_obligations,
+            key=lambda item: (item.due_tick, item.issued_tick, item.obligation_id),
+        ):
+            if remaining <= 1e-9:
+                break
+            if obligation.lender_pool_id != lender_pool_id or obligation.voucher_id != voucher_id:
+                continue
+            if obligation.remaining_voucher_units <= 1e-9:
+                continue
+            used = min(remaining, obligation.remaining_voucher_units)
+            obligation.remaining_voucher_units = max(0.0, obligation.remaining_voucher_units - used)
+            remaining -= used
+            reduced_units += used
+        if reduced_units <= 1e-9:
+            return 0.0
+        value = self._asset_value(lender_pool, voucher_id)
+        reduced_usd = reduced_units * value
+        self._producer_debt_closed_by_circulation_usd_tick += reduced_usd
+        self._producer_debt_closed_by_circulation_usd_total += reduced_usd
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_DEBT_CLOSED_BY_CIRCULATION",
+            pool_id=lender_pool_id,
+            asset_id=voucher_id,
+            amount=reduced_usd,
+            meta={"voucher_units": reduced_units, "reason": reason},
+        ))
+        return reduced_units
+
     def _schedule_productive_credit_inflow(self, pool_id: str, borrowed_usd: float, voucher_id: str) -> None:
         if not bool(self.cfg.productive_credit_enabled):
             return
@@ -2821,6 +2936,268 @@ class SimulationEngine:
                 meta={"voucher_id": voucher_id},
             ))
         self._refresh_lender_voucher_limits()
+
+    def _producer_debt_unit_value(self, obligation: ProducerDebtObligation) -> float:
+        pool = self.pools.get(obligation.lender_pool_id) or self.pools.get(obligation.producer_pool_id)
+        if pool is None:
+            return self._default_asset_value(obligation.voucher_id)
+        return self._asset_value(pool, obligation.voucher_id)
+
+    def _producer_debt_active_usd(self) -> float:
+        total = 0.0
+        for obligation in self._producer_debt_obligations:
+            if obligation.remaining_voucher_units <= 1e-9:
+                continue
+            total += obligation.remaining_voucher_units * self._producer_debt_unit_value(obligation)
+        return total
+
+    def _producer_debt_stable_available(self, producer_pool: "Pool") -> float:
+        stable_id = self.cfg.stable_symbol
+        stable_available = producer_pool.vault.get(stable_id)
+        if bool(self.cfg.producer_debt_maturity_preserve_reserve):
+            stable_available -= max(0.0, float(producer_pool.policy.min_stable_reserve or 0.0))
+        return max(0.0, stable_available)
+
+    def _write_off_producer_debt_default(
+        self,
+        lender_pool: "Pool",
+        obligation: ProducerDebtObligation,
+        default_units: float,
+        unit_value: float,
+        reason: str,
+    ) -> None:
+        default_units = max(0.0, min(float(default_units), obligation.remaining_voucher_units))
+        if default_units <= 1e-9:
+            return
+        available_units = lender_pool.vault.get(obligation.voucher_id)
+        writeoff_units = min(default_units, available_units)
+        if writeoff_units > 1e-9:
+            self._vault_sub(
+                lender_pool,
+                obligation.voucher_id,
+                writeoff_units,
+                "producer_debt_default_writeoff",
+                obligation.producer_pool_id,
+            )
+        default_usd = default_units * unit_value
+        obligation.remaining_voucher_units = max(0.0, obligation.remaining_voucher_units - default_units)
+        self._producer_debt_defaulted_usd_tick += default_usd
+        self._producer_debt_defaulted_usd_total += default_usd
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_DEBT_DEFAULTED",
+            pool_id=obligation.lender_pool_id,
+            asset_id=obligation.voucher_id,
+            amount=default_usd,
+            meta={
+                "obligation_id": obligation.obligation_id,
+                "producer_pool_id": obligation.producer_pool_id,
+                "default_units": default_units,
+                "writeoff_units": writeoff_units,
+                "reason": reason,
+            },
+        ))
+
+    def _execute_producer_debt_maturity_repayment(
+        self,
+        obligation: ProducerDebtObligation,
+        target_units: float,
+        unit_value: float,
+    ) -> float:
+        producer_pool = self.pools.get(obligation.producer_pool_id)
+        lender_pool = self.pools.get(obligation.lender_pool_id)
+        if producer_pool is None or lender_pool is None:
+            return 0.0
+        target_units = max(0.0, min(float(target_units), obligation.remaining_voucher_units))
+        if target_units <= 1e-9 or unit_value <= 0.0:
+            return 0.0
+        stable_id = self.cfg.stable_symbol
+        stable_value = self._asset_value(lender_pool, stable_id)
+        if stable_value <= 0.0:
+            stable_value = 1.0
+        stable_needed = (target_units * unit_value) / stable_value
+        amount_in = min(stable_needed, self._producer_debt_stable_available(producer_pool))
+        if amount_in <= 1e-9:
+            return 0.0
+        if not self._vault_sub(
+            producer_pool,
+            stable_id,
+            amount_in,
+            "producer_debt_maturity_repayment_out",
+            obligation.lender_pool_id,
+        ):
+            return 0.0
+
+        receipt = lender_pool.execute_swap(
+            self.tick,
+            actor=f"producer_debt_maturity:{producer_pool.pool_id}",
+            asset_in=stable_id,
+            amount_in=amount_in,
+            asset_out=obligation.voucher_id,
+        )
+        if receipt.status != "executed":
+            self._vault_add(producer_pool, stable_id, amount_in, "producer_debt_maturity_refund", lender_pool.pool_id)
+            self._noam_update_edge_after_swap(
+                lender_pool,
+                receipt.asset_in,
+                receipt.asset_out,
+                float(receipt.amount_in),
+                success=False,
+                fail_reason=receipt.fail_reason,
+            )
+            self.log.add(Event(
+                self.tick,
+                "PRODUCER_DEBT_MATURITY_REPAYMENT_FAILED",
+                pool_id=lender_pool.pool_id,
+                asset_id=obligation.voucher_id,
+                amount=amount_in * stable_value,
+                meta={
+                    "obligation_id": obligation.obligation_id,
+                    "producer_pool_id": producer_pool.pool_id,
+                    "reason": receipt.fail_reason,
+                },
+            ))
+            return 0.0
+
+        self.log.add(Event(self.tick, "SWAP_EXECUTED", pool_id=lender_pool.pool_id, meta={"receipt": receipt.to_dict()}))
+        gross_voucher_units = float(receipt.amount_out) + float(receipt.fees.total_fee)
+        self._update_pool_caches(lender_pool, receipt.asset_in, float(receipt.amount_in))
+        self._update_pool_caches(lender_pool, receipt.asset_out, -float(gross_voucher_units))
+        self._record_fee_cumulative(receipt)
+        self._record_clc_swap_cumulative(receipt)
+        self._noam_update_edge_after_swap(
+            lender_pool,
+            receipt.asset_in,
+            receipt.asset_out,
+            float(receipt.amount_in),
+            success=True,
+        )
+        self._noam_routing_swaps_tick += 1
+        swap_usd = float(receipt.amount_in) * self._asset_value(lender_pool, receipt.asset_in)
+        self._swap_volume_usd_tick += swap_usd
+        self._swap_volume_usd_by_pool[lender_pool.pool_id] = (
+            self._swap_volume_usd_by_pool.get(lender_pool.pool_id, 0.0) + swap_usd
+        )
+        self._record_lender_recovered_stable(lender_pool.pool_id, swap_usd, "producer_debt_maturity_repayment")
+
+        spec = self.factory.voucher_specs.get(obligation.voucher_id)
+        if spec and spec.issuer_id in self.agents and receipt.amount_out > 1e-9:
+            issuer_agent = self.agents[spec.issuer_id]
+            issuer_pool = self.pools.get(issuer_agent.pool_id)
+            issuer_agent.issuer.return_to_issuer(float(receipt.amount_out))
+            if issuer_pool is not None:
+                self._vault_add(
+                    issuer_pool,
+                    obligation.voucher_id,
+                    float(receipt.amount_out),
+                    "producer_debt_maturity_redeem_receive",
+                    lender_pool.pool_id,
+                )
+                self.log.add(Event(
+                    self.tick,
+                    "VOUCHER_REDEEMED",
+                    actor_id=spec.issuer_id,
+                    asset_id=obligation.voucher_id,
+                    amount=float(receipt.amount_out),
+                    meta={"reason": "producer_debt_maturity_repayment"},
+                ))
+
+        repaid_units = min(obligation.remaining_voucher_units, gross_voucher_units)
+        repaid_usd = repaid_units * unit_value
+        obligation.remaining_voucher_units = max(0.0, obligation.remaining_voucher_units - repaid_units)
+        self._producer_debt_repaid_usd_tick += repaid_usd
+        self._producer_debt_repaid_usd_total += repaid_usd
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_DEBT_MATURITY_REPAID",
+            pool_id=lender_pool.pool_id,
+            asset_id=obligation.voucher_id,
+            amount=repaid_usd,
+            meta={
+                "obligation_id": obligation.obligation_id,
+                "producer_pool_id": producer_pool.pool_id,
+                "repaid_units": repaid_units,
+                "stable_in": float(receipt.amount_in),
+            },
+        ))
+        return repaid_units
+
+    def _apply_producer_debt_maturities(self) -> None:
+        if not bool(self.cfg.producer_debt_maturity_enabled):
+            return
+        if not self._producer_debt_obligations:
+            return
+        recovery_rate = max(0.0, min(1.0, float(self.cfg.producer_debt_maturity_recovery_rate or 0.0)))
+        active: list[ProducerDebtObligation] = []
+        for obligation in sorted(
+            self._producer_debt_obligations,
+            key=lambda item: (item.due_tick, item.issued_tick, item.obligation_id),
+        ):
+            if obligation.remaining_voucher_units <= 1e-9:
+                continue
+            if obligation.due_tick > self.tick:
+                active.append(obligation)
+                continue
+            producer_pool = self.pools.get(obligation.producer_pool_id)
+            lender_pool = self.pools.get(obligation.lender_pool_id)
+            unit_value = self._producer_debt_unit_value(obligation)
+            if lender_pool is None or producer_pool is None or unit_value <= 0.0:
+                default_usd = obligation.remaining_voucher_units * max(unit_value, self._default_asset_value(obligation.voucher_id))
+                self._producer_debt_defaulted_usd_tick += default_usd
+                self._producer_debt_defaulted_usd_total += default_usd
+                self.log.add(Event(
+                    self.tick,
+                    "PRODUCER_DEBT_DEFAULTED",
+                    pool_id=obligation.lender_pool_id,
+                    asset_id=obligation.voucher_id,
+                    amount=default_usd,
+                    meta={
+                        "obligation_id": obligation.obligation_id,
+                        "producer_pool_id": obligation.producer_pool_id,
+                        "default_units": obligation.remaining_voucher_units,
+                        "reason": "missing_pool",
+                    },
+                ))
+                continue
+
+            held_units = min(obligation.remaining_voucher_units, lender_pool.vault.get(obligation.voucher_id))
+            if held_units + 1e-9 < obligation.remaining_voucher_units:
+                closed_units = obligation.remaining_voucher_units - held_units
+                closed_usd = closed_units * unit_value
+                self._producer_debt_closed_by_circulation_usd_tick += closed_usd
+                self._producer_debt_closed_by_circulation_usd_total += closed_usd
+                self.log.add(Event(
+                    self.tick,
+                    "PRODUCER_DEBT_CLOSED_BY_CIRCULATION",
+                    pool_id=obligation.lender_pool_id,
+                    asset_id=obligation.voucher_id,
+                    amount=closed_usd,
+                    meta={
+                        "obligation_id": obligation.obligation_id,
+                        "producer_pool_id": obligation.producer_pool_id,
+                        "voucher_units": closed_units,
+                        "reason": "not_held_at_maturity",
+                    },
+                ))
+                obligation.remaining_voucher_units = held_units
+            if obligation.remaining_voucher_units <= 1e-9:
+                continue
+
+            matured_usd = obligation.remaining_voucher_units * unit_value
+            self._producer_debt_matured_usd_tick += matured_usd
+            self._producer_debt_matured_usd_total += matured_usd
+            recoverable_units = obligation.remaining_voucher_units * recovery_rate
+            if recoverable_units > 1e-9:
+                self._execute_producer_debt_maturity_repayment(obligation, recoverable_units, unit_value)
+            if obligation.remaining_voucher_units > 1e-9:
+                self._write_off_producer_debt_default(
+                    lender_pool,
+                    obligation,
+                    obligation.remaining_voucher_units,
+                    unit_value,
+                    "maturity_unrecovered",
+                )
+        self._producer_debt_obligations = active
 
     def _apply_producer_deposits(self) -> None:
         if not bool(self.cfg.producer_deposits_enabled):
@@ -4319,6 +4696,10 @@ class SimulationEngine:
             self._route_source_stable_net_flow_value_tick = 0.0
             self._route_source_voucher_net_flow_value_tick = 0.0
             self._productive_credit_inflow_usd_tick = 0.0
+            self._producer_debt_matured_usd_tick = 0.0
+            self._producer_debt_repaid_usd_tick = 0.0
+            self._producer_debt_defaulted_usd_tick = 0.0
+            self._producer_debt_closed_by_circulation_usd_tick = 0.0
             self._fee_conversion_attempted_usd_tick = 0.0
             self._fee_conversion_success_usd_tick = 0.0
             self._fee_conversion_failed_usd_tick = 0.0
@@ -4337,6 +4718,7 @@ class SimulationEngine:
             self._apply_producer_deposits()
             self._apply_historical_stable_backing()
             self._apply_historical_voucher_backing()
+            self._apply_producer_debt_maturities()
 
             # exogenous stable inflow
             stable_stride = max(1, int(self.cfg.stable_growth_stride_ticks or 1))
@@ -4937,6 +5319,36 @@ class SimulationEngine:
                     float(receipt.amount_in) * self._asset_value(pool, receipt.asset_in),
                     "stable_to_producer_voucher_swap",
                 )
+                self._reduce_producer_debt_obligations(
+                    pool.pool_id,
+                    receipt.asset_out,
+                    gross_out,
+                    "stable_to_producer_voucher_swap",
+                )
+            if (
+                pool.policy.role == "lender"
+                and source_pool.policy.role == "producer"
+                and self._is_producer_voucher(receipt.asset_in)
+                and receipt.asset_out == self.cfg.stable_symbol
+            ):
+                self._register_producer_debt_obligation(
+                    source_pool.pool_id,
+                    pool.pool_id,
+                    receipt.asset_in,
+                    float(receipt.amount_in),
+                    float(receipt.amount_in) * self._asset_value(pool, receipt.asset_in),
+                )
+            elif (
+                pool.policy.role == "lender"
+                and receipt.asset_in != self.cfg.stable_symbol
+                and self._is_producer_voucher(receipt.asset_out)
+            ):
+                self._reduce_producer_debt_obligations(
+                    pool.pool_id,
+                    receipt.asset_out,
+                    gross_out,
+                    "producer_voucher_swap_out",
+                )
             self._noam_update_edge_after_swap(
                 pool,
                 receipt.asset_in,
@@ -5291,6 +5703,11 @@ class SimulationEngine:
                 )
 
             fee_pool_cumulative = self._fee_pool_cumulative_usd
+            producer_debt_active_count = sum(
+                1 for obligation in self._producer_debt_obligations
+                if obligation.remaining_voucher_units > 1e-9
+            )
+            producer_debt_active_usd = self._producer_debt_active_usd()
             self.metrics.add_network({
                 "tick": self.tick,
                 "num_pools": num_active,
@@ -5321,6 +5738,23 @@ class SimulationEngine:
                 "producer_deposit_credit_capacity_usd": float(self._producer_deposit_credit_capacity_usd()),
                 "productive_credit_inflow_usd_tick": float(self._productive_credit_inflow_usd_tick),
                 "productive_credit_inflow_usd_total": float(self._productive_credit_inflow_usd_total),
+                "producer_debt_active_obligations": int(producer_debt_active_count),
+                "producer_debt_active_usd": float(producer_debt_active_usd),
+                "producer_debt_matured_usd_tick": float(self._producer_debt_matured_usd_tick),
+                "producer_debt_matured_usd_total": float(self._producer_debt_matured_usd_total),
+                "producer_debt_repaid_usd_tick": float(self._producer_debt_repaid_usd_tick),
+                "producer_debt_repaid_usd_total": float(self._producer_debt_repaid_usd_total),
+                "producer_debt_defaulted_usd_tick": float(self._producer_debt_defaulted_usd_tick),
+                "producer_debt_defaulted_usd_total": float(self._producer_debt_defaulted_usd_total),
+                "producer_debt_closed_by_circulation_usd_tick": float(
+                    self._producer_debt_closed_by_circulation_usd_tick
+                ),
+                "producer_debt_closed_by_circulation_usd_total": float(
+                    self._producer_debt_closed_by_circulation_usd_total
+                ),
+                "producer_debt_maturity_recovery_rate": float(
+                    self.cfg.producer_debt_maturity_recovery_rate
+                ),
                 "repayment_volume_usd": repayment_volume_usd,
                 "loan_issuance_volume_usd": loan_issuance_usd,
                 "swap_volume_usd_tick": swap_volume_usd_tick,

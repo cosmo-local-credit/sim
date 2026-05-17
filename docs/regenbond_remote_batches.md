@@ -837,9 +837,10 @@ paper_integration_notes.md
 
 Revised validation and frontier CSVs also include columns for producer stable
 and voucher deposits, deposit-based credit capacity, productive-credit inflow,
-net circulating voucher obligation, voucher-fee conversion, quarterly clearing,
-lender liquidity impact, fixed-target route success, and substituted route
-success.
+net circulating voucher obligation, producer-debt maturity/repaid/defaulted
+principal, producer debt closed by circulation, voucher-fee conversion,
+quarterly clearing, lender liquidity impact, fixed-target route success, and
+substituted route success.
 
 `--no-png` skips PNG generation but still writes CSV, LaTeX, Markdown, partial
 CSV, and shard files.
