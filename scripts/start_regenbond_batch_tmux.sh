@@ -9,6 +9,7 @@ LOG_DIR="${LOG_DIR:-analysis/monte_carlo}"
 LOG_FILE="${LOG_FILE:-$LOG_DIR/$JOB.log}"
 
 mkdir -p "$LOG_DIR"
+mkdir -p "$(dirname "$LOG_FILE")"
 
 if ! command -v tmux >/dev/null 2>&1; then
   echo "tmux is required to start detached batch jobs." >&2
@@ -48,6 +49,7 @@ FORWARDED_ENV_KEYS=(
   FRONTIER_MODE
   FRONTIER_REFINEMENT_ROUNDS
   BOND_TERM
+  DRY_RUN
 )
 ENV_PREFIX=""
 for key in "${FORWARDED_ENV_KEYS[@]}"; do
@@ -60,8 +62,9 @@ done
 printf -v quoted_pwd "%q" "$PWD"
 printf -v quoted_job "%q" "$JOB"
 printf -v quoted_log "%q" "$LOG_FILE"
-COMMAND="cd $quoted_pwd && env$ENV_PREFIX ./scripts/run_regenbond_remote_batch.sh $quoted_job 2>&1 | tee $quoted_log"
-tmux new-session -d -s "$SESSION" "$COMMAND"
+COMMAND="set -o pipefail; cd $quoted_pwd && env$ENV_PREFIX ./scripts/run_regenbond_remote_batch.sh $quoted_job 2>&1 | tee $quoted_log"
+printf -v quoted_command "%q" "$COMMAND"
+tmux new-session -d -s "$SESSION" "bash -lc $quoted_command"
 
 echo "Started detached tmux session: $SESSION"
 echo "Job: $JOB"

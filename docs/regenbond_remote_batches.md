@@ -384,6 +384,7 @@ Common wrapper parameters:
 | `ANALYSIS_STRIDE` | Diagnostic recording stride. | `13` in wrapper |
 | `POOL_METRICS_STRIDE` | Pool metric recording stride. | `13` in wrapper |
 | `PROGRESS_STRIDE` | Per-run progress log stride. | `13` in wrapper |
+| `DRY_RUN` | `1` prints the resolved Python command after calibration-file checks without running it. | `0` |
 
 Frontier-specific parameters:
 

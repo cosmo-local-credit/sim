@@ -36,12 +36,16 @@ mkdir -p "$OUTPUT_ROOT"
 
 REQUIRED_CALIBRATION_FILES=(
   monte_carlo_calibration_parameters.csv
+  repayment_calibration_by_tier_asset.csv
   pool_report_activity.csv
+  impact_projection_by_activity.csv
+  stable_dependency_anchors.csv
   producer_deposit_calibration.csv
   productive_credit_calibration.csv
   debt_removal_calibration.csv
   fee_conversion_calibration.csv
   quarterly_clearing_calibration.csv
+  settlement_reliability_anchors.csv
   route_substitution_diagnostics.csv
   unit_normalization_calibration.csv
 )
@@ -62,9 +66,31 @@ echo "[batch] calibration_dir=$CALIBRATION_DIR"
 echo "[batch] output_root=$OUTPUT_ROOT"
 echo "[batch] workers=$WORKERS_VALUE"
 echo "[batch] resume=${RESUME:-1}"
+echo "[batch] dry_run=${DRY_RUN:-0}"
 echo "[batch] route_success_mode=${ROUTE_SUCCESS_MODE:-diagnostic}"
 echo "[batch] kes_per_usd=${KES_PER_USD:-missing}"
 echo "[batch] voucher_kes_value=${VOUCHER_KES_VALUE:-missing}"
+
+is_dry_run() {
+  case "${DRY_RUN:-0}" in
+    1|true|TRUE|yes|YES)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+run_monte_carlo() {
+  if is_dry_run; then
+    printf '[batch] dry_run command:'
+    printf ' %q' "$@"
+    printf '\n'
+    return 0
+  fi
+  "$@"
+}
 
 run_engine_validation() {
   local default_runs="$1"
@@ -73,7 +99,7 @@ run_engine_validation() {
   local default_output="$4"
   local output_dir="${OUTPUT:-$OUTPUT_ROOT/$default_output}"
   echo "[batch] writing engine validation artifacts to $output_dir"
-  "${PYTHON_BIN}" scripts/run_regenbond_monte_carlo.py \
+  run_monte_carlo "${PYTHON_BIN}" scripts/run_regenbond_monte_carlo.py \
     --scenario sarafu_engine_validation \
     --runs "${RUNS:-$default_runs}" \
     --ticks "${TICKS:-$default_ticks}" \
@@ -96,7 +122,7 @@ run_frontier() {
   local default_shares="$7"
   local output_dir="${OUTPUT:-$OUTPUT_ROOT/$default_output}"
   echo "[batch] writing frontier artifacts to $output_dir"
-  "${PYTHON_BIN}" scripts/run_regenbond_monte_carlo.py \
+  run_monte_carlo "${PYTHON_BIN}" scripts/run_regenbond_monte_carlo.py \
     --scenario bond_issuer_frontier \
     --network-scales "${NETWORK_SCALES:-$default_scales}" \
     --principal-ratios "${PRINCIPAL_RATIOS:-$default_ratios}" \
