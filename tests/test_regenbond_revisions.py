@@ -1,7 +1,7 @@
 import argparse
 import unittest
 
-from scripts.run_regenbond_monte_carlo import bond_metrics, scenario_config
+from scripts.run_regenbond_monte_carlo import bond_metrics, scenario_config, summarize_frontier_cell
 from sim.config import ScenarioConfig
 from sim.core import Event, IssuerLedger
 from sim.engine import SimulationEngine
@@ -444,6 +444,54 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["bond_cumulative_fee_return_usd"], 100.0)
         self.assertAlmostEqual(metrics["issuer_eligible_fee_service_inflow_usd"], 100.0)
         self.assertAlmostEqual(metrics["issuer_actual_bondholder_payment_usd"], 50.0)
+        self.assertAlmostEqual(metrics["issuer_paid_coverage_ratio"], 1.0)
+        self.assertAlmostEqual(metrics["issuer_service_cash_headroom_ratio"], 2.0)
+
+    def test_frontier_safety_splits_payment_coverage_from_cash_headroom(self):
+        row = {
+            "bond_principal_usd": 1000.0,
+            "principal_ratio": 0.05,
+            "network_scale": "current",
+            "coupon_target_annual": 0.0,
+            "bond_fee_service_share": 0.5,
+            "issuer_service_coverage_ratio": 1.0,
+            "issuer_paid_coverage_ratio": 1.0,
+            "issuer_service_cash_headroom_ratio": 1.5,
+            "issuer_scheduled_debt_service_due_usd": 100.0,
+            "issuer_actual_bondholder_payment_usd": 100.0,
+            "issuer_unpaid_scheduled_claim_usd": 0.0,
+            "route_success_rate_cumulative": 1.0,
+            "realized_edge_top_share": 0.0,
+        }
+
+        summary = summarize_frontier_cell([row] * 5, {}, 0.85, "diagnostic")
+
+        self.assertEqual(summary["safe"], 1)
+        self.assertAlmostEqual(summary["scheduled_payment_coverage_p50"], 1.0)
+        self.assertAlmostEqual(summary["service_cash_headroom_p50"], 1.5)
+        self.assertNotIn("p50_service_coverage", summary["binding_constraint"])
+
+    def test_frontier_safety_requires_cash_headroom_above_payment_coverage(self):
+        row = {
+            "bond_principal_usd": 1000.0,
+            "principal_ratio": 0.05,
+            "network_scale": "current",
+            "coupon_target_annual": 0.0,
+            "bond_fee_service_share": 0.5,
+            "issuer_service_coverage_ratio": 1.0,
+            "issuer_paid_coverage_ratio": 1.0,
+            "issuer_service_cash_headroom_ratio": 1.0,
+            "issuer_scheduled_debt_service_due_usd": 100.0,
+            "issuer_actual_bondholder_payment_usd": 100.0,
+            "issuer_unpaid_scheduled_claim_usd": 0.0,
+            "route_success_rate_cumulative": 1.0,
+            "realized_edge_top_share": 0.0,
+        }
+
+        summary = summarize_frontier_cell([row] * 5, {}, 0.85, "diagnostic")
+
+        self.assertEqual(summary["safe"], 0)
+        self.assertIn("p50_service_cash_headroom", summary["binding_constraint"])
 
     def test_producer_debt_maturity_repayment_recovers_lender_stable(self):
         engine = SimulationEngine(
