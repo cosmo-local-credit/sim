@@ -53,9 +53,20 @@ streamlit run app.py --logger.level=debug
 
 ## Regenerative-bond Monte Carlo runner
 
-The paper-facing Monte Carlo workflow treats LPs as bond purchasers/funders:
-LP stable contributions are bond-like principal, and sCLC/stable fee access is
-the simulated bondholder cash return.
+The paper-facing Monte Carlo workflow has two layers:
+
+- `sarafu_engine_validation` is the no-bond validation gate. It checks whether
+  the real engine reproduces Sarafu-calibrated settlement, backing, return, and
+  report-exposure moments before any bond claim is interpreted.
+- `bond_issuer_frontier` is the current bond-issuer model. Bondholders fund
+  stable principal to an issuer; the issuer deploys gross principal into
+  eligible lender pools; producer own-voucher borrowing draws stable from those
+  pools; recovered lender stable is reserved first for scheduled bond service.
+
+Older `regenbond_lp_injection` and `--scenario all` runs remain useful for
+mechanics inspection, but they are legacy evidence for the paper-facing bond
+issuer frontier. They should not be read as the current bondholder return
+model.
 
 From the `sim` repo root:
 
@@ -92,6 +103,14 @@ Use `--scenario all` for the older baseline, regenerative-bond, and stress-test
 suite. For longer runs, `--analysis-stride N` records expensive paper
 diagnostics every `N` ticks while still simulating every tick.
 
+Current bond-frontier outputs distinguish capped scheduled-payment coverage
+from uncapped cash headroom. `scheduled_payment_coverage` asks whether the
+bondholder received scheduled principal plus coupon due. `service_cash_headroom`
+asks whether eligible recovered stable comfortably exceeded scheduled due. Any
+recovered stable above scheduled service is candidate issuer operating and risk
+headroom, not proven net profit until explicit issuer costs and first-loss
+capital are modeled.
+
 The Streamlit app includes a **RegenBond MC** tab that runs this same script as
 a subprocess and displays the exact CLI-equivalent command. For identical
 results between terminal and UI, keep the scenario, runs, ticks, seed, coupon
@@ -103,8 +122,10 @@ identical.
 The default Streamlit tab is **Sarafu Calibrated**. It starts from the
 privacy-safe Sarafu pool calibration outputs in `analysis/sarafu_calibration/`,
 validates a Sarafu-like baseline, separates observed aid/grant liquidity from
-counterfactual LP/bond-purchaser liquidity, and writes manuscript-ready tables,
-LaTeX snippets, PNG figures, and captions. In this research workspace the
+counterfactual repayable-liquidity template policies, and writes
+manuscript-ready tables, LaTeX snippets, PNG figures, and captions. This
+template runner is background evidence; the current paper-facing bondholder
+model is `bond_issuer_frontier`. In this research workspace the
 authoritative paper output can still be set explicitly:
 
 ```text
@@ -183,6 +204,9 @@ terminal and Streamlit outputs match when the displayed command is identical.
   - Offered asset seeds: `exp(mean=150)` per offered asset
 
 **Liquidity Provider (LP) pools**
+- This LP/sCLC role is part of the generic CLC economics layer and legacy
+  inspection scenarios. The current `bond_issuer_frontier` does not model
+  bondholders as ordinary LP pools.
 - **Goal**: contribute stable to the waterfall in exchange for sCLC.
 - **Listings**: stable only.
 - **Inventory**: stable seed only.
@@ -233,6 +257,12 @@ terminal and Streamlit outputs match when the displayed command is identical.
 - **Issuance**: producers **do not mint**; they route **existing** vouchers to lenders to receive USD stable.
 - **Repayment**: producers route **stable only** to acquire their voucher from lenders.
   The repayment amount amortizes `loan_term_weeks` and is spread by `loan_activity_period_ticks`.
+- **Bond-frontier producer debt**: producer own-voucher-in/stable-out creates a
+  dated lender-pool exposure. In current frontier runs, ordinary circulation can
+  reduce the exposure before a 13-week maturity; unresolved lender-held
+  producer vouchers trigger stable repayment subject to calibrated
+  recovery/default behavior. There is no explicit one-third monthly installment
+  schedule in the current implementation.
 
 ### NOAM Routing (default)
 NOAM is the default router (`routing_mode=noam`). It is a **network-aware overlay + beam search**:
@@ -274,12 +304,18 @@ NOAM Clearing runs periodically to clear feasible cycles and rebalance the netwo
 - **Scoring**: uses the same success/fee/scarcity/benefit/dead-end weights as NOAM routing.
 - **Priority**: lenders and CLC receive edge bonuses; clearing can still touch producer/consumer pools.
 
+NOAM clearing is separate from the bond-issuer quarterly clearing mechanism.
+NOAM clearing is route/cycle execution inside the pool network. Bond-issuer
+clearing moves eligible recovered lender stable toward scheduled issuer service
+accounting, constrained by lender surplus and scheduled bondholder need.
+
 ---
 
 ## CLC economics and waterfall
 
 ### Fees
-- **Pool fee**: `pool_fee_rate` applied to gross output.
+- **Pool fee**: `pool_fee_rate` applied to gross output; the fee is denominated
+  in the outgoing asset, which can be stable or a voucher.
 - **CLC rake**: `clc_rake_rate` is taken **from** pool fee (not additive).
 - **All executed swaps** (routing and clearing) accrue pool fees and CLC rake.
 - System pools have zero fees by default; agent pools use the configured pool fee + CLC rake.

@@ -1,17 +1,24 @@
 # RegenBond Model Review Plan
 
 This document tracks simulator questions raised during manuscript review. It is
-a planning document for model revision and validation. Do not promote revised
-frontier results into the paper until the validation sequence and pilot review
-below pass.
+a planning document for model revision and validation. Historical sections are
+kept for auditability; current paper-facing interpretation should follow the
+latest validation and frontier artifacts.
 
 ## Current Status
 
-- The validation runner has produced a passing no-bond Sarafu calibration gate.
-- The `frontier-pilot` batch completed and produced the first usable bond-issuer safety-frontier outputs.
-- The pilot rejected all tested repayable-principal cells under the current guardrails.
-- The calibration-first model revision has now been implemented in code and has passed unit/tiny smoke checks locally.
-- Paper text should remain conditional until the revised model is fully revalidated and rerun remotely.
+- The full no-bond Sarafu engine-validation gate has passed for the current
+  model revision.
+- The current bond-issuer frontier deploys 100% of gross bond principal as
+  stable liquidity into eligible lender pools rather than withholding an
+  initial reserve-waterfall split.
+- The current safety gate separates capped scheduled-payment coverage from
+  uncapped service-cash headroom. Smoke frontier outputs show scheduled
+  first-year service clearing with headroom; larger pilot/publication grids
+  remain the paper-facing frontier evidence.
+- Earlier pilot results that rejected all cells under `p50_service_coverage`
+  and reserve-constrained fee-service mechanics are superseded historical
+  evidence for model debugging, not current frontier evidence.
 - Existing model changes should be judged against the paper's non-extraction frame: issuer responsibility must remain explicit, and local pools must not become hidden guarantors.
 
 ## Calibration-First Revision
@@ -104,8 +111,11 @@ Answer these questions again after the next model revision:
 - Does `connected_5x` improve route success without excessive concentration?
 - Do safe cells preserve voucher-to-voucher count, volume, and share relative to matched no-bond baselines?
 - Do safe cells avoid rising stable dependency, measured by active-pool stable value share and stable-to-voucher value ratio?
-- Do higher fee-service shares improve service coverage while degrading local settlement diagnostics?
-- Are unpaid scheduled claims attributed to issuer reserve exhaustion and cashflow failure rather than to local pools?
+- Do higher service shares improve scheduled-payment coverage or cash headroom
+  while degrading local settlement diagnostics?
+- Are unpaid scheduled claims attributed to issuer cashflow, recovered-stable
+  headroom, reserve exhaustion, or actual lender-pool liquidity scarcity rather
+  than to local pools as hidden guarantors?
 - Is any result surprising enough to require code inspection before paper text is finalized?
 
 ## Model Semantics To Document
@@ -136,7 +146,17 @@ Review tasks:
 
 ### Credit And Repayment
 
-Producer borrowing is modeled as swapping the producer's own voucher for an accepted asset. The creditor pool then holds the producer's obligation. Repayment or closure occurs when the producer voucher leaves the creditor pool through an accepted return asset, acquisition by another participant, issuer return, burn, or redemption proxy. In bond-frontier runs this is now explicit: each producer-voucher borrowing event creates a dated obligation, ordinary circulation reduces the obligation before maturity, and unresolved voucher debt at maturity triggers stable repayment from the producer subject to the calibrated recovery rate. Unrecovered units are written off as defaulted producer debt rather than silently remaining as serviceable bond cashflow.
+Producer borrowing is currently modeled as swapping the producer's own voucher
+into a lender pool for stable out. The lender pool then holds the producer's
+pool-level obligation marker. Repayment or closure occurs when the producer
+voucher leaves the lender pool through stable repayment, stable purchase by
+another participant, issuer return, burn, redemption proxy, or ordinary voucher
+circulation. In bond-frontier runs this is explicit: each producer-voucher
+borrowing event creates a dated obligation, ordinary circulation reduces the
+pool-level exposure before maturity, and unresolved voucher debt at the 13-week
+maturity triggers stable repayment from the producer subject to the calibrated
+recovery/default rate. Unrecovered units are written off as defaulted producer
+debt rather than silently remaining as serviceable bond cashflow.
 
 Review tasks:
 
@@ -198,7 +218,8 @@ Swap fees and bond-service share are distributional parameters. They can help pa
 
 Review tasks:
 
-- Compare service coverage, voucher circulation, leakage, concentration, and stress across fee-service shares.
+- Compare scheduled-payment coverage, service-cash headroom, voucher
+  circulation, leakage, concentration, and stress across service-share settings.
 - Never treat higher bondholder payment as safe unless settlement guardrails also pass.
 - Voucher-denominated fees should not be ignored for bond service. They should enter a conversion process where the bond issuer attempts to swap them through pools for stable when liquidity permits.
 - Track failed fee conversion separately from absence of fees.
@@ -206,15 +227,22 @@ Review tasks:
 
 ### Bond Principal Clearing
 
-The current pilot repays bondholders primarily through fee/service flows and the
-issuer reserve. Producer repayment restores lender-pool liquidity, but it does
-not automatically return principal to the bond issuer.
+The current frontier treats gross bond principal as issuer-raised stable that is
+deployed directly to eligible lender pools. Producer borrowing draws from that
+lendable stable. Stable recovered by lender pools through borrower repayment,
+consumer or third-party stable purchases, and maturity settlement is reserved
+first for scheduled bondholder service through explicit issuer clearing
+accounting.
 
 Review tasks:
 
-- Consider a quarterly credit-clearing event in which eligible repaid stable or surplus lender-pool liquidity can return to the bond issuer for bondholder repayment.
+- Keep quarterly credit clearing explicit: only eligible recovered stable or
+  surplus lender-pool liquidity can return to issuer service accounting.
 - Keep this distinct from hidden community guarantees: only explicitly eligible cleared amounts should service bond principal.
 - Track lender-pool liquidity before and after clearing so credit capacity is not silently drained.
+- Report scheduled-payment coverage separately from service-cash headroom. The
+  latter is the candidate issuer operating and risk headroom after scheduled
+  bondholder service, not proven net surplus.
 
 ## Planned Sensitivity Matrix
 
@@ -224,7 +252,8 @@ and the validation gate is rerun:
 - Lower route visibility: reduce NOAM beam width, top-k/top-m, edge caps, or cache.
 - Route-substitution sensitivity: compare fixed-target route success, substituted route success, and degradation versus matched no-bond baselines.
 - Higher off-ramp pressure: increase stable leakage and check whether liquidity leakage binds.
-- Higher coupon: check whether service coverage and unpaid claims bind earlier.
+- Higher coupon: check whether scheduled-payment coverage, service-cash
+  headroom, or unpaid claims bind earlier.
 - Slower redemption: delay or probabilistically gate third-party voucher redemption.
 - Lower affinity: disable or weaken sticky route bias and buddy pools.
 - Multi-lender acceptance: allow producer vouchers to be accepted by multiple pools with distinct limits.
@@ -242,5 +271,6 @@ Do not promote frontier results into headline paper claims until:
 - Frontier outputs are reconstructed from complete shards.
 - No failed or stale shard manifests are included.
 - Safe cells pass issuer service, unpaid claim, route success, leakage, concentration, cash stress, stable dependency, and matched no-bond degradation guardrails.
-- Binding constraints are summarized by scale, coupon, principal ratio, and fee-service share.
+- Binding constraints are summarized by scale, coupon, principal ratio, service
+  share, scheduled-payment coverage, and cash headroom.
 - Surprising results are checked against code and calibration assumptions.

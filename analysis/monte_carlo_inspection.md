@@ -1,5 +1,10 @@
 # RegenBond Monte Carlo Inspection
 
+Status: legacy inspection of the pre-frontier `regenbond_lp_injection`
+scenario. This file is useful for historical mechanics review, but it is
+superseded for paper-facing bond claims by `sarafu_engine_validation` and the
+current `bond_issuer_frontier` issuer/lender-pool model.
+
 Generated from the CLI runner in `scripts/run_regenbond_monte_carlo.py`.
 
 ## Runs
@@ -42,8 +47,8 @@ Five-year headline regenbond trajectory:
 
 ## Headline Results
 
-- One-year regenbond scenario at 6 percent coupon: median annualized fee yield `19.99%`, median coupon coverage `3.33`, median cumulative fee return `79,945`, median coupon shortfall `0`.
-- Five-year regenbond headline at 6 percent coupon: median annualized fee yield `19.25%`, median coupon coverage `3.21`, median cumulative fee return `384,973`, median coupon shortfall `0`.
+- One-year legacy inspection at 6 percent coupon: median annualized fee yield `19.99%`, median legacy coverage ratio `3.33`, median cumulative fee return `79,945`, median coupon shortfall `0`.
+- Five-year legacy inspection at 6 percent coupon: median annualized fee yield `19.25%`, median legacy coverage ratio `3.21`, median cumulative fee return `384,973`, median coupon shortfall `0`.
 - Potential and realized pool connectivity are both near a single giant component in the headline runs: median realized largest component share is about `0.992`.
 - Expected verified report exposure rises with simulated activity: five-year headline median is `1,719` expected verified report exposures.
 
@@ -56,8 +61,8 @@ holding the scenario parameters fixed.
 `figures/fig_cumulative_fee_return_over_time.png` shows cumulative stable fee
 return reaching a one-year median of about `79,945` under the
 `regenbond_lp_injection` scenario at a `6%` annual coupon target. With
-`400,000` of LP/bond-like principal, the one-year coupon due is `24,000`, so
-the inspection run implies `3.33x` median coupon coverage. This is evidence
+`400,000` of legacy LP-style principal, the one-year coupon due is `24,000`, so
+the inspection run implies a `3.33x` median legacy coverage ratio. This is evidence
 that fee flow can service coupon-like return targets in the calibrated scenario.
 It is not evidence that principal is fully repaid within one year.
 
@@ -74,7 +79,7 @@ recovery under this inspection run, not a final claim of guaranteed payback.
 - Five-year headline figure: `260` ticks, `3` stochastic runs, seed base `501`,
   analysis diagnostics recorded every `13` ticks.
 - Scenario: `regenbond_lp_injection`.
-- LP/bond-like principal: `400,000` stable units from one LP.
+- Legacy LP-style principal: `400,000` stable units from one LP.
 - Annual coupon target: `6%`.
 - Bond fee-service share: `1.0`, meaning all simulated LP/sCLC stable return is
   counted toward bond service in this first-pass experiment.

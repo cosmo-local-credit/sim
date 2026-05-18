@@ -36,6 +36,12 @@ pipeline. That pipeline uses `RegenBonds/cleaned_data/data/csv` and should be
 run in the private research workspace, then exported into this repo as the
 public-safe `analysis/sarafu_calibration/` bundle before pushing.
 
+Current paper-facing interpretation uses `sarafu_engine_validation` as the
+no-bond gate and `bond_issuer_frontier` as the issuer/lender-pool frontier.
+The frontier deploys gross bond principal directly into eligible lender pools,
+uses producer own-voucher-in/stable-out borrowing, and evaluates scheduled
+bondholder payment separately from recovered-stable cash headroom.
+
 For later runs:
 
 ```bash
@@ -157,6 +163,14 @@ is set.
 `analysis/monte_carlo/engine_validation/engine_validation_summary.csv`. If it
 is missing or `review`, the frontier still runs but marks outputs non-final. If
 it is `fail`, paper-facing frontier execution is refused.
+
+Current frontier outputs should include both `scheduled_payment_coverage_*` and
+`service_cash_headroom_*`. The former is capped at 1.0 because it measures paid
+scheduled principal plus coupon divided by scheduled due. The latter is
+uncapped because it measures eligible recovered stable relative to scheduled
+due. Excess recovered stable above scheduled service is candidate issuer
+operating and risk-capital headroom, not proven profit until explicit issuer
+costs are modeled.
 
 ## Calibration Bundle
 
@@ -391,10 +405,10 @@ Frontier-specific parameters:
 | Env var | Meaning | Default |
 | --- | --- | --- |
 | `NETWORK_SCALES` | Comma-separated frontier scales. | job-specific |
-| `PRINCIPAL_RATIOS` | Comma-separated principal/certified-capacity ratios. | job-specific |
+| `PRINCIPAL_RATIOS` | Comma-separated principal/eligible-capacity ratios. | job-specific |
 | `COUPON_TARGETS` | Comma-separated annual coupon targets. | job-specific |
 | `BOND_FEE_SERVICE_SHARES` | Comma-separated eligible fee/service shares. | job-specific |
-| `CERTIFICATION_POLICY` | Certified pool policy. | `strong_moderate_capped` |
+| `CERTIFICATION_POLICY` | Eligible-pool policy used by the current frontier code. | `strong_moderate_capped` |
 | `FRONTIER_MODE` | `adaptive` or `grid`. | `adaptive` |
 | `FRONTIER_REFINEMENT_ROUNDS` | Adaptive midpoint rounds. | `1` |
 | `ROUTE_SUCCESS_MODE` | `diagnostic`, `relative`, or `absolute`. | `diagnostic` |
