@@ -173,6 +173,10 @@ class ScenarioConfig:
     liquidity_mandate_mode: str = "lender_liquidity"
     liquidity_mandate_activity_window_ticks: int = 12
     liquidity_mandate_max_per_pool_usd: float = 2000.0
+    ordinary_stable_spend_protection_enabled: bool = False
+    ordinary_stable_spend_buffer_voucher_share: float = 0.0
+    producer_loan_failure_backfill_enabled: bool = False
+    producer_loan_failure_backfill_max_attempts: int = 1
     waterfall_alpha_ops_share: float = 0.20
     waterfall_beta_liquidity_share: float = 0.40
     waterfall_gamma_insurance_share: float = 0.40

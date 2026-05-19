@@ -201,6 +201,8 @@ class SimulationEngine:
         self._producer_loan_zero_amount_tick: int = 0
         self._producer_loan_route_found_tick: int = 0
         self._producer_loan_route_failed_tick: int = 0
+        self._producer_loan_backfill_attempts_tick: int = 0
+        self._producer_loan_backfill_executed_tick: int = 0
         self._producer_loan_executed_tick: int = 0
         self._producer_loan_execution_failed_tick: int = 0
         self._producer_loan_sampled_usd_tick: float = 0.0
@@ -1646,11 +1648,37 @@ class SimulationEngine:
             amount_usd = min(amount_usd, float(self.cfg.swap_size_max_usd))
         value_in = self._asset_value(pool, asset_in)
         amount_in = amount_usd / value_in
-        return min(amount_in, pool.vault.get(asset_in))
+        return min(amount_in, self._ordinary_source_spendable_amount(pool, asset_in))
+
+    def _ordinary_source_stable_preserve_units(self, pool: "Pool") -> float:
+        cfg = self.cfg
+        if not bool(cfg.ordinary_stable_spend_protection_enabled):
+            return 0.0
+        if pool.policy.role not in ("producer", "consumer"):
+            return 0.0
+        reserve = max(0.0, float(pool.policy.min_stable_reserve or 0.0))
+        buffer_share = max(0.0, float(cfg.ordinary_stable_spend_buffer_voucher_share or 0.0))
+        voucher_buffer_usd = self._pool_voucher_value_usd(pool) * buffer_share
+        stable_value = self._asset_value(pool, cfg.stable_symbol)
+        if stable_value <= 1e-12:
+            stable_value = 1.0
+        return reserve + voucher_buffer_usd / stable_value
+
+    def _ordinary_source_spendable_amount(self, pool: "Pool", asset_in: str) -> float:
+        available = max(0.0, pool.vault.get(asset_in))
+        if asset_in != self.cfg.stable_symbol:
+            return available
+        preserve = self._ordinary_source_stable_preserve_units(pool)
+        if preserve <= 0.0:
+            return available
+        return max(0.0, available - preserve)
 
     def _source_asset_selection_weights(self, pool: "Pool", assets: list[str]) -> np.ndarray:
         weights = np.array(
-            [pool.vault.get(asset) * self._asset_value(pool, asset) for asset in assets],
+            [
+                self._ordinary_source_spendable_amount(pool, asset) * self._asset_value(pool, asset)
+                for asset in assets
+            ],
             dtype=float,
         )
         stable_bias_config: float | None = None
@@ -4848,10 +4876,61 @@ class SimulationEngine:
             eligible = [p for p in eligible if p.policy.role == "lender"]
         if not eligible:
             return 0.0
+        stable_id = cfg.stable_symbol
+
+        if cfg.liquidity_mandate_mode == "community_deficit_then_lender":
+            distributed = 0.0
+            community = [p for p in eligible if p.policy.role in ("producer", "consumer")]
+            community_deficits = {
+                p.pool_id: max(0.0, p.policy.min_stable_reserve - p.vault.get(stable_id))
+                for p in community
+            }
+            community_deficits = {
+                pool_id: deficit
+                for pool_id, deficit in community_deficits.items()
+                if deficit > 1e-9
+            }
+            total_deficit = sum(community_deficits.values())
+            if total_deficit > 1e-9:
+                fill_scale = min(1.0, budget_usd / total_deficit)
+                for p in community:
+                    deficit = community_deficits.get(p.pool_id, 0.0)
+                    if deficit <= 0.0:
+                        continue
+                    alloc = deficit * fill_scale
+                    if alloc <= 1e-9:
+                        continue
+                    if not self._vault_sub(mandates_pool, stable_id, alloc, "mandate_out", p.pool_id):
+                        continue
+                    self._vault_add(p, stable_id, alloc, "mandate_in", mandates_pool.pool_id)
+                    distributed += alloc
+
+            remaining_budget = max(0.0, budget_usd - distributed)
+            lenders = [p for p in eligible if p.policy.role == "lender"]
+            if remaining_budget > 1e-9 and lenders:
+                weights = {
+                    p.pool_id: 1.0 / max(1.0, p.vault.get(stable_id))
+                    for p in lenders
+                }
+                total_weight = sum(weights.values())
+                if total_weight > 1e-9:
+                    for p in lenders:
+                        alloc = remaining_budget * (weights.get(p.pool_id, 0.0) / total_weight)
+                        if alloc <= 1e-9:
+                            continue
+                        if not self._vault_sub(mandates_pool, stable_id, alloc, "mandate_out", p.pool_id):
+                            continue
+                        self._vault_add(p, stable_id, alloc, "mandate_in", mandates_pool.pool_id)
+                        distributed += alloc
+
+            if distributed > 0.0:
+                self.log.add(Event(self.tick, "LIQUIDITY_MANDATE_DISTRIBUTED", amount=distributed,
+                                   meta={"mode": cfg.liquidity_mandate_mode, "pool_count": len(eligible)}))
+                self._mandates_distributed_usd_total += distributed
+            return distributed
 
         weights: Dict[str, float] = {}
         deficits: Dict[str, float] = {}
-        stable_id = cfg.stable_symbol
 
         if cfg.liquidity_mandate_mode == "lender_liquidity":
             for p in eligible:
@@ -5391,6 +5470,8 @@ class SimulationEngine:
             self._producer_loan_zero_amount_tick = 0
             self._producer_loan_route_found_tick = 0
             self._producer_loan_route_failed_tick = 0
+            self._producer_loan_backfill_attempts_tick = 0
+            self._producer_loan_backfill_executed_tick = 0
             self._producer_loan_executed_tick = 0
             self._producer_loan_execution_failed_tick = 0
             self._producer_loan_sampled_usd_tick = 0.0
@@ -5562,8 +5643,12 @@ class SimulationEngine:
         if not source_pool.vault.inventory:
             return 0
 
-        # try each asset_in with positive inventory
-        asset_candidates = [a for a, amt in source_pool.vault.inventory.items() if amt > 1e-9]
+        # try each asset_in with positive ordinary-spendable inventory
+        asset_candidates = [
+            asset
+            for asset in source_pool.vault.inventory
+            if self._ordinary_source_spendable_amount(source_pool, asset) > 1e-9
+        ]
         if not asset_candidates:
             return 0
 
@@ -5724,6 +5809,25 @@ class SimulationEngine:
                     break
 
         return attempted
+
+    def _backfill_failed_loan_route(self, source_pool: "Pool") -> None:
+        cfg = self.cfg
+        if not bool(cfg.producer_loan_failure_backfill_enabled):
+            return
+        attempts = max(0, int(cfg.producer_loan_failure_backfill_max_attempts or 0))
+        if attempts <= 0:
+            return
+        before_swaps = int(self._noam_routing_swaps_tick + self._noam_clearing_swaps_tick)
+        for _ in range(attempts):
+            self._producer_loan_backfill_attempts_tick += 1
+            attempted = self._random_route_request(source_pool=source_pool, max_assets=1)
+            after_swaps = int(self._noam_routing_swaps_tick + self._noam_clearing_swaps_tick)
+            if after_swaps > before_swaps:
+                self._producer_loan_backfill_executed_tick += 1
+                break
+            before_swaps = after_swaps
+            if attempted > 0:
+                break
 
     def _producer_debt_contract_cash_due_usd(self, producer_pool_id: str, voucher_id: str) -> float:
         if not self._producer_debt_contract_repayment_enabled():
@@ -6077,6 +6181,7 @@ class SimulationEngine:
                                meta={"reason": plan.reason, "target": self.cfg.stable_symbol, "borrow": True}))
             self._producer_loan_route_failed_tick += 1
             self._record_swap_attempt(source_pool.pool_id, success=False)
+            self._backfill_failed_loan_route(source_pool)
             return True
 
         self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
@@ -6415,10 +6520,35 @@ class SimulationEngine:
             active_stable_share = active_stable_value / max(1e-9, active_stable_voucher_value)
             active_voucher_share = active_voucher_value / max(1e-9, active_stable_voucher_value)
             active_stable_to_voucher_ratio = active_stable_value / max(1e-9, active_voucher_value)
-            pools_under_reserve = sum(
-                1 for p in self.pools.values()
-                if not p.policy.system_pool and p.vault.get(cfg.stable_symbol) < p.policy.min_stable_reserve
-            )
+            role_stress_counts = {role: 0 for role in ("producer", "consumer", "lender")}
+            role_under_reserve = {role: 0 for role in ("producer", "consumer", "lender")}
+            role_reserve_deficit = {role: 0.0 for role in ("producer", "consumer", "lender")}
+            community_pools_total = 0
+            community_pools_under_reserve = 0
+            community_reserve_deficit = 0.0
+            pools_under_reserve = 0
+            stable_value = self._asset_value(next(iter(self.pools.values())), cfg.stable_symbol) if self.pools else 1.0
+            if stable_value <= 1e-12:
+                stable_value = 1.0
+            for p in self.pools.values():
+                if p.policy.system_pool:
+                    continue
+                role = p.policy.role
+                stable_units = p.vault.get(cfg.stable_symbol)
+                deficit_units = max(0.0, p.policy.min_stable_reserve - stable_units)
+                under = deficit_units > 1e-9
+                if under:
+                    pools_under_reserve += 1
+                if role in role_stress_counts:
+                    role_stress_counts[role] += 1
+                    if under:
+                        role_under_reserve[role] += 1
+                        role_reserve_deficit[role] += deficit_units * stable_value
+                if role in ("producer", "consumer"):
+                    community_pools_total += 1
+                    if under:
+                        community_pools_under_reserve += 1
+                        community_reserve_deficit += deficit_units * stable_value
             debt_outstanding_units = 0.0
             debt_outstanding_usd = 0.0
             for p in self.pools.values():
@@ -6613,6 +6743,30 @@ class SimulationEngine:
                 "voucher_value_share_in_active_pools": active_voucher_share,
                 "stable_to_voucher_value_ratio_in_active_pools": active_stable_to_voucher_ratio,
                 "pools_under_stable_reserve": pools_under_reserve,
+                "producer_pools_total": int(role_stress_counts["producer"]),
+                "producer_pools_under_stable_reserve": int(role_under_reserve["producer"]),
+                "producer_stable_reserve_stress_ratio": (
+                    role_under_reserve["producer"] / max(1, role_stress_counts["producer"])
+                ),
+                "producer_stable_reserve_deficit_usd": float(role_reserve_deficit["producer"]),
+                "consumer_pools_total": int(role_stress_counts["consumer"]),
+                "consumer_pools_under_stable_reserve": int(role_under_reserve["consumer"]),
+                "consumer_stable_reserve_stress_ratio": (
+                    role_under_reserve["consumer"] / max(1, role_stress_counts["consumer"])
+                ),
+                "consumer_stable_reserve_deficit_usd": float(role_reserve_deficit["consumer"]),
+                "lender_pools_total": int(role_stress_counts["lender"]),
+                "lender_pools_under_stable_reserve": int(role_under_reserve["lender"]),
+                "lender_stable_reserve_stress_ratio": (
+                    role_under_reserve["lender"] / max(1, role_stress_counts["lender"])
+                ),
+                "lender_stable_reserve_deficit_usd": float(role_reserve_deficit["lender"]),
+                "community_pools_total": int(community_pools_total),
+                "community_pools_under_stable_reserve": int(community_pools_under_reserve),
+                "community_stable_reserve_stress_ratio": (
+                    community_pools_under_reserve / max(1, community_pools_total)
+                ),
+                "community_stable_reserve_deficit_usd": float(community_reserve_deficit),
                 "debt_outstanding_units": debt_outstanding_units,
                 "debt_outstanding_usd": debt_outstanding_usd,
                 "redeemed_total": redeemed_total,
@@ -6707,6 +6861,8 @@ class SimulationEngine:
                 "producer_loan_zero_amount_tick": int(self._producer_loan_zero_amount_tick),
                 "producer_loan_route_found_tick": int(self._producer_loan_route_found_tick),
                 "producer_loan_route_failed_tick": int(self._producer_loan_route_failed_tick),
+                "producer_loan_backfill_attempts_tick": int(self._producer_loan_backfill_attempts_tick),
+                "producer_loan_backfill_executed_tick": int(self._producer_loan_backfill_executed_tick),
                 "producer_loan_executed_tick": int(self._producer_loan_executed_tick),
                 "producer_loan_execution_failed_tick": int(self._producer_loan_execution_failed_tick),
                 "producer_loan_sampled_usd_tick": float(self._producer_loan_sampled_usd_tick),

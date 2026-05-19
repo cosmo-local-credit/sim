@@ -100,6 +100,122 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(latest["lender_stable_reserve_usd"], 25.0)
         self.assertAlmostEqual(latest["lender_stable_available_above_reserve_usd"], 75.0)
 
+    def test_snapshot_reports_role_specific_stable_reserve_stress(self):
+        engine = SimulationEngine(
+            small_config(initial_consumers=1, max_pools=4)
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "producer")
+        consumer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "consumer")
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        for pool in (producer_pool, consumer_pool, lender_pool):
+            current_stable = pool.vault.get(stable_id)
+            if current_stable > 0.0:
+                engine._vault_sub(pool, stable_id, current_stable, "test_clear", "test")
+        producer_pool.policy.min_stable_reserve = 100.0
+        consumer_pool.policy.min_stable_reserve = 50.0
+        lender_pool.policy.min_stable_reserve = 25.0
+        engine._vault_add(producer_pool, stable_id, 40.0, "test_seed", "test")
+        engine._vault_add(consumer_pool, stable_id, 50.0, "test_seed", "test")
+        engine._vault_add(lender_pool, stable_id, 10.0, "test_seed", "test")
+        engine.tick = 1
+
+        engine.snapshot_metrics(force_network=True)
+        latest = engine.metrics.network_rows[-1]
+
+        self.assertEqual(latest["producer_pools_under_stable_reserve"], 1)
+        self.assertAlmostEqual(latest["producer_stable_reserve_deficit_usd"], 60.0)
+        self.assertEqual(latest["consumer_pools_under_stable_reserve"], 0)
+        self.assertEqual(latest["lender_pools_under_stable_reserve"], 1)
+        self.assertAlmostEqual(latest["lender_stable_reserve_deficit_usd"], 15.0)
+        self.assertEqual(latest["community_pools_under_stable_reserve"], 1)
+        self.assertAlmostEqual(latest["community_stable_reserve_stress_ratio"], 0.5)
+
+    def test_ordinary_stable_spend_protection_caps_stable_source_amount(self):
+        engine = SimulationEngine(
+            small_config(
+                ordinary_stable_spend_protection_enabled=True,
+                ordinary_stable_spend_buffer_voucher_share=0.05,
+                swap_size_min_usd=1000.0,
+                swap_size_mean_frac=1.0,
+                stable_source_swap_size_multiplier=1.0,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        voucher_id = producer.voucher_spec.voucher_id
+        current_stable = producer_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(producer_pool, stable_id, current_stable, "test_clear", "test")
+        producer_pool.policy.min_stable_reserve = 100.0
+        producer_pool.values.set_value(voucher_id, 1.0)
+        current_voucher = producer_pool.vault.get(voucher_id)
+        if current_voucher > 0.0:
+            engine._vault_sub(producer_pool, voucher_id, current_voucher, "test_clear", "test")
+        engine._vault_add(producer_pool, stable_id, 150.0, "test_seed", "test")
+        engine._vault_add(producer_pool, voucher_id, 200.0, "test_seed", "test")
+
+        self.assertAlmostEqual(
+            engine._ordinary_source_spendable_amount(producer_pool, stable_id),
+            40.0,
+        )
+        self.assertLessEqual(engine._sample_amount_in(producer_pool, stable_id), 40.0 + 1e-9)
+
+    def test_failed_loan_route_backfill_attempts_ordinary_activity(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_loan_failure_backfill_enabled=True,
+                producer_loan_failure_backfill_max_attempts=1,
+            )
+        )
+        producer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "producer")
+        calls = []
+
+        def fake_random_route_request(source_pool=None, max_assets=None):
+            calls.append((source_pool, max_assets))
+            engine._noam_routing_swaps_tick += 1
+            return 1
+
+        engine._random_route_request = fake_random_route_request
+
+        engine._backfill_failed_loan_route(producer_pool)
+
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][0], producer_pool)
+        self.assertEqual(calls[0][1], 1)
+        self.assertEqual(engine._producer_loan_backfill_attempts_tick, 1)
+        self.assertEqual(engine._producer_loan_backfill_executed_tick, 1)
+
+    def test_community_deficit_then_lender_mandate_fills_community_first(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_consumers=1,
+                max_pools=4,
+                liquidity_mandate_mode="community_deficit_then_lender",
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "producer")
+        consumer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "consumer")
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        mandates_pool = engine.pools[engine.mandates_pool_id]
+        for pool in (producer_pool, consumer_pool, lender_pool, mandates_pool):
+            current_stable = pool.vault.get(stable_id)
+            if current_stable > 0.0:
+                engine._vault_sub(pool, stable_id, current_stable, "test_clear", "test")
+        producer_pool.policy.min_stable_reserve = 50.0
+        consumer_pool.policy.min_stable_reserve = 30.0
+        engine._vault_add(consumer_pool, stable_id, 10.0, "test_seed", "test")
+        engine._vault_add(mandates_pool, stable_id, 100.0, "test_seed", "test")
+
+        distributed = engine._distribute_liquidity_mandates(100.0)
+
+        self.assertAlmostEqual(distributed, 100.0)
+        self.assertAlmostEqual(producer_pool.vault.get(stable_id), 50.0)
+        self.assertAlmostEqual(consumer_pool.vault.get(stable_id), 30.0)
+        self.assertAlmostEqual(lender_pool.vault.get(stable_id), 30.0)
+
     def test_frontier_bond_principal_is_seeded_directly_to_lenders(self):
         args = argparse.Namespace(
             pool_metrics_stride=0,
@@ -141,6 +257,11 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertTrue(cfg.producer_debt_contract_repayment_enabled)
         self.assertAlmostEqual(cfg.producer_debt_contract_service_margin_rate, 0.50)
         self.assertAlmostEqual(cfg.producer_debt_contract_revenue_rate, 1.50)
+        self.assertTrue(cfg.ordinary_stable_spend_protection_enabled)
+        self.assertAlmostEqual(cfg.ordinary_stable_spend_buffer_voucher_share, 0.05)
+        self.assertTrue(cfg.producer_loan_failure_backfill_enabled)
+        self.assertEqual(cfg.producer_loan_failure_backfill_max_attempts, 1)
+        self.assertEqual(cfg.liquidity_mandate_mode, "community_deficit_then_lender")
         self.assertEqual(cfg.max_pools, 9)
 
         engine = SimulationEngine(cfg, seed=7)
@@ -706,6 +827,54 @@ class RegenBondRevisionTests(unittest.TestCase):
 
         self.assertEqual(summary["safe"], 0)
         self.assertIn("p50_available_service_cash_headroom", summary["binding_constraint"])
+
+    def test_frontier_safety_decomposes_material_decline_reasons(self):
+        row = {
+            "bond_principal_usd": 1000.0,
+            "principal_ratio": 0.05,
+            "network_scale": "current",
+            "coupon_target_annual": 0.0,
+            "bond_fee_service_share": 0.5,
+            "issuer_service_coverage_ratio": 1.0,
+            "issuer_paid_coverage_ratio": 1.0,
+            "issuer_service_cash_headroom_ratio": 2.0,
+            "issuer_available_service_cash_headroom_ratio": 2.0,
+            "issuer_scheduled_debt_service_due_usd": 100.0,
+            "issuer_actual_bondholder_payment_usd": 100.0,
+            "issuer_unpaid_scheduled_claim_usd": 0.0,
+            "route_success_rate_cumulative": 1.0,
+            "realized_edge_top_share": 0.0,
+            "swap_volume_usd_total": 20.0,
+            "transactions_total": 100.0,
+            "swap_count_vchr_to_vchr_total": 80.0,
+            "swap_volume_vchr_to_vchr_total": 50.0,
+            "stable_value_share_in_active_pools": 0.10,
+            "voucher_value_share_in_active_pools": 0.90,
+            "consumer_stable_reserve_stress_ratio": 0.0,
+            "community_stable_reserve_stress_ratio": 0.0,
+            "stable_liquidity_leakage_ratio_cumulative": 0.0,
+        }
+        baseline = {
+            "route_success_p50": 1.0,
+            "swap_volume_p50": 100.0,
+            "voucher_to_voucher_count_p50": 80.0,
+            "voucher_to_voucher_share_p50": 0.80,
+            "stable_value_share_p95": 0.10,
+            "voucher_value_share_p50": 0.90,
+            "consumer_cash_stress_p50": 0.0,
+            "consumer_cash_stress_p95": 0.0,
+            "community_cash_stress_p50": 0.0,
+            "community_cash_stress_p95": 0.0,
+            "liquidity_leakage_p50": 0.0,
+            "liquidity_leakage_p95": 0.0,
+        }
+
+        summary = summarize_frontier_cell([row] * 5, baseline, 0.85, "diagnostic")
+
+        self.assertEqual(summary["safe"], 0)
+        self.assertEqual(summary["material_decline_swap_volume_decline"], 1)
+        self.assertIn("swap_volume_decline", summary["material_decline_reasons"])
+        self.assertIn("swap_volume_decline_vs_no_bond", summary["binding_constraint"])
 
     def test_producer_debt_maturity_repayment_recovers_lender_stable(self):
         engine = SimulationEngine(

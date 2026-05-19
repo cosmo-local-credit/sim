@@ -96,6 +96,8 @@ CORE_QUANTILE_METRICS = (
     "loan_issuance_volume_usd",
     "debt_outstanding_usd",
     "household_cash_stress_ratio",
+    "consumer_stable_reserve_stress_ratio",
+    "community_stable_reserve_stress_ratio",
     "expected_verified_report_exposure",
     "expected_cash_return_coverage",
     "expected_voucher_return_coverage",
@@ -1343,6 +1345,11 @@ def scenario_config(
             cfg.productive_credit_return_rate,
             1.0 + contract_margin,
         )
+        cfg.ordinary_stable_spend_protection_enabled = True
+        cfg.ordinary_stable_spend_buffer_voucher_share = 0.05
+        cfg.producer_loan_failure_backfill_enabled = True
+        cfg.producer_loan_failure_backfill_max_attempts = 1
+        cfg.liquidity_mandate_mode = "community_deficit_then_lender"
         cfg.route_substitution_enabled = True
         cfg.route_substitution_max_alternatives = 3
         route_request_base = int(getattr(args, "_frontier_route_requests_per_tick", 1))
@@ -2009,6 +2016,8 @@ def run_one(
             "producer_loan_zero_amount_tick",
             "producer_loan_route_found_tick",
             "producer_loan_route_failed_tick",
+            "producer_loan_backfill_attempts_tick",
+            "producer_loan_backfill_executed_tick",
             "producer_loan_executed_tick",
             "producer_loan_execution_failed_tick",
             "producer_loan_sampled_usd_tick",
@@ -2065,6 +2074,10 @@ def run_one(
         stress_ratio = safe_float(latest.get("pools_under_stable_reserve")) / max(
             1.0, safe_float(latest.get("num_pools"), 1.0)
         )
+        producer_stress_ratio = safe_float(latest.get("producer_stable_reserve_stress_ratio"))
+        consumer_stress_ratio = safe_float(latest.get("consumer_stable_reserve_stress_ratio"))
+        lender_stress_ratio = safe_float(latest.get("lender_stable_reserve_stress_ratio"))
+        community_stress_ratio = safe_float(latest.get("community_stable_reserve_stress_ratio"))
         leakage_denom = (
             safe_float(latest.get("stable_onramp_usd_tick"))
             + safe_float(bmetrics.get("bond_principal_usd"))
@@ -2246,6 +2259,14 @@ def run_one(
             "producer_loan_route_found_total": cumulative_float["producer_loan_route_found_tick"],
             "producer_loan_route_failed": latest.get("producer_loan_route_failed_tick", 0),
             "producer_loan_route_failed_total": cumulative_float["producer_loan_route_failed_tick"],
+            "producer_loan_backfill_attempts": latest.get("producer_loan_backfill_attempts_tick", 0),
+            "producer_loan_backfill_attempts_total": cumulative_float[
+                "producer_loan_backfill_attempts_tick"
+            ],
+            "producer_loan_backfill_executed": latest.get("producer_loan_backfill_executed_tick", 0),
+            "producer_loan_backfill_executed_total": cumulative_float[
+                "producer_loan_backfill_executed_tick"
+            ],
             "producer_loan_executed": latest.get("producer_loan_executed_tick", 0),
             "producer_loan_executed_total": cumulative_float["producer_loan_executed_tick"],
             "producer_loan_execution_failed": latest.get("producer_loan_execution_failed_tick", 0),
@@ -2507,6 +2528,32 @@ def run_one(
             "stable_excess_sweep_pools_tick": latest.get("stable_excess_sweep_pools_tick", 0),
             "stable_excess_sweep_pools_total": latest.get("stable_excess_sweep_pools_total", 0),
             "household_cash_stress_ratio": stress_ratio,
+            "producer_stable_reserve_stress_ratio": producer_stress_ratio,
+            "producer_pools_under_stable_reserve": latest.get("producer_pools_under_stable_reserve", 0),
+            "producer_pools_total": latest.get("producer_pools_total", 0),
+            "producer_stable_reserve_deficit_usd": latest.get(
+                "producer_stable_reserve_deficit_usd", 0.0
+            ),
+            "consumer_stable_reserve_stress_ratio": consumer_stress_ratio,
+            "consumer_pools_under_stable_reserve": latest.get("consumer_pools_under_stable_reserve", 0),
+            "consumer_pools_total": latest.get("consumer_pools_total", 0),
+            "consumer_stable_reserve_deficit_usd": latest.get(
+                "consumer_stable_reserve_deficit_usd", 0.0
+            ),
+            "lender_stable_reserve_stress_ratio": lender_stress_ratio,
+            "lender_pools_under_stable_reserve": latest.get("lender_pools_under_stable_reserve", 0),
+            "lender_pools_total": latest.get("lender_pools_total", 0),
+            "lender_stable_reserve_deficit_usd": latest.get(
+                "lender_stable_reserve_deficit_usd", 0.0
+            ),
+            "community_stable_reserve_stress_ratio": community_stress_ratio,
+            "community_pools_under_stable_reserve": latest.get(
+                "community_pools_under_stable_reserve", 0
+            ),
+            "community_pools_total": latest.get("community_pools_total", 0),
+            "community_stable_reserve_deficit_usd": latest.get(
+                "community_stable_reserve_deficit_usd", 0.0
+            ),
             "stable_liquidity_leakage_ratio_tick": leakage_ratio,
             "stable_liquidity_leakage_ratio_cumulative": (
                 cumulative_float["stable_offramp_usd_tick"]
@@ -2637,6 +2684,14 @@ def run_one(
         "liquidity_leakage_flag": int(safe_float(final.get("stable_liquidity_leakage_ratio_tick")) > 0.05),
         "household_cash_stress_ratio": final.get("household_cash_stress_ratio", 0.0),
         "household_cash_stress_flag": int(safe_float(final.get("household_cash_stress_ratio")) > 0.20),
+        "consumer_stable_reserve_stress_ratio": final.get("consumer_stable_reserve_stress_ratio", 0.0),
+        "community_stable_reserve_stress_ratio": final.get("community_stable_reserve_stress_ratio", 0.0),
+        "consumer_cash_stress_flag": int(
+            safe_float(final.get("consumer_stable_reserve_stress_ratio")) > 0.20
+        ),
+        "community_cash_stress_flag": int(
+            safe_float(final.get("community_stable_reserve_stress_ratio")) > 0.20
+        ),
         "realized_edge_top_share": final_network.get("realized_edge_top_share", 0.0),
         "concentration_flag": int(safe_float(final_network.get("realized_edge_top_share")) > 0.25),
         "realized_largest_component_share": final_network.get("realized_largest_component_share", 0.0),
@@ -4205,6 +4260,14 @@ def summarize_frontier_cell(
         safe_float(row.get("route_substitution_success_rate_cumulative")) for row in rows
     ]
     stress_values = [safe_float(row.get("household_cash_stress_ratio")) for row in rows]
+    consumer_stress_values = [
+        safe_float(row.get("consumer_stable_reserve_stress_ratio", row.get("household_cash_stress_ratio")))
+        for row in rows
+    ]
+    community_stress_values = [
+        safe_float(row.get("community_stable_reserve_stress_ratio", row.get("household_cash_stress_ratio")))
+        for row in rows
+    ]
     leakage_values = [safe_float(row.get("stable_liquidity_leakage_ratio_cumulative")) for row in rows]
     claims_ratios = [
         safe_float(row.get("issuer_unpaid_scheduled_claim_usd", row.get("claims_unpaid_usd_tick")))
@@ -4276,6 +4339,12 @@ def summarize_frontier_cell(
     producer_loan_executed_values = [safe_float(row.get("producer_loan_executed_total")) for row in rows]
     producer_loan_route_failed_values = [
         safe_float(row.get("producer_loan_route_failed_total")) for row in rows
+    ]
+    producer_loan_backfill_attempt_values = [
+        safe_float(row.get("producer_loan_backfill_attempts_total")) for row in rows
+    ]
+    producer_loan_backfill_executed_values = [
+        safe_float(row.get("producer_loan_backfill_executed_total")) for row in rows
     ]
     producer_loan_attempted_usd_values = [
         safe_float(row.get("producer_loan_attempted_usd_total")) for row in rows
@@ -4356,10 +4425,22 @@ def summarize_frontier_cell(
     voucher_share_p50 = percentile(voucher_share_values, 0.50)
     stress_p50 = percentile(stress_values, 0.50)
     stress_p95 = percentile(stress_values, 0.95)
+    consumer_stress_p50 = percentile(consumer_stress_values, 0.50)
+    consumer_stress_p95 = percentile(consumer_stress_values, 0.95)
+    community_stress_p50 = percentile(community_stress_values, 0.50)
+    community_stress_p95 = percentile(community_stress_values, 0.95)
     leakage_p50 = percentile(leakage_values, 0.50)
     leakage_p95 = percentile(leakage_values, 0.95)
     baseline_stress_p50 = baseline.get("household_cash_stress_p50", 0.0)
     baseline_stress_p95 = baseline.get("household_cash_stress_p95", baseline_stress_p50)
+    baseline_consumer_stress_p50 = baseline.get("consumer_cash_stress_p50", baseline_stress_p50)
+    baseline_consumer_stress_p95 = baseline.get(
+        "consumer_cash_stress_p95", baseline_consumer_stress_p50
+    )
+    baseline_community_stress_p50 = baseline.get("community_cash_stress_p50", baseline_stress_p50)
+    baseline_community_stress_p95 = baseline.get(
+        "community_cash_stress_p95", baseline_community_stress_p50
+    )
     baseline_leakage_p50 = baseline.get("liquidity_leakage_p50", 0.0)
     baseline_leakage_p95 = baseline.get("liquidity_leakage_p95", baseline_leakage_p50)
     baseline_v2v_count_p50 = baseline.get("voucher_to_voucher_count_p50", 0.0)
@@ -4368,8 +4449,18 @@ def summarize_frontier_cell(
     baseline_stable_share_p95 = baseline.get("stable_value_share_p95", baseline_stable_share_p50)
     baseline_voucher_share_p50 = baseline.get("voucher_value_share_p50", 0.0)
     stress_delta_p95 = max(0.0, stress_p95 - baseline_stress_p95)
+    consumer_stress_delta_p95 = max(0.0, consumer_stress_p95 - baseline_consumer_stress_p95)
+    consumer_stress_delta_p50 = max(0.0, consumer_stress_p50 - baseline_consumer_stress_p50)
+    community_stress_delta_p95 = max(0.0, community_stress_p95 - baseline_community_stress_p95)
+    community_stress_delta_p50 = max(0.0, community_stress_p50 - baseline_community_stress_p50)
     leakage_delta_p95 = max(0.0, leakage_p95 - baseline_leakage_p95)
     stable_dependency_delta_p95 = max(0.0, stable_share_p95 - baseline_stable_share_p95)
+    baseline_route_p50 = baseline.get("route_success_p50", 0.0)
+    baseline_swap_p50 = baseline.get("swap_volume_p50", 0.0)
+    route_success_delta_vs_baseline = route_p50 - baseline_route_p50
+    swap_volume_ratio_vs_baseline = swap_p50 / max(1e-9, baseline_swap_p50)
+    route_decline = route_p50 < baseline_route_p50 - 0.05
+    swap_volume_decline = baseline_swap_p50 > 0.0 and swap_p50 < baseline_swap_p50 * 0.85
     v2v_count_decline = (
         baseline_v2v_count_p50 > 0.0 and v2v_count_p50 < baseline_v2v_count_p50 * 0.85
     )
@@ -4379,15 +4470,20 @@ def summarize_frontier_cell(
     voucher_value_share_decline = (
         baseline_voucher_share_p50 > 0.0 and voucher_share_p50 < max(0.0, baseline_voucher_share_p50 - 0.15)
     )
+    stable_dependency_increase = stable_dependency_delta_p95 > 0.15
+    consumer_stress_increase = consumer_stress_p50 > baseline_consumer_stress_p50 + 0.05
+    community_stress_increase = community_stress_p50 > baseline_community_stress_p50 + 0.05
+    leakage_increase = leakage_p50 > baseline_leakage_p50 + 0.05
     material_decline = (
-        route_p50 < baseline.get("route_success_p50", 0.0) - 0.05
-        or swap_p50 < baseline.get("swap_volume_p50", 0.0) * 0.85
+        route_decline
+        or swap_volume_decline
         or v2v_count_decline
         or v2v_share_decline
-        or stable_dependency_delta_p95 > 0.15
+        or stable_dependency_increase
         or voucher_value_share_decline
-        or stress_p50 > baseline_stress_p50 + 0.05
-        or leakage_p50 > baseline_leakage_p50 + 0.05
+        or consumer_stress_increase
+        or community_stress_increase
+        or leakage_increase
     )
     constraints = []
     if percentile(scheduled_payment_values, 0.50) < 1.00:
@@ -4400,10 +4496,14 @@ def summarize_frontier_cell(
     route_success_mode = str(route_success_mode or "diagnostic").strip().lower()
     if route_success_mode == "absolute" and percentile(route_values, 0.05) < route_success_floor:
         constraints.append("p05_route_success")
-    elif route_success_mode == "relative" and route_p50 < baseline.get("route_success_p50", 0.0) - 0.05:
+    elif route_success_mode == "relative" and route_decline:
         constraints.append("route_success_decline_vs_no_bond")
-    if stress_delta_p95 > 0.20:
-        constraints.append("p95_household_cash_stress_delta")
+    if swap_volume_decline:
+        constraints.append("swap_volume_decline_vs_no_bond")
+    if consumer_stress_delta_p95 > 0.20:
+        constraints.append("p95_consumer_cash_stress_delta")
+    if community_stress_delta_p95 > 0.20:
+        constraints.append("p95_community_cash_stress_delta")
     if leakage_delta_p95 > 0.15:
         constraints.append("p95_liquidity_leakage_delta")
     if percentile(claims_ratios, 0.95) > 0.01:
@@ -4414,12 +4514,31 @@ def summarize_frontier_cell(
         constraints.append("voucher_to_voucher_count_decline_vs_no_bond")
     if v2v_share_decline:
         constraints.append("voucher_to_voucher_share_decline_vs_no_bond")
-    if stable_dependency_delta_p95 > 0.15:
+    if stable_dependency_increase:
         constraints.append("p95_stable_dependency_delta")
     if voucher_value_share_decline:
         constraints.append("voucher_value_share_decline_vs_no_bond")
     if material_decline:
         constraints.append("material_decline_vs_no_bond")
+    material_reasons = []
+    if route_decline:
+        material_reasons.append("route_success_decline")
+    if swap_volume_decline:
+        material_reasons.append("swap_volume_decline")
+    if v2v_count_decline:
+        material_reasons.append("voucher_to_voucher_count_decline")
+    if v2v_share_decline:
+        material_reasons.append("voucher_to_voucher_share_decline")
+    if stable_dependency_increase:
+        material_reasons.append("stable_dependency_increase")
+    if consumer_stress_increase:
+        material_reasons.append("consumer_stress_increase")
+    if community_stress_increase:
+        material_reasons.append("community_stress_increase")
+    if leakage_increase:
+        material_reasons.append("leakage_increase")
+    if voucher_value_share_decline:
+        material_reasons.append("voucher_share_decline")
     first = rows[0] if rows else {}
     return {
         "scenario": "bond_issuer_frontier",
@@ -4450,6 +4569,7 @@ def summarize_frontier_cell(
         "issuer_unpaid_scheduled_claim_p95": percentile(unpaid_values, 0.95),
         "route_success_p05": percentile(route_values, 0.05),
         "route_success_p50": route_p50,
+        "route_success_delta_vs_baseline": route_success_delta_vs_baseline,
         "route_success_floor": route_success_floor,
         "route_success_mode": route_success_mode,
         "route_fixed_success_p05": percentile(fixed_route_values, 0.05),
@@ -4458,11 +4578,20 @@ def summarize_frontier_cell(
         "route_substitution_success_p50": percentile(substitution_route_values, 0.50),
         "household_cash_stress_p95": stress_p95,
         "household_cash_stress_delta_p95": stress_delta_p95,
+        "consumer_cash_stress_p50": consumer_stress_p50,
+        "consumer_cash_stress_p95": consumer_stress_p95,
+        "consumer_stress_delta_p50": consumer_stress_delta_p50,
+        "consumer_stress_delta_p95": consumer_stress_delta_p95,
+        "community_cash_stress_p50": community_stress_p50,
+        "community_cash_stress_p95": community_stress_p95,
+        "community_stress_delta_p50": community_stress_delta_p50,
+        "community_stress_delta_p95": community_stress_delta_p95,
         "liquidity_leakage_p95": leakage_p95,
         "liquidity_leakage_delta_p95": leakage_delta_p95,
         "unpaid_claims_ratio_p95": percentile(claims_ratios, 0.95),
         "realized_edge_concentration_p95": percentile(concentration_values, 0.95),
         "swap_volume_usd_total_p50": swap_p50,
+        "swap_volume_ratio_vs_baseline": swap_volume_ratio_vs_baseline,
         "voucher_to_voucher_count_p50": v2v_count_p50,
         "voucher_to_voucher_volume_p50": v2v_volume_p50,
         "voucher_to_voucher_share_p50": v2v_share_p50,
@@ -4505,6 +4634,12 @@ def summarize_frontier_cell(
         "producer_loan_attempts_total_p50": percentile(producer_loan_attempt_values, 0.50),
         "producer_loan_executed_total_p50": percentile(producer_loan_executed_values, 0.50),
         "producer_loan_route_failed_total_p50": percentile(producer_loan_route_failed_values, 0.50),
+        "producer_loan_backfill_attempts_total_p50": percentile(
+            producer_loan_backfill_attempt_values, 0.50
+        ),
+        "producer_loan_backfill_executed_total_p50": percentile(
+            producer_loan_backfill_executed_values, 0.50
+        ),
         "producer_loan_attempted_usd_total_p50": percentile(producer_loan_attempted_usd_values, 0.50),
         "producer_loan_executed_usd_total_p50": percentile(producer_loan_executed_usd_values, 0.50),
         "producer_loan_clipped_lender_cap_usd_total_p50": percentile(
@@ -4567,9 +4702,23 @@ def summarize_frontier_cell(
         "baseline_voucher_value_share_p50": baseline_voucher_share_p50,
         "baseline_household_cash_stress_p50": baseline_stress_p50,
         "baseline_household_cash_stress_p95": baseline_stress_p95,
+        "baseline_consumer_cash_stress_p50": baseline_consumer_stress_p50,
+        "baseline_consumer_cash_stress_p95": baseline_consumer_stress_p95,
+        "baseline_community_cash_stress_p50": baseline_community_stress_p50,
+        "baseline_community_cash_stress_p95": baseline_community_stress_p95,
         "baseline_liquidity_leakage_p50": baseline_leakage_p50,
         "baseline_liquidity_leakage_p95": baseline_leakage_p95,
         "stable_dependency_delta_p95": stable_dependency_delta_p95,
+        "material_decline_route_success_decline": int(route_decline),
+        "material_decline_swap_volume_decline": int(swap_volume_decline),
+        "material_decline_voucher_to_voucher_count_decline": int(v2v_count_decline),
+        "material_decline_voucher_to_voucher_share_decline": int(v2v_share_decline),
+        "material_decline_stable_dependency_increase": int(stable_dependency_increase),
+        "material_decline_consumer_stress_increase": int(consumer_stress_increase),
+        "material_decline_community_stress_increase": int(community_stress_increase),
+        "material_decline_leakage_increase": int(leakage_increase),
+        "material_decline_voucher_share_decline": int(voucher_value_share_decline),
+        "material_decline_reasons": ";".join(material_reasons),
         "voucher_to_voucher_count_decline_vs_no_bond": int(v2v_count_decline),
         "voucher_to_voucher_share_decline_vs_no_bond": int(v2v_share_decline),
         "voucher_value_share_decline_vs_no_bond": int(voucher_value_share_decline),
@@ -4983,6 +5132,34 @@ def frontier_baseline_metrics(baseline_rows: list[dict[str, object]]) -> dict[st
         ),
         "household_cash_stress_p95": percentile(
             [safe_float(row.get("household_cash_stress_ratio")) for row in baseline_rows], 0.95
+        ),
+        "consumer_cash_stress_p50": percentile(
+            [
+                safe_float(row.get("consumer_stable_reserve_stress_ratio", row.get("household_cash_stress_ratio")))
+                for row in baseline_rows
+            ],
+            0.50,
+        ),
+        "consumer_cash_stress_p95": percentile(
+            [
+                safe_float(row.get("consumer_stable_reserve_stress_ratio", row.get("household_cash_stress_ratio")))
+                for row in baseline_rows
+            ],
+            0.95,
+        ),
+        "community_cash_stress_p50": percentile(
+            [
+                safe_float(row.get("community_stable_reserve_stress_ratio", row.get("household_cash_stress_ratio")))
+                for row in baseline_rows
+            ],
+            0.50,
+        ),
+        "community_cash_stress_p95": percentile(
+            [
+                safe_float(row.get("community_stable_reserve_stress_ratio", row.get("household_cash_stress_ratio")))
+                for row in baseline_rows
+            ],
+            0.95,
         ),
         "liquidity_leakage_p50": percentile(
             [safe_float(row.get("stable_liquidity_leakage_ratio_cumulative")) for row in baseline_rows], 0.50
