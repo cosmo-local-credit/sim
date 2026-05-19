@@ -85,6 +85,7 @@ CORE_QUANTILE_METRICS = (
     "issuer_service_coverage_ratio",
     "issuer_paid_coverage_ratio",
     "issuer_service_cash_headroom_ratio",
+    "issuer_available_service_cash_headroom_ratio",
     "issuer_reserve_balance_usd",
     "issuer_unpaid_scheduled_claim_usd",
     "fee_pool_cumulative_usd",
@@ -235,6 +236,24 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=13,
         help="Issuer scheduled payment interval in weekly ticks.",
+    )
+    parser.add_argument(
+        "--bond-service-lockbox-mode",
+        default="remaining_schedule",
+        choices=("next_due", "remaining_schedule"),
+        help=(
+            "Bond-frontier recovered-stable reservation mode. The default reserves "
+            "against the remaining scheduled service; next_due is available for controls."
+        ),
+    )
+    parser.add_argument(
+        "--bond-service-lockbox-coverage-ratio",
+        type=float,
+        default=1.25,
+        help=(
+            "Bond-frontier lockbox coverage target. A value of 1.25 reserves a "
+            "25% headroom buffer above scheduled bondholder service."
+        ),
     )
     parser.add_argument(
         "--frontier-mode",
@@ -1295,6 +1314,13 @@ def scenario_config(
         )
         cfg.bond_service_reserve_enabled = True
         cfg.bond_service_reserve_recovery_share = 1.0
+        cfg.bond_service_lockbox_mode = str(
+            getattr(args, "bond_service_lockbox_mode", "remaining_schedule") or "remaining_schedule"
+        )
+        cfg.bond_service_lockbox_coverage_ratio = max(
+            0.0,
+            float(getattr(args, "bond_service_lockbox_coverage_ratio", 1.25) or 0.0),
+        )
         cfg.route_substitution_enabled = True
         cfg.route_substitution_max_alternatives = 3
         route_request_base = int(getattr(args, "_frontier_route_requests_per_tick", 1))
@@ -1638,7 +1664,7 @@ def issuer_schedule_due(
     }
 
 
-def bond_metrics(latest: dict[str, object], cfg: ScenarioConfig, tick: int) -> dict[str, float]:
+def bond_metrics(latest: dict[str, object], cfg: ScenarioConfig, tick: int) -> dict[str, object]:
     raw_deployed = safe_float(latest.get("lp_injected_usd_total"))
     configured_gross = safe_float(getattr(cfg, "bond_gross_principal_usd", 0.0))
     principal = configured_gross if configured_gross > 1e-9 else raw_deployed
@@ -1680,6 +1706,16 @@ def bond_metrics(latest: dict[str, object], cfg: ScenarioConfig, tick: int) -> d
         if scheduled_due > 1e-9
         else (999.0 if principal <= 1e-9 else 0.0)
     )
+    lockbox_balance = safe_float(latest.get("bond_service_reserve_balance_usd"))
+    sweepable_pending_recovered_stable = safe_float(
+        latest.get("lender_recovered_stable_sweepable_pending_usd_total")
+    )
+    available_service_cash = returned + lockbox_balance + sweepable_pending_recovered_stable
+    available_service_cash_headroom = (
+        available_service_cash / scheduled_due
+        if scheduled_due > 1e-9
+        else (999.0 if principal <= 1e-9 else 0.0)
+    )
     coupon_coverage = returned / coupon_due if coupon_due > 1e-9 else 1.0
     simple_yield = returned / principal if principal > 1e-9 else 0.0
     annualized_yield = simple_yield / elapsed_years if principal > 1e-9 else 0.0
@@ -1712,6 +1748,14 @@ def bond_metrics(latest: dict[str, object], cfg: ScenarioConfig, tick: int) -> d
         "issuer_service_coverage_ratio": service_coverage,
         "issuer_paid_coverage_ratio": paid_coverage,
         "issuer_service_cash_headroom_ratio": service_cash_headroom,
+        "issuer_available_service_cash_usd": available_service_cash,
+        "issuer_available_service_cash_headroom_ratio": available_service_cash_headroom,
+        "lender_recovered_stable_sweepable_pending_usd_total": sweepable_pending_recovered_stable,
+        "bond_service_lockbox_target_usd": safe_float(latest.get("bond_service_lockbox_target_usd")),
+        "bond_service_lockbox_coverage_ratio": safe_float(
+            latest.get("bond_service_lockbox_coverage_ratio")
+        ),
+        "bond_service_lockbox_mode": str(latest.get("bond_service_lockbox_mode", "")),
         "issuer_payment_periods_elapsed": schedule["periods_elapsed"],
         "issuer_payment_periods_total": schedule["total_periods"],
         "issuer_payment_stride_ticks": float(payment_stride),
@@ -4076,6 +4120,12 @@ def service_cash_headroom(row: dict[str, object]) -> float:
     return recovered / scheduled_due
 
 
+def available_service_cash_headroom(row: dict[str, object]) -> float:
+    if "issuer_available_service_cash_headroom_ratio" in row:
+        return safe_float(row.get("issuer_available_service_cash_headroom_ratio"))
+    return service_cash_headroom(row)
+
+
 def summarize_frontier_cell(
     rows: list[dict[str, object]],
     baseline: dict[str, float],
@@ -4086,6 +4136,7 @@ def summarize_frontier_cell(
     service_values = [service_coverage(row) for row in rows]
     scheduled_payment_values = [scheduled_payment_coverage(row) for row in rows]
     service_cash_headroom_values = [service_cash_headroom(row) for row in rows]
+    available_service_cash_headroom_values = [available_service_cash_headroom(row) for row in rows]
     route_values = [safe_float(row.get("route_success_rate_cumulative")) for row in rows]
     fixed_route_values = [safe_float(row.get("route_fixed_success_rate_cumulative")) for row in rows]
     substitution_route_values = [
@@ -4212,6 +4263,15 @@ def summarize_frontier_cell(
     bond_service_paid_from_reserve_values = [
         safe_float(row.get("bond_service_paid_from_reserve_usd_total")) for row in rows
     ]
+    bond_service_lockbox_target_values = [
+        safe_float(row.get("bond_service_lockbox_target_usd")) for row in rows
+    ]
+    bond_service_lockbox_coverage_values = [
+        safe_float(row.get("bond_service_lockbox_coverage_ratio")) for row in rows
+    ]
+    lender_recovered_stable_sweepable_pending_values = [
+        safe_float(row.get("lender_recovered_stable_sweepable_pending_usd_total")) for row in rows
+    ]
     v2v_share_values = [
         v2v / max(1e-9, total) for v2v, total in zip(v2v_count_values, transaction_values)
     ]
@@ -4263,8 +4323,8 @@ def summarize_frontier_cell(
         constraints.append("p50_scheduled_payment_coverage")
     if percentile(scheduled_payment_values, 0.05) < 1.00:
         constraints.append("p05_scheduled_payment_coverage")
-    if percentile(service_cash_headroom_values, 0.50) < 1.25:
-        constraints.append("p50_service_cash_headroom")
+    if percentile(available_service_cash_headroom_values, 0.50) < 1.25:
+        constraints.append("p50_available_service_cash_headroom")
     route_success_floor = max(0.0, min(1.0, float(route_success_floor)))
     route_success_mode = str(route_success_mode or "diagnostic").strip().lower()
     if route_success_mode == "absolute" and percentile(route_values, 0.05) < route_success_floor:
@@ -4304,6 +4364,14 @@ def summarize_frontier_cell(
         "scheduled_payment_coverage_p50": percentile(scheduled_payment_values, 0.50),
         "service_cash_headroom_p05": percentile(service_cash_headroom_values, 0.05),
         "service_cash_headroom_p50": percentile(service_cash_headroom_values, 0.50),
+        "gross_historical_service_cash_headroom_p05": percentile(service_cash_headroom_values, 0.05),
+        "gross_historical_service_cash_headroom_p50": percentile(service_cash_headroom_values, 0.50),
+        "available_service_cash_headroom_p05": percentile(
+            available_service_cash_headroom_values, 0.05
+        ),
+        "available_service_cash_headroom_p50": percentile(
+            available_service_cash_headroom_values, 0.50
+        ),
         "issuer_scheduled_debt_service_due_p50": percentile(scheduled_due_values, 0.50),
         "issuer_actual_bondholder_payment_p50": percentile(actual_payment_values, 0.50),
         "issuer_reserve_balance_p05": percentile(reserve_values, 0.05),
@@ -4404,6 +4472,14 @@ def summarize_frontier_cell(
         "bond_service_paid_from_reserve_usd_total_p50": percentile(
             bond_service_paid_from_reserve_values, 0.50
         ),
+        "bond_service_lockbox_target_usd_p50": percentile(bond_service_lockbox_target_values, 0.50),
+        "bond_service_lockbox_coverage_ratio_p50": percentile(
+            bond_service_lockbox_coverage_values, 0.50
+        ),
+        "bond_service_lockbox_mode": first.get("bond_service_lockbox_mode", ""),
+        "lender_recovered_stable_sweepable_pending_usd_total_p50": percentile(
+            lender_recovered_stable_sweepable_pending_values, 0.50
+        ),
         "baseline_route_success_p50": baseline.get("route_success_p50", 0.0),
         "baseline_swap_volume_p50": baseline.get("swap_volume_p50", 0.0),
         "baseline_voucher_to_voucher_count_p50": baseline_v2v_count_p50,
@@ -4454,7 +4530,7 @@ def write_frontier_tables(output_dir: Path, safety_rows: list[dict[str, object]]
         r"\setlength{\tabcolsep}{3pt}",
         r"\begin{tabular}{lrrrrrrrrl}",
         r"\toprule",
-        r"Scale & Principal ratio & Pay p05 & Headroom p50 & Route p05 & V2V share & Stable $\Delta$ p95 & Stress $\Delta$ p95 & Leak $\Delta$ p95 & Binding \\",
+        r"Scale & Principal ratio & Pay p05 & Avail. headroom p50 & Route p05 & V2V share & Stable $\Delta$ p95 & Stress $\Delta$ p95 & Leak $\Delta$ p95 & Binding \\",
         r"\midrule",
     ]
     for row in safety_rows[:24]:
@@ -4463,7 +4539,9 @@ def write_frontier_tables(output_dir: Path, safety_rows: list[dict[str, object]]
                 scale=latex_escape(row["network_scale"]),
                 ratio=safe_float(row["principal_ratio"]),
                 payment=safe_float(row.get("scheduled_payment_coverage_p05")),
-                headroom=safe_float(row.get("service_cash_headroom_p50")),
+                headroom=safe_float(
+                    row.get("available_service_cash_headroom_p50", row.get("service_cash_headroom_p50"))
+                ),
                 route=fmt_pct(row["route_success_p05"]),
                 v2v=fmt_pct(row.get("voucher_to_voucher_share_p50", 0.0)),
                 stable=fmt_pct(row.get("stable_dependency_delta_p95", 0.0)),
@@ -4483,7 +4561,7 @@ def write_frontier_tables(output_dir: Path, safety_rows: list[dict[str, object]]
         r"\setlength{\tabcolsep}{3pt}",
         r"\begin{tabular}{lrrrrrr}",
         r"\toprule",
-        r"Scale & Principal ratio & Pay p05 & Pay p50 & Headroom p50 & Reserve p05 & Unpaid p95 \\",
+        r"Scale & Principal ratio & Pay p05 & Pay p50 & Avail. headroom p50 & Reserve p05 & Unpaid p95 \\",
         r"\midrule",
     ]
     display_rows = sorted(
@@ -4502,7 +4580,9 @@ def write_frontier_tables(output_dir: Path, safety_rows: list[dict[str, object]]
                 ratio=safe_float(row["principal_ratio"]),
                 payment05=safe_float(row.get("scheduled_payment_coverage_p05")),
                 payment50=safe_float(row.get("scheduled_payment_coverage_p50")),
-                headroom50=safe_float(row.get("service_cash_headroom_p50")),
+                headroom50=safe_float(
+                    row.get("available_service_cash_headroom_p50", row.get("service_cash_headroom_p50"))
+                ),
                 reserve=safe_float(row.get("issuer_reserve_balance_p05")),
                 unpaid=safe_float(row.get("issuer_unpaid_scheduled_claim_p95")),
             )
@@ -4600,15 +4680,18 @@ def write_frontier_figures(
     payment_p05 = [
         safe_float(row.get("scheduled_payment_coverage_p05")) for row in frontier_rows
     ]
-    headroom_p50 = [safe_float(row.get("service_cash_headroom_p50")) for row in frontier_rows]
+    headroom_p50 = [
+        safe_float(row.get("available_service_cash_headroom_p50", row.get("service_cash_headroom_p50")))
+        for row in frontier_rows
+    ]
     _draw_grouped_bar_chart(
         output_dir / "fig_issuer_service_coverage.png",
         "Issuer Payment Coverage and Cash Headroom at Frontier",
-        "Scheduled payment coverage and recovered stable headroom at the headline safe principal by connected network scale.",
+        "Scheduled payment coverage and spendable recovered-stable headroom at the headline safe principal by connected network scale.",
         labels,
         [
             ("p05 payment coverage", payment_p05, (204, 86, 70, 255)),
-            ("p50 cash headroom", headroom_p50, (51, 102, 204, 255)),
+            ("p50 available cash headroom", headroom_p50, (51, 102, 204, 255)),
         ],
     )
     _draw_binding_constraint_heatmap(output_dir / "fig_binding_constraints_heatmap.png", safety_rows)
@@ -4634,7 +4717,7 @@ def write_frontier_notes(output_dir: Path, args: argparse.Namespace, summary_row
         "",
         "## Non-Extraction Gate",
         "",
-        "A cell is safe only when scheduled bond payments clear, recovered-stable cash headroom is at least 1.25x scheduled debt service, route success, voucher-to-voucher circulation preservation, active-pool stable-dependency limits, incremental household cash stress, incremental liquidity leakage, unpaid claims, edge concentration, and matched no-bond degradation tests all pass.",
+        "A cell is safe only when scheduled bond payments clear, spendable recovered-stable cash headroom is at least 1.25x scheduled debt service, route success, voucher-to-voucher circulation preservation, active-pool stable-dependency limits, incremental household cash stress, incremental liquidity leakage, unpaid claims, edge concentration, and matched no-bond degradation tests all pass.",
         "- The route-success floor is a model settlement-reliability sensitivity parameter, not a direct empirical Sarafu failed-route scalar.",
         "- Voucher-to-voucher count and share are compared against the matched no-bond baseline to protect the empirically observed ROLA-like settlement motif.",
         "- Stable value share and voucher value share in active pools are compared against the matched no-bond baseline so stable/bond injections do not crowd out voucher-backed settlement capacity.",
@@ -4671,6 +4754,23 @@ def issuer_cashflow_summary_rows(safety_rows: list[dict[str, object]]) -> list[d
                 "scheduled_payment_coverage_p50": row.get("scheduled_payment_coverage_p50", 0.0),
                 "service_cash_headroom_p05": row.get("service_cash_headroom_p05", 0.0),
                 "service_cash_headroom_p50": row.get("service_cash_headroom_p50", 0.0),
+                "gross_historical_service_cash_headroom_p05": row.get(
+                    "gross_historical_service_cash_headroom_p05", row.get("service_cash_headroom_p05", 0.0)
+                ),
+                "gross_historical_service_cash_headroom_p50": row.get(
+                    "gross_historical_service_cash_headroom_p50", row.get("service_cash_headroom_p50", 0.0)
+                ),
+                "available_service_cash_headroom_p05": row.get(
+                    "available_service_cash_headroom_p05", row.get("service_cash_headroom_p05", 0.0)
+                ),
+                "available_service_cash_headroom_p50": row.get(
+                    "available_service_cash_headroom_p50", row.get("service_cash_headroom_p50", 0.0)
+                ),
+                "bond_service_lockbox_target_usd_p50": row.get("bond_service_lockbox_target_usd_p50", 0.0),
+                "bond_service_lockbox_coverage_ratio_p50": row.get(
+                    "bond_service_lockbox_coverage_ratio_p50", 0.0
+                ),
+                "bond_service_lockbox_mode": row.get("bond_service_lockbox_mode", ""),
                 "issuer_scheduled_debt_service_due_p50": row.get("issuer_scheduled_debt_service_due_p50", 0.0),
                 "issuer_actual_bondholder_payment_p50": row.get("issuer_actual_bondholder_payment_p50", 0.0),
                 "issuer_reserve_balance_p05": row.get("issuer_reserve_balance_p05", 0.0),
@@ -5029,6 +5129,25 @@ def frontier_summary_rows(
                 ),
                 "service_cash_headroom_p05": safe_float(best.get("service_cash_headroom_p05")),
                 "service_cash_headroom_p50": safe_float(best.get("service_cash_headroom_p50")),
+                "gross_historical_service_cash_headroom_p05": safe_float(
+                    best.get("gross_historical_service_cash_headroom_p05", best.get("service_cash_headroom_p05"))
+                ),
+                "gross_historical_service_cash_headroom_p50": safe_float(
+                    best.get("gross_historical_service_cash_headroom_p50", best.get("service_cash_headroom_p50"))
+                ),
+                "available_service_cash_headroom_p05": safe_float(
+                    best.get("available_service_cash_headroom_p05", best.get("service_cash_headroom_p05"))
+                ),
+                "available_service_cash_headroom_p50": safe_float(
+                    best.get("available_service_cash_headroom_p50", best.get("service_cash_headroom_p50"))
+                ),
+                "bond_service_lockbox_target_usd_p50": safe_float(
+                    best.get("bond_service_lockbox_target_usd_p50")
+                ),
+                "bond_service_lockbox_coverage_ratio_p50": safe_float(
+                    best.get("bond_service_lockbox_coverage_ratio_p50")
+                ),
+                "bond_service_lockbox_mode": best.get("bond_service_lockbox_mode", ""),
                 "issuer_reserve_balance_p05": safe_float(best.get("issuer_reserve_balance_p05")),
                 "issuer_unpaid_scheduled_claim_p95": safe_float(best.get("issuer_unpaid_scheduled_claim_p95")),
                 "route_success_p05": safe_float(best.get("route_success_p05")),
@@ -5062,6 +5181,25 @@ def frontier_summary_rows(
                 ),
                 "service_cash_headroom_p05": safe_float(best.get("service_cash_headroom_p05")),
                 "service_cash_headroom_p50": safe_float(best.get("service_cash_headroom_p50")),
+                "gross_historical_service_cash_headroom_p05": safe_float(
+                    best.get("gross_historical_service_cash_headroom_p05", best.get("service_cash_headroom_p05"))
+                ),
+                "gross_historical_service_cash_headroom_p50": safe_float(
+                    best.get("gross_historical_service_cash_headroom_p50", best.get("service_cash_headroom_p50"))
+                ),
+                "available_service_cash_headroom_p05": safe_float(
+                    best.get("available_service_cash_headroom_p05", best.get("service_cash_headroom_p05"))
+                ),
+                "available_service_cash_headroom_p50": safe_float(
+                    best.get("available_service_cash_headroom_p50", best.get("service_cash_headroom_p50"))
+                ),
+                "bond_service_lockbox_target_usd_p50": safe_float(
+                    best.get("bond_service_lockbox_target_usd_p50")
+                ),
+                "bond_service_lockbox_coverage_ratio_p50": safe_float(
+                    best.get("bond_service_lockbox_coverage_ratio_p50")
+                ),
+                "bond_service_lockbox_mode": best.get("bond_service_lockbox_mode", ""),
                 "issuer_reserve_balance_p05": safe_float(best.get("issuer_reserve_balance_p05")),
                 "issuer_unpaid_scheduled_claim_p95": safe_float(best.get("issuer_unpaid_scheduled_claim_p95")),
                 "route_success_p05": safe_float(best.get("route_success_p05")),

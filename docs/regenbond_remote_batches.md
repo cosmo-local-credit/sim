@@ -93,10 +93,12 @@ WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh validation-smoke
 WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh validation-pilot
 WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh validation-full
 WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-smoke
+WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-maturity-smoke
 WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-pilot
 ```
 
-Run `frontier-publication` only after the revised pilot is reviewed.
+Run `frontier-pilot` only after `frontier-maturity-smoke` passes. Run
+`frontier-publication` only after the revised pilot is reviewed.
 
 Run batches from the repo root. The wrapper defaults to parallel, resumable
 execution:
@@ -123,6 +125,7 @@ Use this order for paper-facing work:
 ./scripts/run_regenbond_remote_batch.sh validation-pilot
 ./scripts/run_regenbond_remote_batch.sh validation-full
 ./scripts/run_regenbond_remote_batch.sh frontier-smoke
+./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 ./scripts/run_regenbond_remote_batch.sh frontier-publication
 ```
@@ -135,8 +138,9 @@ Recommended gate:
    `analysis/monte_carlo/engine_validation/engine_validation_summary.csv`
    reports `status=pass`.
 4. Run `frontier-smoke` and inspect frontier output structure.
-5. Run `frontier-pilot`.
-6. Run `frontier-publication` only after validation and pilot outputs look
+5. Run `frontier-maturity-smoke` and confirm the full-term lockbox guard passes.
+6. Run `frontier-pilot`.
+7. Run `frontier-publication` only after validation and pilot outputs look
    correct.
 
 After any calibration, accounting, routing, cashflow, or credit-behavior model
@@ -156,6 +160,7 @@ is set.
 | `validation-pilot` | Full-horizon validation pilot | 20 runs, 260 ticks | `analysis/monte_carlo/engine_validation_20run/` | `analysis/monte_carlo/validation-pilot.log` |
 | `validation-full` | Paper-facing validation gate | 100 runs, 260 ticks | `analysis/monte_carlo/engine_validation/` | `analysis/monte_carlo/validation-full.log` |
 | `frontier-smoke` | Small bond-frontier structure check | 5 runs, 52 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_smoke/` | `analysis/monte_carlo/frontier-smoke.log` |
+| `frontier-maturity-smoke` | Fast full-maturity lockbox check | 2 runs, 260 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/` | `analysis/monte_carlo/frontier-maturity-smoke.log` |
 | `frontier-pilot` | Full-horizon frontier pilot | 20 runs, 260 ticks, 3 scales | `analysis/monte_carlo/bond_issuer_frontier_pilot/` | `analysis/monte_carlo/frontier-pilot.log` |
 | `frontier-publication` | Paper-facing frontier grid | 100 runs, 260 ticks, 3 scales | `analysis/monte_carlo/bond_issuer_frontier/` | `analysis/monte_carlo/frontier-publication.log` |
 
@@ -563,6 +568,28 @@ head analysis/monte_carlo/bond_issuer_frontier_smoke/bond_issuer_frontier_safety
 cat analysis/monte_carlo/bond_issuer_frontier_smoke/paper_integration_notes.md
 ```
 
+### `frontier-maturity-smoke`
+
+Fast full-term bond-service lockbox check. This is the local guard against
+hidden 260-week repayment failures before spending time on `frontier-pilot`.
+
+```bash
+./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
+```
+
+Control run with the old next-payment reserve:
+
+```bash
+BOND_SERVICE_LOCKBOX_MODE=next_due BOND_SERVICE_LOCKBOX_COVERAGE_RATIO=1.0 \
+  ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
+```
+
+Inspect:
+
+```bash
+head analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/bond_issuer_frontier_safety.csv
+```
+
 ### `frontier-pilot`
 
 Full-horizon 20-run frontier pilot across `current`, `connected_2x`, and
@@ -645,6 +672,14 @@ ROUTE_SUCCESS_MODE=relative OUTPUT=analysis/monte_carlo/bond_issuer_frontier_pil
   ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 ```
 
+Compare the frontier lockbox against the old next-payment reserve behavior:
+
+```bash
+BOND_SERVICE_LOCKBOX_MODE=next_due BOND_SERVICE_LOCKBOX_COVERAGE_RATIO=1.0 \
+OUTPUT=analysis/monte_carlo/bond_issuer_frontier_maturity_smoke_next_due \
+  ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
+```
+
 Run a fixed grid without adaptive midpoint refinement:
 
 ```bash
@@ -699,6 +734,7 @@ Pull the output directory that matches the job you just ran:
 | `validation-pilot` | `~/sim/analysis/monte_carlo/engine_validation_20run/` | `~/sim/analysis/monte_carlo/validation-pilot.log` | `RegenBonds/analysis/monte_carlo/engine_validation_20run/` |
 | `validation-full` | `~/sim/analysis/monte_carlo/engine_validation/` | `~/sim/analysis/monte_carlo/validation-full.log` | `RegenBonds/analysis/monte_carlo/engine_validation/` |
 | `frontier-smoke` | `~/sim/analysis/monte_carlo/bond_issuer_frontier_smoke/` | `~/sim/analysis/monte_carlo/frontier-smoke.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier_smoke/` |
+| `frontier-maturity-smoke` | `~/sim/analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/` | `~/sim/analysis/monte_carlo/frontier-maturity-smoke.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/` |
 | `frontier-pilot` | `~/sim/analysis/monte_carlo/bond_issuer_frontier_pilot/` | `~/sim/analysis/monte_carlo/frontier-pilot.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/` |
 | `frontier-publication` | `~/sim/analysis/monte_carlo/bond_issuer_frontier/` | `~/sim/analysis/monte_carlo/frontier-publication.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier/` |
 
@@ -773,6 +809,19 @@ rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-smoke.log \
   /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_smoke/
+```
+
+Pull `frontier-maturity-smoke`:
+
+```bash
+rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
+  -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/ \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/
+
+rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-maturity-smoke.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/
 ```
 
 Pull `frontier-pilot`:

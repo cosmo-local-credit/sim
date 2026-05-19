@@ -32,6 +32,7 @@ Implemented changes:
 - Added dated producer-debt obligations for frontier runs: producer voucher borrowing creates a maturity record, lender-held vouchers can close through normal circulation, and any remaining obligation at the 13-tick maturity is repaid in stable or written off under the calibrated recovery/default rate.
 - Added routed conversion attempts for voucher-denominated fees, with successful stable conversion entering issuer/CLC service capacity and failures retained as voucher fee inventory.
 - Added quarterly clearing of eligible recovered stable from lender pools, capped by scheduled issuer need and lender surplus.
+- Added a configurable bond-service lockbox. Frontier jobs reserve recovered lender stable against `1.25x` remaining scheduled principal plus coupon before recovered stable can recirculate; `next_due` remains available as a control mode.
 - Added route-substitution diagnostics for ordinary purchase/exchange attempts while keeping borrowing, repayment, and fee conversion as fixed-target routes.
 - Changed the frontier route-success default to `diagnostic`; `absolute` mode keeps the old hard floor behavior, and `relative` mode compares against the matched no-bond baseline.
 
@@ -43,10 +44,12 @@ Validation required before using revised frontier results:
 ./scripts/run_regenbond_remote_batch.sh validation-pilot
 ./scripts/run_regenbond_remote_batch.sh validation-full
 ./scripts/run_regenbond_remote_batch.sh frontier-smoke
+./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 ```
 
-Run `frontier-publication` only after the revised pilot is reviewed.
+Run `frontier-pilot` only after `frontier-maturity-smoke` passes, and run
+`frontier-publication` only after the revised pilot is reviewed.
 
 ## Empirical Grounding Discipline
 

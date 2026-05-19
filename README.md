@@ -93,6 +93,7 @@ For SSH/server batch verification, use:
 ```bash
 ./scripts/start_regenbond_batch_tmux.sh validation-full
 tail -f analysis/monte_carlo/validation-full.log
+./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 ```
 

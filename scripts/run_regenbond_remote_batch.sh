@@ -122,6 +122,7 @@ run_frontier() {
   local default_shares="$7"
   local output_dir="${OUTPUT:-$OUTPUT_ROOT/$default_output}"
   echo "[batch] writing frontier artifacts to $output_dir"
+  echo "[batch] bond service lockbox: mode=${BOND_SERVICE_LOCKBOX_MODE:-remaining_schedule} coverage=${BOND_SERVICE_LOCKBOX_COVERAGE_RATIO:-1.25}"
   run_monte_carlo "${PYTHON_BIN}" scripts/run_regenbond_monte_carlo.py \
     --scenario bond_issuer_frontier \
     --network-scales "${NETWORK_SCALES:-$default_scales}" \
@@ -133,6 +134,8 @@ run_frontier() {
     --frontier-refinement-rounds "${FRONTIER_REFINEMENT_ROUNDS:-1}" \
     --route-success-mode "${ROUTE_SUCCESS_MODE:-diagnostic}" \
     --route-success-floor "${ROUTE_SUCCESS_FLOOR:-0.85}" \
+    --bond-service-lockbox-mode "${BOND_SERVICE_LOCKBOX_MODE:-remaining_schedule}" \
+    --bond-service-lockbox-coverage-ratio "${BOND_SERVICE_LOCKBOX_COVERAGE_RATIO:-1.25}" \
     --runs "${RUNS:-$default_runs}" \
     --ticks "${TICKS:-$default_ticks}" \
     --term "${BOND_TERM:-260}" \
@@ -161,6 +164,9 @@ case "$JOB" in
   frontier-smoke)
     run_frontier 5 52 bond_issuer_frontier_smoke current 0.05,0.10 0,0.06 0.50
     ;;
+  frontier-maturity-smoke)
+    run_frontier 2 260 bond_issuer_frontier_maturity_smoke current 0.05 0 0.50
+    ;;
   frontier-pilot)
     run_frontier 20 260 bond_issuer_frontier_pilot current,connected_2x,connected_5x 0.05,0.10,0.20,0.40,0.80,1.50 0,0.06,0.12 0.25,0.50,0.75
     ;;
@@ -169,7 +175,7 @@ case "$JOB" in
     ;;
   *)
     echo "Unknown job: $JOB" >&2
-    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, frontier-smoke, frontier-pilot, frontier-publication" >&2
+    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, frontier-smoke, frontier-maturity-smoke, frontier-pilot, frontier-publication" >&2
     exit 2
     ;;
 esac

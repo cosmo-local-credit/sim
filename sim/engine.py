@@ -3647,6 +3647,43 @@ class SimulationEngine:
                 target_tick = min(term_ticks, (periods_elapsed + 1) * stride)
         return self._issuer_schedule_due_at_tick(target_tick)
 
+    def _bond_service_lockbox_mode(self) -> str:
+        mode = str(getattr(self.cfg, "bond_service_lockbox_mode", "next_due") or "next_due")
+        mode = mode.strip().lower()
+        if mode not in {"next_due", "remaining_schedule"}:
+            return "next_due"
+        return mode
+
+    def _bond_service_lockbox_coverage_ratio(self) -> float:
+        return max(
+            0.0,
+            float(getattr(self.cfg, "bond_service_lockbox_coverage_ratio", 1.0) or 0.0),
+        )
+
+    def _bond_service_lockbox_target_usd(self) -> float:
+        mode = self._bond_service_lockbox_mode()
+        if mode == "remaining_schedule":
+            base_target = self._issuer_schedule_due_at_tick(int(self.cfg.bond_term_ticks or 0))
+        else:
+            base_target = self._next_issuer_service_due_target()
+        return max(0.0, base_target * self._bond_service_lockbox_coverage_ratio())
+
+    def _lender_recovered_stable_pending_usd_total(self) -> float:
+        return sum(max(0.0, float(amount or 0.0)) for amount in self._lender_recovered_stable_by_pool.values())
+
+    def _lender_recovered_stable_sweepable_pending_usd_total(self) -> float:
+        stable_id = self.cfg.stable_symbol
+        total = 0.0
+        for pool_id, pending in self._lender_recovered_stable_by_pool.items():
+            if pending <= 1e-9:
+                continue
+            pool = self.pools.get(pool_id)
+            if pool is None or pool.policy.system_pool or pool.policy.role != "lender":
+                continue
+            surplus = max(0.0, pool.vault.get(stable_id) - pool.policy.min_stable_reserve)
+            total += min(float(pending), surplus)
+        return total
+
     def _reserve_lender_recovered_stable_for_bond_service(
         self,
         pool: Pool,
@@ -3662,7 +3699,7 @@ class SimulationEngine:
         share = max(0.0, min(1.0, float(self.cfg.bond_service_reserve_recovery_share or 0.0)))
         if share <= 1e-9:
             return 0.0
-        target_due = self._next_issuer_service_due_target()
+        target_due = self._bond_service_lockbox_target_usd()
         remaining_need = max(
             0.0,
             target_due
@@ -3689,7 +3726,13 @@ class SimulationEngine:
             "BOND_SERVICE_RESERVED",
             pool_id=pool.pool_id,
             amount=amount,
-            meta={"reason": reason, "target_due": target_due, "remaining_need_before": remaining_need},
+            meta={
+                "reason": reason,
+                "target_due": target_due,
+                "remaining_need_before": remaining_need,
+                "lockbox_mode": self._bond_service_lockbox_mode(),
+                "lockbox_coverage_ratio": self._bond_service_lockbox_coverage_ratio(),
+            },
         ))
         return amount
 
@@ -6107,6 +6150,12 @@ class SimulationEngine:
                 "lender_stable_available_above_reserve_usd": float(
                     lender_stable_available_above_reserve_usd
                 ),
+                "lender_recovered_stable_pending_usd_total": float(
+                    self._lender_recovered_stable_pending_usd_total()
+                ),
+                "lender_recovered_stable_sweepable_pending_usd_total": float(
+                    self._lender_recovered_stable_sweepable_pending_usd_total()
+                ),
                 "lender_recovered_stable_usd_tick": float(self._lender_recovered_stable_usd_tick),
                 "lender_recovered_stable_usd_total": float(self._lender_recovered_stable_usd_total),
                 "lender_recovered_stable_borrower_regular_usd_tick": float(
@@ -6140,6 +6189,11 @@ class SimulationEngine:
                     self._lender_recovered_stable_other_usd_total
                 ),
                 "bond_service_reserve_balance_usd": float(self._bond_service_reserve_usd_balance),
+                "bond_service_lockbox_target_usd": float(self._bond_service_lockbox_target_usd()),
+                "bond_service_lockbox_coverage_ratio": float(
+                    self._bond_service_lockbox_coverage_ratio()
+                ),
+                "bond_service_lockbox_mode": self._bond_service_lockbox_mode(),
                 "bond_service_reserved_usd_tick": float(self._bond_service_reserved_usd_tick),
                 "bond_service_reserved_usd_total": float(self._bond_service_reserved_usd_total),
                 "bond_service_paid_from_reserve_usd_tick": float(
