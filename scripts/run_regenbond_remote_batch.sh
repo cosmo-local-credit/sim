@@ -123,6 +123,7 @@ run_frontier() {
   local output_dir="${OUTPUT:-$OUTPUT_ROOT/$default_output}"
   echo "[batch] writing frontier artifacts to $output_dir"
   echo "[batch] bond service lockbox: mode=${BOND_SERVICE_LOCKBOX_MODE:-remaining_schedule} coverage=${BOND_SERVICE_LOCKBOX_COVERAGE_RATIO:-1.25}"
+  echo "[batch] producer debt contract service margin: ${PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-0.50}"
   run_monte_carlo "${PYTHON_BIN}" scripts/run_regenbond_monte_carlo.py \
     --scenario bond_issuer_frontier \
     --network-scales "${NETWORK_SCALES:-$default_scales}" \
@@ -136,6 +137,7 @@ run_frontier() {
     --route-success-floor "${ROUTE_SUCCESS_FLOOR:-0.85}" \
     --bond-service-lockbox-mode "${BOND_SERVICE_LOCKBOX_MODE:-remaining_schedule}" \
     --bond-service-lockbox-coverage-ratio "${BOND_SERVICE_LOCKBOX_COVERAGE_RATIO:-1.25}" \
+    --producer-debt-contract-service-margin-rate "${PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-0.50}" \
     --runs "${RUNS:-$default_runs}" \
     --ticks "${TICKS:-$default_ticks}" \
     --term "${BOND_TERM:-260}" \

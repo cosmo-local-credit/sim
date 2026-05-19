@@ -257,6 +257,9 @@ class ScenarioConfig:
     productive_credit_enabled: bool = False
     productive_credit_return_rate: float = 0.0
     productive_credit_lag_ticks: int = 2
+    producer_debt_contract_repayment_enabled: bool = False
+    producer_debt_contract_service_margin_rate: float = 0.0
+    producer_debt_contract_revenue_rate: float = 0.0
     producer_debt_maturity_enabled: bool = False
     producer_debt_maturity_ticks: int = 13
     producer_debt_maturity_recovery_rate: float = 1.0

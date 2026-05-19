@@ -138,6 +138,9 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertTrue(cfg.bond_service_reserve_enabled)
         self.assertEqual(cfg.bond_service_lockbox_mode, "remaining_schedule")
         self.assertAlmostEqual(cfg.bond_service_lockbox_coverage_ratio, 1.25)
+        self.assertTrue(cfg.producer_debt_contract_repayment_enabled)
+        self.assertAlmostEqual(cfg.producer_debt_contract_service_margin_rate, 0.50)
+        self.assertAlmostEqual(cfg.producer_debt_contract_revenue_rate, 1.50)
         self.assertEqual(cfg.max_pools, 9)
 
         engine = SimulationEngine(cfg, seed=7)
@@ -192,6 +195,29 @@ class RegenBondRevisionTests(unittest.TestCase):
             engine._producer_deposit_value_by_voucher[producer.voucher_spec.voucher_id],
             100.0,
         )
+
+    def test_contract_productive_credit_uses_revenue_rate_when_larger(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_deposits_enabled=True,
+                productive_credit_enabled=True,
+                productive_credit_return_rate=0.5,
+                productive_credit_lag_ticks=1,
+                producer_debt_contract_repayment_enabled=True,
+                producer_debt_contract_revenue_rate=1.35,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        engine.tick = 1
+        engine._schedule_productive_credit_inflow(producer.pool_id, 200.0, producer.voucher_spec.voucher_id)
+        engine.tick = 2
+        before = producer_pool.vault.get(engine.cfg.stable_symbol)
+
+        engine._apply_productive_credit_inflows()
+
+        self.assertAlmostEqual(producer_pool.vault.get(engine.cfg.stable_symbol) - before, 270.0)
+        self.assertAlmostEqual(engine._productive_credit_inflow_usd_tick, 270.0)
 
     def test_historical_voucher_backing_is_recorded_as_producer_deposit(self):
         engine = SimulationEngine(
@@ -348,6 +374,127 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(converted, 0.0)
         self.assertAlmostEqual(kind, 10.0)
         self.assertAlmostEqual(engine._fee_conversion_failed_usd_total, 10.0)
+
+    def test_stable_fee_service_reserves_before_waterfall(self):
+        engine = SimulationEngine(
+            small_config(
+                bond_return_mode="issuer_cashflow",
+                bond_service_reserve_enabled=True,
+                bond_service_lockbox_mode="remaining_schedule",
+                bond_service_lockbox_coverage_ratio=1.25,
+                bond_fee_service_share=0.5,
+                bond_gross_principal_usd=1000.0,
+                bond_term_ticks=260,
+                insurance_max_topup_usd=0.0,
+                core_ops_budget_usd=0.0,
+                liquidity_mandate_share=0.0,
+                liquidity_mandate_bootstrap_epochs=0,
+            )
+        )
+        source_pool = next(pool for pool in engine.pools.values() if not pool.policy.system_pool)
+        source_pool.fee_ledger_pool[engine.cfg.stable_symbol] = 100.0
+
+        engine._apply_waterfall()
+
+        self.assertAlmostEqual(engine._fee_service_reserved_usd_total, 50.0)
+        self.assertAlmostEqual(engine._fee_service_stable_reserved_usd_total, 50.0)
+        self.assertAlmostEqual(engine._fee_service_converted_voucher_reserved_usd_total, 0.0)
+        self.assertAlmostEqual(engine._bond_service_reserve_usd_balance, 50.0)
+        self.assertAlmostEqual(engine._waterfall_last["fee_cash_usd"], 100.0)
+        self.assertAlmostEqual(engine._waterfall_last["fee_cash_waterfall_usd"], 50.0)
+        self.assertAlmostEqual(engine._waterfall_last["clc_alloc_usd"], 50.0)
+
+    def test_fee_service_share_zero_preserves_waterfall_behavior(self):
+        engine = SimulationEngine(
+            small_config(
+                bond_return_mode="issuer_cashflow",
+                bond_service_reserve_enabled=True,
+                bond_fee_service_share=0.0,
+                bond_gross_principal_usd=1000.0,
+                bond_term_ticks=260,
+                insurance_max_topup_usd=0.0,
+                core_ops_budget_usd=0.0,
+                liquidity_mandate_share=0.0,
+                liquidity_mandate_bootstrap_epochs=0,
+            )
+        )
+        source_pool = next(pool for pool in engine.pools.values() if not pool.policy.system_pool)
+        source_pool.fee_ledger_pool[engine.cfg.stable_symbol] = 100.0
+
+        engine._apply_waterfall()
+
+        self.assertAlmostEqual(engine._fee_service_reserved_usd_total, 0.0)
+        self.assertAlmostEqual(engine._bond_service_reserve_usd_balance, 0.0)
+        self.assertAlmostEqual(engine._waterfall_last["fee_cash_waterfall_usd"], 100.0)
+        self.assertAlmostEqual(engine._waterfall_last["clc_alloc_usd"], 100.0)
+
+    def test_fee_service_reservation_stops_when_lockbox_target_is_met(self):
+        engine = SimulationEngine(
+            small_config(
+                bond_return_mode="issuer_cashflow",
+                bond_service_reserve_enabled=True,
+                bond_service_lockbox_mode="remaining_schedule",
+                bond_service_lockbox_coverage_ratio=1.25,
+                bond_fee_service_share=1.0,
+                bond_gross_principal_usd=1000.0,
+                bond_term_ticks=260,
+                insurance_max_topup_usd=0.0,
+                core_ops_budget_usd=0.0,
+                liquidity_mandate_share=0.0,
+                liquidity_mandate_bootstrap_epochs=0,
+            )
+        )
+        engine._bond_service_reserve_usd_balance = engine._bond_service_lockbox_target_usd()
+        source_pool = next(pool for pool in engine.pools.values() if not pool.policy.system_pool)
+        source_pool.fee_ledger_pool[engine.cfg.stable_symbol] = 100.0
+
+        engine._apply_waterfall()
+
+        self.assertAlmostEqual(engine._fee_service_reserved_usd_total, 0.0)
+        self.assertAlmostEqual(engine._waterfall_last["fee_cash_waterfall_usd"], 100.0)
+        self.assertAlmostEqual(engine._waterfall_last["clc_alloc_usd"], 100.0)
+
+    def test_converted_voucher_fee_service_reserves_before_waterfall(self):
+        engine = SimulationEngine(
+            small_config(
+                voucher_fee_conversion_enabled=True,
+                bond_return_mode="issuer_cashflow",
+                bond_service_reserve_enabled=True,
+                bond_service_lockbox_mode="remaining_schedule",
+                bond_service_lockbox_coverage_ratio=1.25,
+                bond_fee_service_share=0.5,
+                bond_gross_principal_usd=1000.0,
+                bond_term_ticks=260,
+                insurance_max_topup_usd=0.0,
+                core_ops_budget_usd=0.0,
+                liquidity_mandate_share=0.0,
+                liquidity_mandate_bootstrap_epochs=0,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        source_pool = next(pool for pool in engine.pools.values() if not pool.policy.system_pool)
+        clc_pool = engine.pools[engine.clc_pool_id]
+        voucher_id = producer.voucher_spec.voucher_id
+        source_pool.values.set_value(voucher_id, 1.0)
+        source_pool.fee_ledger_pool[voucher_id] = 100.0
+
+        def fake_conversion(clc_pool, asset_id, amount, avg_value, remaining_cap_usd):
+            engine._vault_add(clc_pool, engine.cfg.stable_symbol, 80.0, "test_conversion", "test")
+            return 100.0, 80.0, 20.0, remaining_cap_usd
+
+        engine._attempt_fee_voucher_conversion = fake_conversion
+
+        engine._apply_waterfall()
+
+        self.assertAlmostEqual(engine._fee_service_reserved_usd_total, 40.0)
+        self.assertAlmostEqual(engine._fee_service_stable_reserved_usd_total, 0.0)
+        self.assertAlmostEqual(engine._fee_service_converted_voucher_reserved_usd_total, 40.0)
+        self.assertAlmostEqual(engine._bond_service_reserve_usd_balance, 40.0)
+        self.assertAlmostEqual(engine._waterfall_last["fee_cash_usd"], 80.0)
+        self.assertAlmostEqual(engine._waterfall_last["fee_cash_waterfall_usd"], 40.0)
+        self.assertAlmostEqual(engine._waterfall_last["fee_kind_usd"], 20.0)
+        self.assertAlmostEqual(engine._waterfall_last["fee_converted_voucher_cash_usd"], 40.0)
+        self.assertAlmostEqual(engine._waterfall_last["clc_alloc_usd"], 40.0)
 
     def test_quarterly_clearing_moves_only_recovered_lender_surplus_to_clc(self):
         engine = SimulationEngine(
@@ -648,6 +795,7 @@ class RegenBondRevisionTests(unittest.TestCase):
             100.0,
             100.0,
         )
+        self.assertAlmostEqual(engine._producer_debt_obligations[0].cash_service_remaining_usd, 0.0)
 
         reduced = engine._reduce_producer_debt_obligations(
             lender_pool.pool_id,
@@ -659,6 +807,56 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(reduced, 40.0)
         self.assertAlmostEqual(engine._producer_debt_obligations[0].remaining_voucher_units, 60.0)
         self.assertAlmostEqual(engine._producer_debt_closed_by_circulation_usd_total, 40.0)
+
+    def test_contract_cash_service_can_recover_stable_after_voucher_circulation(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+                producer_debt_contract_service_margin_rate=0.25,
+                producer_debt_maturity_preserve_reserve=False,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        lender_pool.values.set_value(voucher_id, 1.0)
+        engine.tick = 1
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+        )
+        obligation = engine._producer_debt_obligations[0]
+        self.assertAlmostEqual(obligation.cash_service_remaining_usd, 125.0)
+        engine._reduce_producer_debt_obligations(
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            "producer_voucher_swap_out",
+            source_pool_id="producer:other",
+            source_role="producer",
+        )
+        self.assertAlmostEqual(obligation.remaining_voucher_units, 0.0)
+        self.assertAlmostEqual(obligation.cash_service_remaining_usd, 125.0)
+        engine._vault_add(producer_pool, stable_id, 125.0, "test_revenue", "test")
+        lender_stable_before = lender_pool.vault.get(stable_id)
+
+        paid = engine._execute_producer_debt_cash_service_payment(
+            obligation,
+            125.0,
+            "borrower_stable_repayment",
+        )
+
+        self.assertAlmostEqual(paid, 125.0)
+        self.assertAlmostEqual(lender_pool.vault.get(stable_id) - lender_stable_before, 125.0)
+        self.assertAlmostEqual(obligation.cash_service_remaining_usd, 0.0)
+        self.assertAlmostEqual(engine._producer_debt_cash_service_paid_usd_total, 125.0)
+        self.assertAlmostEqual(engine._lender_recovered_stable_borrower_regular_usd_total, 125.0)
 
     def test_producer_debt_reduction_splits_stable_and_circulation_paths(self):
         engine = SimulationEngine(small_config(producer_debt_maturity_enabled=True))

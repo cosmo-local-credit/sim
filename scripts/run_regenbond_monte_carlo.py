@@ -256,6 +256,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--producer-debt-contract-service-margin-rate",
+        type=float,
+        default=0.50,
+        help=(
+            "Bond-frontier borrower cash-service margin above principal. The "
+            "default 0.50 targets bond repayment plus issuer operating/risk headroom."
+        ),
+    )
+    parser.add_argument(
         "--frontier-mode",
         default="adaptive",
         choices=("adaptive", "grid"),
@@ -468,6 +477,9 @@ SHARD_CONFIG_KEYS = (
     "certification_policy",
     "issuer_reserve_share",
     "issuer_payment_stride",
+    "bond_service_lockbox_mode",
+    "bond_service_lockbox_coverage_ratio",
+    "producer_debt_contract_service_margin_rate",
     "frontier_mode",
     "frontier_refinement_rounds",
     "route_success_floor",
@@ -1321,6 +1333,16 @@ def scenario_config(
             0.0,
             float(getattr(args, "bond_service_lockbox_coverage_ratio", 1.25) or 0.0),
         )
+        contract_margin = max(
+            0.0,
+            float(getattr(args, "producer_debt_contract_service_margin_rate", 0.50) or 0.0),
+        )
+        cfg.producer_debt_contract_repayment_enabled = True
+        cfg.producer_debt_contract_service_margin_rate = contract_margin
+        cfg.producer_debt_contract_revenue_rate = max(
+            cfg.productive_credit_return_rate,
+            1.0 + contract_margin,
+        )
         cfg.route_substitution_enabled = True
         cfg.route_substitution_max_alternatives = 3
         route_request_base = int(getattr(args, "_frontier_route_requests_per_tick", 1))
@@ -1697,9 +1719,10 @@ def bond_metrics(latest: dict[str, object], cfg: ScenarioConfig, tick: int) -> d
     unpaid_scheduled_claim = max(0.0, scheduled_due - actual_payment)
     service_coverage = returned / scheduled_due if scheduled_due > 1e-9 else (999.0 if principal <= 1e-9 else 0.0)
     paid_coverage = actual_payment / scheduled_due if scheduled_due > 1e-9 else 1.0
+    fee_service_reserved = safe_float(latest.get("fee_service_reserved_usd_total"))
     recovered_service_cash = max(
         returned,
-        safe_float(latest.get("lender_recovered_stable_usd_total")),
+        safe_float(latest.get("lender_recovered_stable_usd_total")) + fee_service_reserved,
     )
     service_cash_headroom = (
         recovered_service_cash / scheduled_due
@@ -1739,6 +1762,7 @@ def bond_metrics(latest: dict[str, object], cfg: ScenarioConfig, tick: int) -> d
         "issuer_reserve_initial_usd": reserve_initial,
         "issuer_reserve_balance_usd": reserve_balance,
         "issuer_eligible_fee_service_inflow_usd": returned,
+        "issuer_fee_service_reserved_usd": fee_service_reserved,
         "issuer_scheduled_coupon_due_usd": coupon_due,
         "issuer_scheduled_principal_due_usd": principal_due,
         "issuer_scheduled_debt_service_due_usd": scheduled_due,
@@ -1966,6 +1990,8 @@ def run_one(
             "producer_deposit_stable_usd_tick",
             "producer_deposit_voucher_usd_tick",
             "productive_credit_inflow_usd_tick",
+            "producer_debt_cash_service_due_usd_tick",
+            "producer_debt_cash_service_paid_usd_tick",
             "producer_debt_matured_usd_tick",
             "producer_debt_repaid_usd_tick",
             "producer_debt_repaid_regular_usd_tick",
@@ -1999,6 +2025,9 @@ def run_one(
             "fee_conversion_attempted_usd_tick",
             "fee_conversion_success_usd_tick",
             "fee_conversion_failed_usd_tick",
+            "fee_service_reserved_usd_tick",
+            "fee_service_stable_reserved_usd_tick",
+            "fee_service_converted_voucher_reserved_usd_tick",
             "bond_service_reserved_usd_tick",
             "bond_service_paid_from_reserve_usd_tick",
             "quarterly_clearing_usd_tick",
@@ -2321,6 +2350,20 @@ def run_one(
             "bond_service_reserve_balance_usd": latest.get("bond_service_reserve_balance_usd", 0.0),
             "bond_service_reserved_usd": latest.get("bond_service_reserved_usd_tick", 0.0),
             "bond_service_reserved_usd_total": cumulative_float["bond_service_reserved_usd_tick"],
+            "fee_service_reserved_usd": latest.get("fee_service_reserved_usd_tick", 0.0),
+            "fee_service_reserved_usd_total": cumulative_float["fee_service_reserved_usd_tick"],
+            "fee_service_stable_reserved_usd": latest.get(
+                "fee_service_stable_reserved_usd_tick", 0.0
+            ),
+            "fee_service_stable_reserved_usd_total": cumulative_float[
+                "fee_service_stable_reserved_usd_tick"
+            ],
+            "fee_service_converted_voucher_reserved_usd": latest.get(
+                "fee_service_converted_voucher_reserved_usd_tick", 0.0
+            ),
+            "fee_service_converted_voucher_reserved_usd_total": cumulative_float[
+                "fee_service_converted_voucher_reserved_usd_tick"
+            ],
             "bond_service_paid_from_reserve_usd": latest.get(
                 "bond_service_paid_from_reserve_usd_tick", 0.0
             ),
@@ -2340,6 +2383,18 @@ def run_one(
             "productive_credit_inflow_usd_total": cumulative_float["productive_credit_inflow_usd_tick"],
             "producer_debt_active_obligations": latest.get("producer_debt_active_obligations", 0),
             "producer_debt_active_usd": latest.get("producer_debt_active_usd", 0.0),
+            "producer_debt_cash_service_due_usd": latest.get(
+                "producer_debt_cash_service_due_usd_tick", 0.0
+            ),
+            "producer_debt_cash_service_due_usd_total": cumulative_float[
+                "producer_debt_cash_service_due_usd_tick"
+            ],
+            "producer_debt_cash_service_paid_usd": latest.get(
+                "producer_debt_cash_service_paid_usd_tick", 0.0
+            ),
+            "producer_debt_cash_service_paid_usd_total": cumulative_float[
+                "producer_debt_cash_service_paid_usd_tick"
+            ],
             "producer_debt_matured_usd": latest.get("producer_debt_matured_usd_tick", 0.0),
             "producer_debt_matured_usd_total": cumulative_float["producer_debt_matured_usd_tick"],
             "producer_debt_repaid_usd": latest.get("producer_debt_repaid_usd_tick", 0.0),
@@ -2405,6 +2460,13 @@ def run_one(
             "fee_conversion_success_usd_total": cumulative_float["fee_conversion_success_usd_tick"],
             "fee_conversion_failed_usd": latest.get("fee_conversion_failed_usd_tick", 0.0),
             "fee_conversion_failed_usd_total": cumulative_float["fee_conversion_failed_usd_tick"],
+            "fee_service_reserved_usd_epoch": latest.get("fee_service_reserved_usd_epoch", 0.0),
+            "fee_service_stable_reserved_usd_epoch": latest.get(
+                "fee_service_stable_reserved_usd_epoch", 0.0
+            ),
+            "fee_service_converted_voucher_reserved_usd_epoch": latest.get(
+                "fee_service_converted_voucher_reserved_usd_epoch", 0.0
+            ),
             "quarterly_clearing_usd": latest.get("quarterly_clearing_usd_tick", 0.0),
             "quarterly_clearing_usd_total": cumulative_float["quarterly_clearing_usd_tick"],
             "quarterly_clearing_lender_liquidity_before_tick": latest.get(
@@ -4257,6 +4319,15 @@ def summarize_frontier_cell(
     bond_service_reserved_values = [
         safe_float(row.get("bond_service_reserved_usd_total")) for row in rows
     ]
+    fee_service_reserved_values = [
+        safe_float(row.get("fee_service_reserved_usd_total")) for row in rows
+    ]
+    fee_service_stable_reserved_values = [
+        safe_float(row.get("fee_service_stable_reserved_usd_total")) for row in rows
+    ]
+    fee_service_converted_voucher_reserved_values = [
+        safe_float(row.get("fee_service_converted_voucher_reserved_usd_total")) for row in rows
+    ]
     bond_service_reserve_balance_values = [
         safe_float(row.get("bond_service_reserve_balance_usd")) for row in rows
     ]
@@ -4468,6 +4539,13 @@ def summarize_frontier_cell(
             lender_recovered_stable_other_values, 0.50
         ),
         "bond_service_reserved_usd_total_p50": percentile(bond_service_reserved_values, 0.50),
+        "fee_service_reserved_usd_total_p50": percentile(fee_service_reserved_values, 0.50),
+        "fee_service_stable_reserved_usd_total_p50": percentile(
+            fee_service_stable_reserved_values, 0.50
+        ),
+        "fee_service_converted_voucher_reserved_usd_total_p50": percentile(
+            fee_service_converted_voucher_reserved_values, 0.50
+        ),
         "bond_service_reserve_balance_usd_p50": percentile(bond_service_reserve_balance_values, 0.50),
         "bond_service_paid_from_reserve_usd_total_p50": percentile(
             bond_service_paid_from_reserve_values, 0.50
@@ -4771,6 +4849,15 @@ def issuer_cashflow_summary_rows(safety_rows: list[dict[str, object]]) -> list[d
                     "bond_service_lockbox_coverage_ratio_p50", 0.0
                 ),
                 "bond_service_lockbox_mode": row.get("bond_service_lockbox_mode", ""),
+                "fee_service_reserved_usd_total_p50": row.get(
+                    "fee_service_reserved_usd_total_p50", 0.0
+                ),
+                "fee_service_stable_reserved_usd_total_p50": row.get(
+                    "fee_service_stable_reserved_usd_total_p50", 0.0
+                ),
+                "fee_service_converted_voucher_reserved_usd_total_p50": row.get(
+                    "fee_service_converted_voucher_reserved_usd_total_p50", 0.0
+                ),
                 "issuer_scheduled_debt_service_due_p50": row.get("issuer_scheduled_debt_service_due_p50", 0.0),
                 "issuer_actual_bondholder_payment_p50": row.get("issuer_actual_bondholder_payment_p50", 0.0),
                 "issuer_reserve_balance_p05": row.get("issuer_reserve_balance_p05", 0.0),
@@ -5148,6 +5235,15 @@ def frontier_summary_rows(
                     best.get("bond_service_lockbox_coverage_ratio_p50")
                 ),
                 "bond_service_lockbox_mode": best.get("bond_service_lockbox_mode", ""),
+                "fee_service_reserved_usd_total_p50": safe_float(
+                    best.get("fee_service_reserved_usd_total_p50")
+                ),
+                "fee_service_stable_reserved_usd_total_p50": safe_float(
+                    best.get("fee_service_stable_reserved_usd_total_p50")
+                ),
+                "fee_service_converted_voucher_reserved_usd_total_p50": safe_float(
+                    best.get("fee_service_converted_voucher_reserved_usd_total_p50")
+                ),
                 "issuer_reserve_balance_p05": safe_float(best.get("issuer_reserve_balance_p05")),
                 "issuer_unpaid_scheduled_claim_p95": safe_float(best.get("issuer_unpaid_scheduled_claim_p95")),
                 "route_success_p05": safe_float(best.get("route_success_p05")),
@@ -5200,6 +5296,15 @@ def frontier_summary_rows(
                     best.get("bond_service_lockbox_coverage_ratio_p50")
                 ),
                 "bond_service_lockbox_mode": best.get("bond_service_lockbox_mode", ""),
+                "fee_service_reserved_usd_total_p50": safe_float(
+                    best.get("fee_service_reserved_usd_total_p50")
+                ),
+                "fee_service_stable_reserved_usd_total_p50": safe_float(
+                    best.get("fee_service_stable_reserved_usd_total_p50")
+                ),
+                "fee_service_converted_voucher_reserved_usd_total_p50": safe_float(
+                    best.get("fee_service_converted_voucher_reserved_usd_total_p50")
+                ),
                 "issuer_reserve_balance_p05": safe_float(best.get("issuer_reserve_balance_p05")),
                 "issuer_unpaid_scheduled_claim_p95": safe_float(best.get("issuer_unpaid_scheduled_claim_p95")),
                 "route_success_p05": safe_float(best.get("route_success_p05")),

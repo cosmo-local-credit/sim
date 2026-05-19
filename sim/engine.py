@@ -63,6 +63,8 @@ class ProducerDebtObligation:
     original_voucher_units: float
     remaining_voucher_units: float
     borrowed_usd: float
+    cash_service_due_usd: float = 0.0
+    cash_service_remaining_usd: float = 0.0
 
 class SimulationEngine:
     def __init__(self, cfg: ScenarioConfig, seed: int = 1) -> None:
@@ -167,6 +169,10 @@ class SimulationEngine:
         self._next_producer_debt_obligation_id: int = 1
         self._producer_debt_originated_usd_tick: float = 0.0
         self._producer_debt_originated_usd_total: float = 0.0
+        self._producer_debt_cash_service_due_usd_tick: float = 0.0
+        self._producer_debt_cash_service_due_usd_total: float = 0.0
+        self._producer_debt_cash_service_paid_usd_tick: float = 0.0
+        self._producer_debt_cash_service_paid_usd_total: float = 0.0
         self._producer_debt_matured_usd_tick: float = 0.0
         self._producer_debt_matured_usd_total: float = 0.0
         self._producer_debt_repaid_usd_tick: float = 0.0
@@ -214,6 +220,12 @@ class SimulationEngine:
         self._fee_conversion_attempted_usd_total: float = 0.0
         self._fee_conversion_success_usd_total: float = 0.0
         self._fee_conversion_failed_usd_total: float = 0.0
+        self._fee_service_reserved_usd_tick: float = 0.0
+        self._fee_service_reserved_usd_total: float = 0.0
+        self._fee_service_stable_reserved_usd_tick: float = 0.0
+        self._fee_service_stable_reserved_usd_total: float = 0.0
+        self._fee_service_converted_voucher_reserved_usd_tick: float = 0.0
+        self._fee_service_converted_voucher_reserved_usd_total: float = 0.0
         self._lender_recovered_stable_by_pool: Dict[str, float] = {}
         self._lender_recovered_stable_total_by_pool: Dict[str, float] = {}
         self._lender_recovered_stable_total_by_pool_reason: Dict[Tuple[str, str], float] = {}
@@ -2834,6 +2846,28 @@ class SimulationEngine:
         multiple = max(0.0, float(self.cfg.lender_voucher_cap_deposit_multiple or 0.0))
         return sum(self._producer_deposit_value_by_voucher.values()) * multiple
 
+    def _producer_debt_contract_repayment_enabled(self) -> bool:
+        return bool(getattr(self.cfg, "producer_debt_contract_repayment_enabled", False))
+
+    def _producer_debt_contract_service_multiplier(self) -> float:
+        if not self._producer_debt_contract_repayment_enabled():
+            return 1.0
+        margin = max(
+            0.0,
+            float(getattr(self.cfg, "producer_debt_contract_service_margin_rate", 0.0) or 0.0),
+        )
+        return 1.0 + margin
+
+    def _producer_debt_contract_revenue_rate(self) -> float:
+        base_rate = max(0.0, float(self.cfg.productive_credit_return_rate or 0.0))
+        if not self._producer_debt_contract_repayment_enabled():
+            return base_rate
+        contract_rate = max(
+            0.0,
+            float(getattr(self.cfg, "producer_debt_contract_revenue_rate", 0.0) or 0.0),
+        )
+        return max(base_rate, contract_rate)
+
     def _record_lender_recovered_stable(self, pool_id: str, amount_usd: float, reason: str) -> None:
         if amount_usd <= 1e-9:
             return
@@ -2901,6 +2935,11 @@ class SimulationEngine:
         if spec is None or spec.issuer_id != producer_pool.steward_id:
             return
         maturity = max(1, int(self.cfg.producer_debt_maturity_ticks or 1))
+        cash_service_due = (
+            float(borrowed_usd) * self._producer_debt_contract_service_multiplier()
+            if self._producer_debt_contract_repayment_enabled()
+            else 0.0
+        )
         obligation = ProducerDebtObligation(
             obligation_id=self._next_producer_debt_obligation_id,
             producer_pool_id=producer_pool_id,
@@ -2911,11 +2950,15 @@ class SimulationEngine:
             original_voucher_units=float(voucher_units),
             remaining_voucher_units=float(voucher_units),
             borrowed_usd=float(borrowed_usd),
+            cash_service_due_usd=cash_service_due,
+            cash_service_remaining_usd=cash_service_due,
         )
         self._next_producer_debt_obligation_id += 1
         self._producer_debt_obligations.append(obligation)
         self._producer_debt_originated_usd_tick += float(borrowed_usd)
         self._producer_debt_originated_usd_total += float(borrowed_usd)
+        self._producer_debt_cash_service_due_usd_tick += cash_service_due
+        self._producer_debt_cash_service_due_usd_total += cash_service_due
         self.log.add(Event(
             self.tick,
             "PRODUCER_DEBT_OBLIGATION_CREATED",
@@ -2927,6 +2970,7 @@ class SimulationEngine:
                 "producer_pool_id": producer_pool_id,
                 "voucher_units": float(voucher_units),
                 "due_tick": obligation.due_tick,
+                "cash_service_due_usd": cash_service_due,
             },
         ))
 
@@ -2962,6 +3006,21 @@ class SimulationEngine:
             remaining -= used
             reduced_units += used
             reduced_usd = used * unit_value
+            cash_service_reduced_usd = 0.0
+            if self._producer_debt_contract_repayment_enabled() and reason in {
+                "borrower_stable_repayment",
+                "consumer_stable_purchase",
+                "third_party_stable_purchase",
+            }:
+                cash_service_reduced_usd = min(
+                    max(0.0, obligation.cash_service_remaining_usd),
+                    reduced_usd,
+                )
+                obligation.cash_service_remaining_usd = max(
+                    0.0,
+                    obligation.cash_service_remaining_usd - cash_service_reduced_usd,
+                )
+                self._record_producer_debt_cash_service_paid(cash_service_reduced_usd)
             meta = {
                 "obligation_id": obligation.obligation_id,
                 "producer_pool_id": obligation.producer_pool_id,
@@ -2969,6 +3028,7 @@ class SimulationEngine:
                 "source_role": source_role,
                 "voucher_units": used,
                 "reason": reason,
+                "cash_service_reduced_usd": cash_service_reduced_usd,
             }
             if reason == "borrower_stable_repayment":
                 self._producer_debt_repaid_usd_tick += reduced_usd
@@ -3015,7 +3075,7 @@ class SimulationEngine:
     def _schedule_productive_credit_inflow(self, pool_id: str, borrowed_usd: float, voucher_id: str) -> None:
         if not bool(self.cfg.productive_credit_enabled):
             return
-        rate = max(0.0, float(self.cfg.productive_credit_return_rate or 0.0))
+        rate = self._producer_debt_contract_revenue_rate()
         if borrowed_usd <= 1e-9 or rate <= 0.0:
             return
         lag = max(0, int(self.cfg.productive_credit_lag_ticks or 0))
@@ -3069,9 +3129,18 @@ class SimulationEngine:
     def _producer_debt_active_usd(self) -> float:
         total = 0.0
         for obligation in self._producer_debt_obligations:
-            if obligation.remaining_voucher_units <= 1e-9:
+            voucher_exposure_usd = 0.0
+            if obligation.remaining_voucher_units > 1e-9:
+                voucher_exposure_usd = obligation.remaining_voucher_units * self._producer_debt_unit_value(obligation)
+            cash_service_usd = (
+                max(0.0, obligation.cash_service_remaining_usd)
+                if self._producer_debt_contract_repayment_enabled()
+                else 0.0
+            )
+            active_usd = max(voucher_exposure_usd, cash_service_usd)
+            if active_usd <= 1e-9:
                 continue
-            total += obligation.remaining_voucher_units * self._producer_debt_unit_value(obligation)
+            total += active_usd
         return total
 
     def _producer_debt_stable_available(self, producer_pool: "Pool") -> float:
@@ -3080,6 +3149,188 @@ class SimulationEngine:
         if bool(self.cfg.producer_debt_maturity_preserve_reserve):
             stable_available -= max(0.0, float(producer_pool.policy.min_stable_reserve or 0.0))
         return max(0.0, stable_available)
+
+    def _record_producer_debt_cash_service_paid(self, amount_usd: float) -> None:
+        amount = max(0.0, float(amount_usd))
+        if amount <= 1e-9:
+            return
+        self._producer_debt_cash_service_paid_usd_tick += amount
+        self._producer_debt_cash_service_paid_usd_total += amount
+
+    def _obligation_cash_service_multiplier(self, obligation: ProducerDebtObligation) -> float:
+        if obligation.borrowed_usd <= 1e-9:
+            return self._producer_debt_contract_service_multiplier()
+        if obligation.cash_service_due_usd <= 1e-9:
+            return 1.0
+        return max(1.0, obligation.cash_service_due_usd / obligation.borrowed_usd)
+
+    def _close_producer_debt_voucher_units(
+        self,
+        obligation: ProducerDebtObligation,
+        units: float,
+        reason: str,
+    ) -> float:
+        close_units = max(0.0, min(float(units), obligation.remaining_voucher_units))
+        if close_units <= 1e-9:
+            return 0.0
+        producer_pool = self.pools.get(obligation.producer_pool_id)
+        lender_pool = self.pools.get(obligation.lender_pool_id)
+        if lender_pool is None:
+            obligation.remaining_voucher_units = max(0.0, obligation.remaining_voucher_units - close_units)
+            return close_units
+
+        held_units = min(close_units, lender_pool.vault.get(obligation.voucher_id))
+        if held_units > 1e-9 and self._vault_sub(
+            lender_pool,
+            obligation.voucher_id,
+            held_units,
+            "producer_debt_cash_service_voucher_return",
+            obligation.producer_pool_id,
+        ):
+            spec = self.factory.voucher_specs.get(obligation.voucher_id)
+            if spec and spec.issuer_id in self.agents:
+                issuer_agent = self.agents[spec.issuer_id]
+                issuer_agent.issuer.return_to_issuer(held_units)
+                issuer_pool = self.pools.get(issuer_agent.pool_id)
+                if issuer_pool is not None:
+                    self._vault_add(
+                        issuer_pool,
+                        obligation.voucher_id,
+                        held_units,
+                        "producer_debt_cash_service_redeem_receive",
+                        lender_pool.pool_id,
+                    )
+            elif producer_pool is not None:
+                self._vault_add(
+                    producer_pool,
+                    obligation.voucher_id,
+                    held_units,
+                    "producer_debt_cash_service_redeem_receive",
+                    lender_pool.pool_id,
+                )
+
+        obligation.remaining_voucher_units = max(0.0, obligation.remaining_voucher_units - close_units)
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_DEBT_VOUCHER_EXPOSURE_CLOSED_BY_CASH_SERVICE",
+            pool_id=obligation.lender_pool_id,
+            asset_id=obligation.voucher_id,
+            amount=close_units * self._producer_debt_unit_value(obligation),
+            meta={
+                "obligation_id": obligation.obligation_id,
+                "producer_pool_id": obligation.producer_pool_id,
+                "voucher_units": close_units,
+                "held_units_returned": held_units,
+                "reason": reason,
+            },
+        ))
+        return close_units
+
+    def _execute_producer_debt_cash_service_payment(
+        self,
+        obligation: ProducerDebtObligation,
+        target_usd: float,
+        reason: str,
+    ) -> float:
+        producer_pool = self.pools.get(obligation.producer_pool_id)
+        lender_pool = self.pools.get(obligation.lender_pool_id)
+        if producer_pool is None or lender_pool is None:
+            return 0.0
+        cash_remaining = max(0.0, float(obligation.cash_service_remaining_usd or 0.0))
+        target = max(0.0, min(float(target_usd), cash_remaining))
+        if target <= 1e-9:
+            return 0.0
+        stable_id = self.cfg.stable_symbol
+        stable_value = self._asset_value(lender_pool, stable_id)
+        if stable_value <= 0.0:
+            stable_value = 1.0
+        available_usd = self._producer_debt_stable_available(producer_pool) * stable_value
+        payment_usd = min(target, available_usd)
+        if payment_usd <= 1e-9:
+            return 0.0
+        amount_units = payment_usd / stable_value
+        if not self._vault_sub(
+            producer_pool,
+            stable_id,
+            amount_units,
+            "producer_debt_contract_service_out",
+            obligation.lender_pool_id,
+        ):
+            return 0.0
+        self._vault_add(
+            lender_pool,
+            stable_id,
+            amount_units,
+            "producer_debt_contract_service_in",
+            obligation.producer_pool_id,
+        )
+        self._record_lender_recovered_stable(lender_pool.pool_id, payment_usd, reason)
+        obligation.cash_service_remaining_usd = max(0.0, cash_remaining - payment_usd)
+        self._record_producer_debt_cash_service_paid(payment_usd)
+
+        unit_value = self._producer_debt_unit_value(obligation)
+        service_multiplier = self._obligation_cash_service_multiplier(obligation)
+        if unit_value > 0.0 and service_multiplier > 0.0:
+            principal_closed_usd = min(
+                obligation.remaining_voucher_units * unit_value,
+                payment_usd / service_multiplier,
+            )
+            if principal_closed_usd > 1e-9:
+                self._close_producer_debt_voucher_units(
+                    obligation,
+                    principal_closed_usd / unit_value,
+                    reason,
+                )
+
+        self._producer_debt_repaid_usd_tick += payment_usd
+        self._producer_debt_repaid_usd_total += payment_usd
+        if reason == "producer_debt_maturity_repayment":
+            self._producer_debt_repaid_maturity_usd_tick += payment_usd
+            self._producer_debt_repaid_maturity_usd_total += payment_usd
+        else:
+            self._producer_debt_repaid_regular_usd_tick += payment_usd
+            self._producer_debt_repaid_regular_usd_total += payment_usd
+        self._producer_debt_stable_recovered_usd_tick += payment_usd
+        self._producer_debt_stable_recovered_usd_total += payment_usd
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_DEBT_CASH_SERVICE_PAID",
+            pool_id=lender_pool.pool_id,
+            asset_id=stable_id,
+            amount=payment_usd,
+            meta={
+                "obligation_id": obligation.obligation_id,
+                "producer_pool_id": producer_pool.pool_id,
+                "reason": reason,
+                "cash_service_remaining_usd": obligation.cash_service_remaining_usd,
+            },
+        ))
+        return payment_usd
+
+    def _write_off_producer_debt_cash_default(
+        self,
+        obligation: ProducerDebtObligation,
+        default_usd: float,
+        reason: str,
+    ) -> None:
+        amount = max(0.0, min(float(default_usd), obligation.cash_service_remaining_usd))
+        if amount <= 1e-9:
+            return
+        obligation.cash_service_remaining_usd = max(0.0, obligation.cash_service_remaining_usd - amount)
+        self._producer_debt_defaulted_usd_tick += amount
+        self._producer_debt_defaulted_usd_total += amount
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_DEBT_CASH_SERVICE_DEFAULTED",
+            pool_id=obligation.lender_pool_id,
+            asset_id=self.cfg.stable_symbol,
+            amount=amount,
+            meta={
+                "obligation_id": obligation.obligation_id,
+                "producer_pool_id": obligation.producer_pool_id,
+                "reason": reason,
+            },
+        ))
 
     def _write_off_producer_debt_default(
         self,
@@ -3255,12 +3506,18 @@ class SimulationEngine:
         if not self._producer_debt_obligations:
             return
         recovery_rate = max(0.0, min(1.0, float(self.cfg.producer_debt_maturity_recovery_rate or 0.0)))
+        contract_repayment = self._producer_debt_contract_repayment_enabled()
         active: list[ProducerDebtObligation] = []
         for obligation in sorted(
             self._producer_debt_obligations,
             key=lambda item: (item.due_tick, item.issued_tick, item.obligation_id),
         ):
-            if obligation.remaining_voucher_units <= 1e-9:
+            has_voucher_exposure = obligation.remaining_voucher_units > 1e-9
+            has_cash_service = (
+                contract_repayment
+                and max(0.0, obligation.cash_service_remaining_usd) > 1e-9
+            )
+            if not has_voucher_exposure and not has_cash_service:
                 continue
             if obligation.due_tick > self.tick:
                 active.append(obligation)
@@ -3269,7 +3526,11 @@ class SimulationEngine:
             lender_pool = self.pools.get(obligation.lender_pool_id)
             unit_value = self._producer_debt_unit_value(obligation)
             if lender_pool is None or producer_pool is None or unit_value <= 0.0:
-                default_usd = obligation.remaining_voucher_units * max(unit_value, self._default_asset_value(obligation.voucher_id))
+                default_usd = max(
+                    obligation.remaining_voucher_units
+                    * max(unit_value, self._default_asset_value(obligation.voucher_id)),
+                    obligation.cash_service_remaining_usd if contract_repayment else 0.0,
+                )
                 self._producer_debt_defaulted_usd_tick += default_usd
                 self._producer_debt_defaulted_usd_total += default_usd
                 self.log.add(Event(
@@ -3285,6 +3546,34 @@ class SimulationEngine:
                         "reason": "missing_pool",
                     },
                 ))
+                continue
+
+            if contract_repayment:
+                matured_usd = max(
+                    obligation.remaining_voucher_units * unit_value,
+                    max(0.0, obligation.cash_service_remaining_usd),
+                )
+                self._producer_debt_matured_usd_tick += matured_usd
+                self._producer_debt_matured_usd_total += matured_usd
+                recoverable_usd = max(0.0, obligation.cash_service_remaining_usd) * recovery_rate
+                if recoverable_usd > 1e-9:
+                    self._execute_producer_debt_cash_service_payment(
+                        obligation,
+                        recoverable_usd,
+                        "producer_debt_maturity_repayment",
+                    )
+                if obligation.cash_service_remaining_usd > 1e-9:
+                    self._write_off_producer_debt_cash_default(
+                        obligation,
+                        obligation.cash_service_remaining_usd,
+                        "maturity_unrecovered",
+                    )
+                if obligation.remaining_voucher_units > 1e-9:
+                    self._close_producer_debt_voucher_units(
+                        obligation,
+                        obligation.remaining_voucher_units,
+                        "producer_debt_maturity_cash_service_close",
+                    )
                 continue
 
             held_units = min(obligation.remaining_voucher_units, lender_pool.vault.get(obligation.voucher_id))
@@ -3668,6 +3957,17 @@ class SimulationEngine:
             base_target = self._next_issuer_service_due_target()
         return max(0.0, base_target * self._bond_service_lockbox_coverage_ratio())
 
+    def _bond_service_remaining_lockbox_need_usd(self) -> float:
+        return max(
+            0.0,
+            self._bond_service_lockbox_target_usd()
+            - float(self._lp_returned_usd_total or 0.0)
+            - float(self._bond_service_reserve_usd_balance or 0.0),
+        )
+
+    def _bond_fee_service_share(self) -> float:
+        return max(0.0, min(1.0, float(self.cfg.bond_fee_service_share or 0.0)))
+
     def _lender_recovered_stable_pending_usd_total(self) -> float:
         return sum(max(0.0, float(amount or 0.0)) for amount in self._lender_recovered_stable_by_pool.values())
 
@@ -3700,12 +4000,7 @@ class SimulationEngine:
         if share <= 1e-9:
             return 0.0
         target_due = self._bond_service_lockbox_target_usd()
-        remaining_need = max(
-            0.0,
-            target_due
-            - float(self._lp_returned_usd_total or 0.0)
-            - float(self._bond_service_reserve_usd_balance or 0.0),
-        )
+        remaining_need = self._bond_service_remaining_lockbox_need_usd()
         if remaining_need <= 1e-9:
             return 0.0
         stable_id = self.cfg.stable_symbol
@@ -3728,6 +4023,72 @@ class SimulationEngine:
             amount=amount,
             meta={
                 "reason": reason,
+                "target_due": target_due,
+                "remaining_need_before": remaining_need,
+                "lockbox_mode": self._bond_service_lockbox_mode(),
+                "lockbox_coverage_ratio": self._bond_service_lockbox_coverage_ratio(),
+            },
+        ))
+        return amount
+
+    def _reserve_fee_service_cash_for_bond_service(
+        self,
+        amount_usd: float,
+        source: str,
+        source_pool: Optional[Pool] = None,
+    ) -> float:
+        if not bool(self.cfg.bond_service_reserve_enabled):
+            return 0.0
+        if str(self.cfg.bond_return_mode or "") != "issuer_cashflow":
+            return 0.0
+        if amount_usd <= 1e-9:
+            return 0.0
+        share = self._bond_fee_service_share()
+        if share <= 1e-9:
+            return 0.0
+        target_due = self._bond_service_lockbox_target_usd()
+        remaining_need = self._bond_service_remaining_lockbox_need_usd()
+        if remaining_need <= 1e-9:
+            return 0.0
+        stable_id = self.cfg.stable_symbol
+        available = float(amount_usd)
+        if source_pool is not None:
+            available = min(available, source_pool.vault.get(stable_id))
+        amount = min(float(amount_usd) * share, remaining_need, available)
+        if amount <= 1e-9:
+            return 0.0
+        if source_pool is not None:
+            if not self._vault_sub(
+                source_pool,
+                stable_id,
+                amount,
+                "fee_service_reserve_out",
+                "issuer_service_reserve",
+            ):
+                return 0.0
+        self._bond_service_reserve_usd_balance += amount
+        self._bond_service_reserved_usd_tick += amount
+        self._bond_service_reserved_usd_total += amount
+        self._bond_service_reserved_by_pool["fee_service"] = (
+            self._bond_service_reserved_by_pool.get("fee_service", 0.0) + amount
+        )
+        self._fee_service_reserved_usd_tick += amount
+        self._fee_service_reserved_usd_total += amount
+        if source == "converted_voucher_fee":
+            self._fee_service_converted_voucher_reserved_usd_tick += amount
+            self._fee_service_converted_voucher_reserved_usd_total += amount
+        else:
+            self._fee_service_stable_reserved_usd_tick += amount
+            self._fee_service_stable_reserved_usd_total += amount
+        self._stable_offramp_usd_tick += amount
+        self.log.add(Event(
+            self.tick,
+            "FEE_SERVICE_RESERVED",
+            pool_id=source_pool.pool_id if source_pool is not None else None,
+            amount=amount,
+            meta={
+                "source": source,
+                "fee_service_share": share,
                 "target_due": target_due,
                 "remaining_need_before": remaining_need,
                 "lockbox_mode": self._bond_service_lockbox_mode(),
@@ -4586,12 +4947,21 @@ class SimulationEngine:
         cash_usd = 0.0
         kind_usd = 0.0
         conversion_used_usd = 0.0
+        fee_service_reserved_usd = 0.0
+        fee_service_stable_reserved_usd = 0.0
+        fee_service_converted_voucher_reserved_usd = 0.0
+        fee_converted_voucher_cash_usd = 0.0
 
         if total_fee_usd <= 1e-9:
             self._waterfall_last = {
                 "fee_in_usd": 0.0,
                 "fee_cash_usd": 0.0,
+                "fee_cash_waterfall_usd": 0.0,
                 "fee_kind_usd": 0.0,
+                "fee_service_reserved_usd": 0.0,
+                "fee_service_stable_reserved_usd": 0.0,
+                "fee_service_converted_voucher_reserved_usd": 0.0,
+                "fee_converted_voucher_cash_usd": 0.0,
                 "chi": 0.0,
                 "insurance_alloc_usd": 0.0,
                 "ops_alloc_usd": 0.0,
@@ -4632,7 +5002,13 @@ class SimulationEngine:
             avg_value = avg_values.get(asset_id, 1.0)
             asset_usd = amt * avg_value
             if asset_id == stable_id:
-                cash_usd += asset_usd
+                reserved = self._reserve_fee_service_cash_for_bond_service(
+                    asset_usd,
+                    "stable_fee",
+                )
+                fee_service_reserved_usd += reserved
+                fee_service_stable_reserved_usd += reserved
+                cash_usd += max(0.0, asset_usd - reserved)
                 continue
             if asset_id.startswith("VCHR:") and bool(self.cfg.voucher_fee_conversion_enabled):
                 _, converted_usd, remaining_kind_usd, remaining_voucher_conversion_cap = (
@@ -4644,9 +5020,26 @@ class SimulationEngine:
                         remaining_voucher_conversion_cap,
                     )
                 )
+                reserved = self._reserve_fee_service_cash_for_bond_service(
+                    converted_usd,
+                    "converted_voucher_fee",
+                    source_pool=clc_pool,
+                )
+                fee_service_reserved_usd += reserved
+                fee_service_converted_voucher_reserved_usd += reserved
+                converted_for_waterfall = max(0.0, converted_usd - reserved)
+                if converted_for_waterfall > 1e-9:
+                    converted_for_waterfall = min(converted_for_waterfall, clc_pool.vault.get(stable_id))
+                    if converted_for_waterfall > 1e-9 and self._vault_sub(
+                        clc_pool,
+                        stable_id,
+                        converted_for_waterfall,
+                        "fee_conversion_cash_waterfall_out",
+                        "waterfall",
+                    ):
+                        cash_usd += converted_for_waterfall
+                        fee_converted_voucher_cash_usd += converted_for_waterfall
                 kind_usd += remaining_kind_usd
-                # Converted voucher fees are already materialized as stable in the CLC
-                # pool, so do not add them again through the cash allocation waterfall.
                 continue
             if asset_id in eligible:
                 convert_amt = amt * conversion_ratio
@@ -4666,6 +5059,7 @@ class SimulationEngine:
             self._deposit_fee_asset_to_pool(clc_pool, asset_id, amt, avg_value, "fee_kind")
 
         cash_remaining = cash_usd
+        gross_cash_usd = cash_usd + fee_service_reserved_usd
         insurance_target = self._insurance_target_usd()
         insurance_fund = insurance_pool.vault.get(stable_id)
         insurance_need = max(0.0, insurance_target - insurance_fund)
@@ -4705,11 +5099,16 @@ class SimulationEngine:
         if total_fee_usd > 1e-9 and self._waterfall_bootstrap_remaining > 0:
             self._waterfall_bootstrap_remaining -= 1
 
-        chi = cash_usd / max(1e-9, cash_usd + kind_usd)
+        chi = gross_cash_usd / max(1e-9, gross_cash_usd + kind_usd)
         self._waterfall_last = {
             "fee_in_usd": total_fee_usd,
-            "fee_cash_usd": cash_usd,
+            "fee_cash_usd": gross_cash_usd,
+            "fee_cash_waterfall_usd": cash_usd,
             "fee_kind_usd": kind_usd,
+            "fee_service_reserved_usd": fee_service_reserved_usd,
+            "fee_service_stable_reserved_usd": fee_service_stable_reserved_usd,
+            "fee_service_converted_voucher_reserved_usd": fee_service_converted_voucher_reserved_usd,
+            "fee_converted_voucher_cash_usd": fee_converted_voucher_cash_usd,
             "chi": chi,
             "insurance_alloc_usd": insurance_alloc + insurance_extra,
             "ops_alloc_usd": ops_alloc + ops_extra,
@@ -4721,7 +5120,13 @@ class SimulationEngine:
         }
 
         self.log.add(Event(self.tick, "WATERFALL_EXECUTED", amount=total_fee_usd,
-                           meta={"cash_usd": cash_usd, "kind_usd": kind_usd, "chi": chi}))
+                           meta={
+                               "cash_usd": gross_cash_usd,
+                               "cash_waterfall_usd": cash_usd,
+                               "kind_usd": kind_usd,
+                               "fee_service_reserved_usd": fee_service_reserved_usd,
+                               "chi": chi,
+                           }))
 
         self._fee_access_budget_usd = self._compute_fee_access_budget()
         self._waterfall_last["fee_access_budget_usd"] = self._fee_access_budget_usd
@@ -4967,6 +5372,8 @@ class SimulationEngine:
             self._route_source_voucher_net_flow_value_tick = 0.0
             self._productive_credit_inflow_usd_tick = 0.0
             self._producer_debt_originated_usd_tick = 0.0
+            self._producer_debt_cash_service_due_usd_tick = 0.0
+            self._producer_debt_cash_service_paid_usd_tick = 0.0
             self._producer_debt_matured_usd_tick = 0.0
             self._producer_debt_repaid_usd_tick = 0.0
             self._producer_debt_repaid_regular_usd_tick = 0.0
@@ -5000,6 +5407,9 @@ class SimulationEngine:
             self._fee_conversion_attempted_usd_tick = 0.0
             self._fee_conversion_success_usd_tick = 0.0
             self._fee_conversion_failed_usd_tick = 0.0
+            self._fee_service_reserved_usd_tick = 0.0
+            self._fee_service_stable_reserved_usd_tick = 0.0
+            self._fee_service_converted_voucher_reserved_usd_tick = 0.0
             self._bond_service_reserved_usd_tick = 0.0
             self._bond_service_paid_from_reserve_usd_tick = 0.0
             self._lender_recovered_stable_usd_tick = 0.0
@@ -5315,6 +5725,75 @@ class SimulationEngine:
 
         return attempted
 
+    def _producer_debt_contract_cash_due_usd(self, producer_pool_id: str, voucher_id: str) -> float:
+        if not self._producer_debt_contract_repayment_enabled():
+            return 0.0
+        total = 0.0
+        for obligation in self._producer_debt_obligations:
+            if obligation.producer_pool_id != producer_pool_id or obligation.voucher_id != voucher_id:
+                continue
+            total += max(0.0, obligation.cash_service_remaining_usd)
+        return total
+
+    def _attempt_contract_cash_service_repayment(
+        self,
+        source_pool: "Pool",
+        voucher_id: str,
+        period: int,
+    ) -> bool:
+        stable_id = self.cfg.stable_symbol
+        stable_value = self._asset_value(source_pool, stable_id)
+        if stable_value <= 0.0:
+            stable_value = 1.0
+        available_usd = self._producer_debt_stable_available(source_pool) * stable_value
+        if available_usd <= 1e-9:
+            return False
+
+        obligations = [
+            obligation
+            for obligation in sorted(
+                self._producer_debt_obligations,
+                key=lambda item: (item.due_tick, item.issued_tick, item.obligation_id),
+            )
+            if obligation.producer_pool_id == source_pool.pool_id
+            and obligation.voucher_id == voucher_id
+            and obligation.cash_service_remaining_usd > 1e-9
+        ]
+        if not obligations:
+            return False
+
+        scheduled_payment_usd = 0.0
+        for obligation in obligations:
+            remaining_ticks = max(1, obligation.due_tick - self.tick + 1)
+            remaining_periods = max(1, int(math.ceil(remaining_ticks / max(1, period))))
+            scheduled_payment_usd += obligation.cash_service_remaining_usd / remaining_periods
+        target_usd = min(available_usd, scheduled_payment_usd)
+        if target_usd <= 1e-9:
+            return False
+
+        paid_usd = 0.0
+        for obligation in obligations:
+            if paid_usd + 1e-9 >= target_usd:
+                break
+            need = min(obligation.cash_service_remaining_usd, target_usd - paid_usd)
+            paid_usd += self._execute_producer_debt_cash_service_payment(
+                obligation,
+                need,
+                "borrower_stable_repayment",
+            )
+
+        if paid_usd > 1e-9:
+            self.log.add(Event(
+                self.tick,
+                "CONTRACT_REPAYMENT_EXECUTED",
+                pool_id=source_pool.pool_id,
+                asset_id=stable_id,
+                amount=paid_usd,
+                meta={"voucher_id": voucher_id, "scheduled_payment_usd": scheduled_payment_usd},
+            ))
+            return True
+        return False
+
     def _attempt_repayment(self, source_pool: "Pool") -> bool:
         if source_pool.policy.role != "producer":
             return False
@@ -5327,6 +5806,10 @@ class SimulationEngine:
         if period > 1:
             phase = self._loan_phase_for(agent.agent_id, period)
             in_phase = (self.tick + phase) % period == 0
+        if self._producer_debt_contract_cash_due_usd(source_pool.pool_id, voucher_id) > 1e-9:
+            if not in_phase:
+                return False
+            return self._attempt_contract_cash_service_repayment(source_pool, voucher_id, period)
         lender_pools = {
             pid for pid, p in self.pools.items()
             if p.policy.role == "lender" and p.vault.get(voucher_id) > 1e-9 and p.registry.is_listed(voucher_id)
@@ -6098,6 +6581,10 @@ class SimulationEngine:
             producer_debt_active_count = sum(
                 1 for obligation in self._producer_debt_obligations
                 if obligation.remaining_voucher_units > 1e-9
+                or (
+                    self._producer_debt_contract_repayment_enabled()
+                    and obligation.cash_service_remaining_usd > 1e-9
+                )
             )
             producer_debt_active_usd = self._producer_debt_active_usd()
             lender_stable_total_usd = 0.0
@@ -6145,6 +6632,18 @@ class SimulationEngine:
                 "producer_debt_active_usd": float(producer_debt_active_usd),
                 "producer_debt_originated_usd_tick": float(self._producer_debt_originated_usd_tick),
                 "producer_debt_originated_usd_total": float(self._producer_debt_originated_usd_total),
+                "producer_debt_cash_service_due_usd_tick": float(
+                    self._producer_debt_cash_service_due_usd_tick
+                ),
+                "producer_debt_cash_service_due_usd_total": float(
+                    self._producer_debt_cash_service_due_usd_total
+                ),
+                "producer_debt_cash_service_paid_usd_tick": float(
+                    self._producer_debt_cash_service_paid_usd_tick
+                ),
+                "producer_debt_cash_service_paid_usd_total": float(
+                    self._producer_debt_cash_service_paid_usd_total
+                ),
                 "lender_stable_total_usd": float(lender_stable_total_usd),
                 "lender_stable_reserve_usd": float(lender_stable_reserve_usd),
                 "lender_stable_available_above_reserve_usd": float(
@@ -6341,13 +6840,42 @@ class SimulationEngine:
                 "fee_conversion_attempted_usd_total": float(self._fee_conversion_attempted_usd_total),
                 "fee_conversion_success_usd_total": float(self._fee_conversion_success_usd_total),
                 "fee_conversion_failed_usd_total": float(self._fee_conversion_failed_usd_total),
+                "fee_service_reserved_usd_tick": float(self._fee_service_reserved_usd_tick),
+                "fee_service_reserved_usd_total": float(self._fee_service_reserved_usd_total),
+                "fee_service_stable_reserved_usd_tick": float(
+                    self._fee_service_stable_reserved_usd_tick
+                ),
+                "fee_service_stable_reserved_usd_total": float(
+                    self._fee_service_stable_reserved_usd_total
+                ),
+                "fee_service_converted_voucher_reserved_usd_tick": float(
+                    self._fee_service_converted_voucher_reserved_usd_tick
+                ),
+                "fee_service_converted_voucher_reserved_usd_total": float(
+                    self._fee_service_converted_voucher_reserved_usd_total
+                ),
                 "lp_sclc_supply_total": float(lp_sclc_total),
                 "lp_injected_usd_total": float(self._lp_injected_usd_total),
                 "lp_returned_usd_total": float(self._lp_returned_usd_total),
                 "lp_net_usd_total": float(self._lp_returned_usd_total - self._lp_injected_usd_total),
                 "fee_in_usd_epoch": float(self._waterfall_last.get("fee_in_usd", 0.0)),
                 "fee_cash_usd_epoch": float(self._waterfall_last.get("fee_cash_usd", 0.0)),
+                "fee_cash_waterfall_usd_epoch": float(
+                    self._waterfall_last.get("fee_cash_waterfall_usd", 0.0)
+                ),
                 "fee_kind_usd_epoch": float(self._waterfall_last.get("fee_kind_usd", 0.0)),
+                "fee_service_reserved_usd_epoch": float(
+                    self._waterfall_last.get("fee_service_reserved_usd", 0.0)
+                ),
+                "fee_service_stable_reserved_usd_epoch": float(
+                    self._waterfall_last.get("fee_service_stable_reserved_usd", 0.0)
+                ),
+                "fee_service_converted_voucher_reserved_usd_epoch": float(
+                    self._waterfall_last.get("fee_service_converted_voucher_reserved_usd", 0.0)
+                ),
+                "fee_converted_voucher_cash_usd_epoch": float(
+                    self._waterfall_last.get("fee_converted_voucher_cash_usd", 0.0)
+                ),
                 "fee_chi": float(self._waterfall_last.get("chi", 0.0)),
                 "fee_conversion_used_usd_epoch": float(self._waterfall_last.get("conversion_used_usd", 0.0)),
                 "waterfall_ops_alloc_usd_epoch": float(self._waterfall_last.get("ops_alloc_usd", 0.0)),

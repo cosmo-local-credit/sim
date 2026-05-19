@@ -61,7 +61,8 @@ The paper-facing Monte Carlo workflow has two layers:
 - `bond_issuer_frontier` is the current bond-issuer model. Bondholders fund
   stable principal to an issuer; the issuer deploys gross principal into
   eligible lender pools; producer own-voucher borrowing draws stable from those
-  pools; recovered lender stable is reserved first for scheduled bond service.
+  pools; recovered lender stable and the configured service share of eligible
+  fee cash are reserved first for scheduled bond service.
 
 Older `regenbond_lp_injection` and `--scenario all` runs remain useful for
 mechanics inspection, but they are legacy evidence for the paper-facing bond
@@ -107,10 +108,19 @@ diagnostics every `N` ticks while still simulating every tick.
 Current bond-frontier outputs distinguish capped scheduled-payment coverage
 from uncapped cash headroom. `scheduled_payment_coverage` asks whether the
 bondholder received scheduled principal plus coupon due. `service_cash_headroom`
-asks whether eligible recovered stable comfortably exceeded scheduled due. Any
-recovered stable above scheduled service is candidate issuer operating and risk
-headroom, not proven net profit until explicit issuer costs and first-loss
-capital are modeled.
+asks whether eligible service cash comfortably exceeded scheduled due. That
+service cash includes recovered lender stable plus fee cash reserved into the
+bond-service lockbox. Any service cash above scheduled service is candidate
+issuer operating and risk headroom, not proven net profit until explicit issuer
+costs and first-loss capital are modeled.
+
+Frontier runs also enable a producer debt contract cash-service layer. Producer
+borrowing still starts as own-voucher-in/stable-out through an eligible lender
+pool, but the borrower now owes contract cash service in addition to the
+tradable voucher exposure. The current frontier default sets the contract
+service margin to `50%` over borrowed principal. That margin is a scenario
+assumption for bond service, issuer operations, and risk headroom; it is not a
+claim about a deployed interest rate.
 
 The Streamlit app includes a **RegenBond MC** tab that runs this same script as
 a subprocess and displays the exact CLI-equivalent command. For identical
@@ -259,11 +269,14 @@ terminal and Streamlit outputs match when the displayed command is identical.
 - **Repayment**: producers route **stable only** to acquire their voucher from lenders.
   The repayment amount amortizes `loan_term_weeks` and is spread by `loan_activity_period_ticks`.
 - **Bond-frontier producer debt**: producer own-voucher-in/stable-out creates a
-  dated lender-pool exposure. In current frontier runs, ordinary circulation can
-  reduce the exposure before a 13-week maturity; unresolved lender-held
-  producer vouchers trigger stable repayment subject to calibrated
-  recovery/default behavior. There is no explicit one-third monthly installment
-  schedule in the current implementation.
+  dated lender-pool exposure plus a contract cash-service obligation. Ordinary
+  circulation can reduce the pool-level voucher exposure before a 13-week
+  maturity, but it does not by itself erase cash service unless stable is
+  recovered through borrower repayment, consumer purchase, third-party stable
+  purchase, or contract cash-service payment. At maturity, remaining cash
+  service is attempted from available producer stable and unrecovered service is
+  written off under the configured recovery/default behavior. There is no
+  explicit one-third monthly installment schedule in the current implementation.
 
 ### NOAM Routing (default)
 NOAM is the default router (`routing_mode=noam`). It is a **network-aware overlay + beam search**:
@@ -334,6 +347,16 @@ Before allocation, fee assets are **converted to cash** when eligible:
   with `cash_conversion_slippage_bps` and optional `cash_conversion_max_usd_per_epoch`.
 - Converted **vouchers remain in-system** (deposited to CLC); non‑convertible assets are deposited to CLC **in‑kind**.
 - Converted cash is treated as a **fiat on‑ramp** for KPI accounting.
+
+For Regenerative Bond frontier runs with `bond_return_mode=issuer_cashflow`
+and `bond_service_reserve_enabled=True`, fee cash has a senior service path
+before the ordinary waterfall:
+- Stable-denominated fees reserve `bond_fee_service_share` into the
+  bond-service lockbox until the configured lockbox target is met.
+- Successfully converted voucher-denominated fees reserve the same configured
+  share into the lockbox.
+- Fee cash above the lockbox need proceeds through the normal waterfall;
+  unconverted voucher fees remain in-kind inventory.
 
 ### Waterfall order (current implementation)
 1) **Insurance top-up**

@@ -29,10 +29,11 @@ Implemented changes:
 - Updated voucher ledger accounting so net circulating obligation is tracked separately from cumulative issued, returned, and redeemed totals.
 - Added producer deposits of stable and own vouchers, with producer credit capacity based on deposited value using the default `5x` multiple.
 - Added productive-credit stable inflow after producer borrowing, calibrated from aggregate borrow-return timing where available.
-- Added dated producer-debt obligations for frontier runs: producer voucher borrowing creates a maturity record, lender-held vouchers can close through normal circulation, and any remaining obligation at the 13-tick maturity is repaid in stable or written off under the calibrated recovery/default rate.
-- Added routed conversion attempts for voucher-denominated fees, with successful stable conversion entering issuer/CLC service capacity and failures retained as voucher fee inventory.
+- Added dated producer-debt obligations for frontier runs: producer voucher borrowing creates a maturity record and a contract cash-service obligation. Lender-held vouchers can close through normal circulation, but circulation alone only closes the pool-level voucher exposure; stable bond-service recovery requires borrower repayment, consumer or third-party stable purchase, or contract cash-service payment. Any remaining cash service at the 13-tick maturity is attempted from producer stable and then written off under the configured recovery/default rate.
+- Added a producer debt contract service margin for frontier runs. The current default is `50%` over borrowed principal, modeling required cash recovery for bond service plus issuer operating/risk headroom as a scenario assumption rather than as a claimed deployed interest rate.
+- Added routed conversion attempts for voucher-denominated fees. Successful stable conversion can reserve the configured fee-service share into the bond lockbox before excess fee cash enters the CLC waterfall; failures are retained as voucher fee inventory.
 - Added quarterly clearing of eligible recovered stable from lender pools, capped by scheduled issuer need and lender surplus.
-- Added a configurable bond-service lockbox. Frontier jobs reserve recovered lender stable against `1.25x` remaining scheduled principal plus coupon before recovered stable can recirculate; `next_due` remains available as a control mode.
+- Added a configurable bond-service lockbox. Frontier jobs reserve recovered lender stable and eligible fee-service cash against `1.25x` remaining scheduled principal plus coupon before cash can recirculate; `next_due` remains available as a control mode.
 - Added route-substitution diagnostics for ordinary purchase/exchange attempts while keeping borrowing, repayment, and fee conversion as fixed-target routes.
 - Changed the frontier route-success default to `diagnostic`; `absolute` mode keeps the old hard floor behavior, and `relative` mode compares against the matched no-bond baseline.
 
@@ -151,15 +152,18 @@ Review tasks:
 
 Producer borrowing is currently modeled as swapping the producer's own voucher
 into a lender pool for stable out. The lender pool then holds the producer's
-pool-level obligation marker. Repayment or closure occurs when the producer
-voucher leaves the lender pool through stable repayment, stable purchase by
-another participant, issuer return, burn, redemption proxy, or ordinary voucher
-circulation. In bond-frontier runs this is explicit: each producer-voucher
-borrowing event creates a dated obligation, ordinary circulation reduces the
-pool-level exposure before maturity, and unresolved voucher debt at the 13-week
-maturity triggers stable repayment from the producer subject to the calibrated
-recovery/default rate. Unrecovered units are written off as defaulted producer
-debt rather than silently remaining as serviceable bond cashflow.
+pool-level obligation marker. In bond-frontier runs this also creates a dated
+contract cash-service obligation. Repayment or pool-level closure can occur when
+the producer voucher leaves the lender pool through borrower stable repayment,
+stable purchase by another participant, issuer return, burn, redemption proxy,
+or ordinary voucher circulation. Ordinary circulation closes the pool-level
+voucher exposure, but it does not automatically create serviceable stable for
+bondholders. Stable bond-service recovery is recorded only when stable comes
+back through borrower repayment, consumer or third-party stable purchase, or
+contract cash-service payment. At the 13-week maturity, remaining cash service
+is attempted from producer stable subject to the calibrated recovery/default
+rate; unrecovered cash service is written off as defaulted producer debt rather
+than silently remaining as serviceable bond cashflow.
 
 Review tasks:
 
@@ -224,7 +228,7 @@ Review tasks:
 - Compare scheduled-payment coverage, service-cash headroom, voucher
   circulation, leakage, concentration, and stress across service-share settings.
 - Never treat higher bondholder payment as safe unless settlement guardrails also pass.
-- Voucher-denominated fees should not be ignored for bond service. They should enter a conversion process where the bond issuer attempts to swap them through pools for stable when liquidity permits.
+- Voucher-denominated fees should not be ignored for bond service. They enter a conversion process where the bond issuer attempts to swap them through pools for stable when liquidity permits; successfully converted stable reserves the configured fee-service share into the lockbox before excess cash goes to the waterfall.
 - Track failed fee conversion separately from absence of fees.
 - Do not mechanically assume that higher bond-service share reduces local reinvestment unless the modeled waterfall diverts scarce cash from those uses. Instead, report the opportunity cost explicitly: if the same fee cash can fund bondholders, liquidity mandates, repair, insurance, or operations, the model must show which bucket gives way.
 
@@ -233,9 +237,9 @@ Review tasks:
 The current frontier treats gross bond principal as issuer-raised stable that is
 deployed directly to eligible lender pools. Producer borrowing draws from that
 lendable stable. Stable recovered by lender pools through borrower repayment,
-consumer or third-party stable purchases, and maturity settlement is reserved
-first for scheduled bondholder service through explicit issuer clearing
-accounting.
+consumer or third-party stable purchases, and maturity cash-service settlement
+is reserved first for scheduled bondholder service through explicit issuer
+clearing accounting.
 
 Review tasks:
 

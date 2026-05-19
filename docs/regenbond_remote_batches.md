@@ -177,6 +177,13 @@ due. Excess recovered stable above scheduled service is candidate issuer
 operating and risk-capital headroom, not proven profit until explicit issuer
 costs are modeled.
 
+Current frontier defaults also enable producer debt contract cash service with
+`PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE=0.50`. Producer borrowing still
+enters lender pools as own-voucher-in/stable-out, but the borrower owes cash
+service of principal plus this margin. The margin is the current scenario
+assumption for bond-service sufficiency and issuer operating/risk headroom; it
+can be overridden for sensitivity runs.
+
 ## Calibration Bundle
 
 Public runs use privacy-safe aggregate calibration files in
@@ -189,6 +196,7 @@ The revised Monte Carlo also reads aggregate tables for:
 - productive-credit return timing and repayment lag;
 - stable-to-voucher debt-removal purchase motifs;
 - voucher-fee-to-stable conversion capacity;
+- fee-service reservation into the bond-service lockbox;
 - quarterly lender-pool clearing capacity;
 - route-substitution diagnostics.
 - unit normalization for KES/KSh vouchers against USD stable, including the
@@ -577,6 +585,13 @@ hidden 260-week repayment failures before spending time on `frontier-pilot`.
 ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
 ```
 
+Sensitivity run with an explicit producer debt contract service margin:
+
+```bash
+PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE=0.50 \
+  ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
+```
+
 Control run with the old next-payment reserve:
 
 ```bash
@@ -902,9 +917,10 @@ paper_integration_notes.md
 Revised validation and frontier CSVs also include columns for producer stable
 and voucher deposits, deposit-based credit capacity, productive-credit inflow,
 net circulating voucher obligation, producer-debt maturity/repaid/defaulted
-principal, producer debt closed by circulation, voucher-fee conversion,
-quarterly clearing, lender liquidity impact, fixed-target route success, and
-substituted route success.
+principal, contract cash-service due/paid, producer debt closed by circulation,
+voucher-fee conversion, fee-service lockbox reservation, quarterly clearing,
+lender liquidity impact, fixed-target route success, and substituted route
+success.
 
 `--no-png` skips PNG generation but still writes CSV, LaTeX, Markdown, partial
 CSV, and shard files.
