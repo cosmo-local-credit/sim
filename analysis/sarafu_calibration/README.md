@@ -32,6 +32,15 @@ conversion, quarterly clearing, and route substitution diagnostics. These are
 empirical settlement motifs and scenario anchors, not direct pool inventory
 snapshots or a failed-route denominator.
 
+The current productive-credit calibration is aggregate rather than
+tier-specific. It uses borrow-proxy events with later issuer returns as a
+bounded proxy for productive follow-through, then splits loan-enabled
+productive inflow into stable retained and voucher-deposit feedback. The
+current public calibration uses `0.615843` as the stable retained share,
+`0.384157` as the voucher-deposit share, and caps loan-induced voucher-deposit
+growth at `0.143206` per month. These values constrain the frontier mechanism;
+they do not prove that every real loan creates additional production.
+
 The bond-frontier safety tests use these files in three ways:
 
 - engine validation reports voucher-to-voucher motifs, strict 1 KSh stable-flow
@@ -42,6 +51,10 @@ The bond-frontier safety tests use these files in three ways:
 - frontier cells are rejected when stable/bond liquidity materially increases
   active-pool stable inventory dependency or reduces active-pool voucher
   inventory value share versus the matched no-bond baseline.
+- frontier diagnostics report baseline and incremental productive-credit
+  inflow, loan-induced voucher deposits, stable retained, and credit-cap
+  expansion so bond cells cannot hide activity changes behind the matched
+  no-bond baseline.
 
 Regenerate from the research workspace with:
 

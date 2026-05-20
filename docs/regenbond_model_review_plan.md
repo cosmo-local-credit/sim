@@ -8,14 +8,19 @@ latest validation and frontier artifacts.
 ## Current Status
 
 - The full no-bond Sarafu engine-validation gate has passed for the current
-  model revision.
+  model revision: 100 runs, 260 weekly ticks, 28 binding pass rows, zero review
+  rows, and zero failures.
 - The current bond-issuer frontier deploys 100% of gross bond principal as
   stable liquidity into eligible lender pools rather than withholding an
   initial reserve-waterfall split.
 - The current safety gate separates capped scheduled-payment coverage from
-  uncapped service-cash headroom. Smoke frontier outputs show scheduled
-  first-year service clearing with headroom; larger pilot/publication grids
-  remain the paper-facing frontier evidence.
+  gross and available service-cash headroom. Smoke frontier outputs are quick
+  structural checks; the larger pilot/publication grids remain the
+  paper-facing frontier evidence.
+- The latest revision adds bounded productive-capacity feedback: frontier
+  producer borrowing can create additional voucher deposits and voucher-source
+  activity, but only through aggregate calibration shares and growth caps, and
+  always against a matched no-bond baseline.
 - Earlier pilot results that rejected all cells under `p50_service_coverage`
   and reserve-constrained fee-service mechanics are superseded historical
   evidence for model debugging, not current frontier evidence.
@@ -29,6 +34,10 @@ Implemented changes:
 - Updated voucher ledger accounting so net circulating obligation is tracked separately from cumulative issued, returned, and redeemed totals.
 - Added producer deposits of stable and own vouchers, with producer credit capacity based on deposited value using the default `5x` multiple.
 - Added productive-credit stable inflow after producer borrowing, calibrated from aggregate borrow-return timing where available.
+- Added loan-induced voucher-deposit feedback from productive-credit inflow.
+  The current aggregate calibration retains `0.615843` as stable, allocates
+  `0.384157` to voucher deposits, and caps loan-induced voucher-deposit growth
+  at `0.143206` per month.
 - Added dated producer-debt obligations for frontier runs: producer voucher borrowing creates a maturity record and a contract cash-service obligation. Lender-held vouchers can close through normal circulation, but circulation alone only closes the pool-level voucher exposure; stable bond-service recovery requires borrower repayment, consumer or third-party stable purchase, or contract cash-service payment. Any remaining cash service at the 13-tick maturity is attempted from producer stable and then written off under the configured recovery/default rate.
 - Added a producer debt contract service margin for frontier runs. The current default is `50%` over borrowed principal, modeling required cash recovery for bond service plus issuer operating/risk headroom as a scenario assumption rather than as a claimed deployed interest rate.
 - Added routed conversion attempts for voucher-denominated fees. Successful stable conversion can reserve the configured fee-service share into the bond lockbox before excess fee cash enters the CLC waterfall; failures are retained as voucher fee inventory.
@@ -37,7 +46,7 @@ Implemented changes:
 - Added route-substitution diagnostics for ordinary purchase/exchange attempts while keeping borrowing, repayment, and fee conversion as fixed-target routes.
 - Changed the frontier route-success default to `diagnostic`; `absolute` mode keeps the old hard floor behavior, and `relative` mode compares against the matched no-bond baseline.
 
-Validation required before using revised frontier results:
+Validation and frontier checks required before using revised frontier results:
 
 ```bash
 ./scripts/run_regenbond_remote_batch.sh validation-1mo
@@ -46,11 +55,13 @@ Validation required before using revised frontier results:
 ./scripts/run_regenbond_remote_batch.sh validation-full
 ./scripts/run_regenbond_remote_batch.sh frontier-smoke
 ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
+./scripts/run_regenbond_remote_batch.sh frontier-feedback-probe
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 ```
 
-Run `frontier-pilot` only after `frontier-maturity-smoke` passes, and run
-`frontier-publication` only after the revised pilot is reviewed.
+Run `frontier-pilot` only after `frontier-maturity-smoke` and
+`frontier-feedback-probe` pass basic repayment and interpretability checks, and
+run `frontier-publication` only after the revised pilot is reviewed.
 
 ## Empirical Grounding Discipline
 
@@ -80,6 +91,9 @@ Mechanism grounding:
   deposits, backing inflows, and deposit-to-limit ratios.
 - Productive-credit inflow is a calibrated proxy from borrow-proxy events with
   later issuer returns; it is not causal proof of business growth.
+- Loan-induced voucher deposits are a bounded productive-capacity proxy. They
+  must be reported separately from empirical baseline deposits and must not be
+  double counted as both revenue and collateral without the explicit split.
 - Stable-to-voucher debt removal is calibrated from stable/cash-in and
   voucher-out motifs with later return support.
 - Voucher-fee conversion is calibrated from observed voucher-to-stable

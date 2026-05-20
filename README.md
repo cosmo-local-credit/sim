@@ -61,8 +61,9 @@ The paper-facing Monte Carlo workflow has two layers:
 - `bond_issuer_frontier` is the current bond-issuer model. Bondholders fund
   stable principal to an issuer; the issuer deploys gross principal into
   eligible lender pools; producer own-voucher borrowing draws stable from those
-  pools; recovered lender stable and the configured service share of eligible
-  fee cash are reserved first for scheduled bond service.
+  pools; bounded productive-credit feedback can create additional producer
+  voucher deposits; recovered lender stable and the configured service share
+  of eligible fee cash are reserved first for scheduled bond service.
 
 Older `regenbond_lp_injection` and `--scenario all` runs remain useful for
 mechanics inspection, but they are legacy evidence for the paper-facing bond
@@ -95,6 +96,7 @@ For SSH/server batch verification, use:
 ./scripts/start_regenbond_batch_tmux.sh validation-full
 tail -f analysis/monte_carlo/validation-full.log
 ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
+./scripts/run_regenbond_remote_batch.sh frontier-feedback-probe
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 ```
 
@@ -108,11 +110,22 @@ diagnostics every `N` ticks while still simulating every tick.
 Current bond-frontier outputs distinguish capped scheduled-payment coverage
 from uncapped cash headroom. `scheduled_payment_coverage` asks whether the
 bondholder received scheduled principal plus coupon due. `service_cash_headroom`
-asks whether eligible service cash comfortably exceeded scheduled due. That
-service cash includes recovered lender stable plus fee cash reserved into the
-bond-service lockbox. Any service cash above scheduled service is candidate
-issuer operating and risk headroom, not proven net profit until explicit issuer
-costs and first-loss capital are modeled.
+is gross historical recovery relative to scheduled due.
+`available_service_cash_headroom` is the spendable proxy: paid scheduled
+service plus lockbox balance plus sweepable pending recovered stable, divided
+by scheduled due. These service-cash metrics include recovered lender stable
+plus fee cash reserved into the bond-service lockbox. Any available headroom
+above scheduled service is candidate issuer operating and risk headroom, not
+proven net profit until explicit issuer costs and first-loss capital are
+modeled.
+
+The current paper-facing no-bond validation gate is
+`sarafu_engine_validation` with 100 runs over 260 weekly ticks. In the latest
+validated bundle it passes all 28 binding checks: aggregate swap activity is
+105,593.2 versus a 105,499.8 empirical target, and report exposure is
+56,229.7 versus a 56,180.0 empirical target. Settlement-composition metrics
+are reported as diagnostics because one-time historical stable backing is not
+comparable to a 260-week inventory or full-horizon flow share.
 
 Frontier runs also enable a producer debt contract cash-service layer. Producer
 borrowing still starts as own-voucher-in/stable-out through an eligible lender
@@ -127,6 +140,14 @@ a subprocess and displays the exact CLI-equivalent command. For identical
 results between terminal and UI, keep the scenario, runs, ticks, seed, coupon
 targets, terms, output directory, analysis stride, and optional performance caps
 identical.
+
+Frontier capacity-feedback behavior is controlled by calibration-backed config
+knobs. The current aggregate productive-credit calibration splits loan-enabled
+productive inflow into a stable retained share of `0.615843` and a voucher
+deposit share of `0.384157`, capped at `0.143206` voucher-deposit growth per
+month. This mechanism is enabled for frontier runs and is evaluated against the
+matched no-bond baseline; it is disabled for the no-bond validation gate except
+as reported calibration diagnostics.
 
 ## Sarafu-calibrated paper workflow
 
@@ -183,9 +204,11 @@ terminal and Streamlit outputs match when the displayed command is identical.
 - **Goal**: sell their voucher / accept stable inflows, repay debt.
 - **Listings (wants)**: stable + own voucher + random wanted assets (Poisson mean `add_pool_want_assets_mean`).
 - **Inventory (offers)**: own voucher seed + offered assets seed.
-- **Restrictions**: cannot swap out stable (`producer_no_stable_outflow`).
+- **Restrictions**: producers avoid ordinary stable-sourced swaps while debt is
+  outstanding; stable can still be used for repayment and maturity settlement.
 - **Redemption**: auto‑redeem any **foreign** voucher received (keeps only own voucher + stable).
-- **Stable usage**: can use stable in swaps **after debt is cleared**.
+- **Stable usage**: ordinary stable-source selection is governed by the
+  configured producer stable bias and stable-reserve protection.
 - **Starts with**:
   - Stable seed: `0`
   - Own voucher seed: `exp(mean=10000)`
@@ -207,7 +230,9 @@ terminal and Streamlit outputs match when the displayed command is identical.
 - **Goal**: spend stable to acquire vouchers and redeem.
 - **Listings (wants)**: stable + own voucher + random wanted assets.
 - **Inventory (offers)**: stable + own voucher + offered assets seed.
-- **Restrictions**: cannot swap out stable (`consumer_no_stable_outflow`).
+- **Restrictions**: ordinary stable spending is governed by source-selection
+  bias and stable-reserve protection; consumers are no longer hard-forced to
+  spend stable whenever they hold it.
 - **Redemption**: auto‑redeem any **foreign** voucher received (keeps only own voucher + stable).
 - **Starts with** (current implementation constants in `sim/engine.py`):
   - Stable seed: `exp(mean=initial_stable_per_pool_mean * 0.25)`
@@ -238,7 +263,12 @@ terminal and Streamlit outputs match when the displayed command is identical.
 - **Stable reserve guardrail**: swaps that take stable below `min_stable_reserve` are blocked.
 - **Role constraints**:
   - Lenders allow stable in/out and voucher↔voucher swaps.
-  - Producers/Consumers cannot swap out stable.
+  - Producers with outstanding debt avoid ordinary stable-sourced swaps so
+    stable remains available for repayment; repayment routes can still spend
+    producer stable.
+  - Consumers can spend stable under the configured source-selection bias. In
+    validation/frontier-style runs this is value-weighted with stable bias and
+    reserve protection rather than a hard "always spend stable" rule.
   - CLC pool requires a stable/sCLC leg, and stable outflow requires **sCLC** in.
 
 ### Redemption
@@ -261,7 +291,10 @@ terminal and Streamlit outputs match when the displayed command is identical.
   (capped by `utilization_boost_max`).
 - Producers also attempt **loan repayments** and **new loan issuance** according to `loan_activity_period_ticks`.
 - Target assets are chosen by `swap_target_selection_mode` and retried up to `swap_target_retry_count` times.
-- Producers avoid spending stable until debt is cleared; consumers prefer stable as input.
+- Producers avoid ordinary stable spending until debt is cleared; consumers use
+  the configured stable-source bias. Frontier runs can preserve each
+  producer/consumer pool's stable reserve plus a voucher-value buffer before
+  ordinary stable-sourced swaps.
 - If a route fails at the chosen amount, the engine retries once with a smaller **fallback amount** before giving up.
 
 ### Loan mechanics (producer ↔ lender)
