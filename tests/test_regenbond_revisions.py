@@ -1,7 +1,12 @@
 import argparse
 import unittest
 
-from scripts.run_regenbond_monte_carlo import bond_metrics, scenario_config, summarize_frontier_cell
+from scripts.run_regenbond_monte_carlo import (
+    bond_metrics,
+    frontier_baseline_metrics,
+    scenario_config,
+    summarize_frontier_cell,
+)
 from sim.config import ScenarioConfig
 from sim.core import Event, IssuerLedger
 from sim.engine import SimulationEngine
@@ -234,6 +239,8 @@ class RegenBondRevisionTests(unittest.TestCase):
             _frontier_producer_voucher_deposit_rate_per_month=0.0,
             _frontier_productive_credit_return_rate=0.0,
             _frontier_productive_credit_lag_ticks=2,
+            _frontier_productive_credit_voucher_deposit_share=0.384157,
+            _frontier_productive_credit_voucher_deposit_cap_rate_per_month=0.143206,
             _frontier_producer_debt_maturity_recovery_rate=0.0,
             _frontier_quarterly_clearing_surplus_share=1.0,
             _frontier_route_requests_per_tick=1,
@@ -257,6 +264,12 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertTrue(cfg.producer_debt_contract_repayment_enabled)
         self.assertAlmostEqual(cfg.producer_debt_contract_service_margin_rate, 0.50)
         self.assertAlmostEqual(cfg.producer_debt_contract_revenue_rate, 1.50)
+        self.assertTrue(cfg.productive_credit_voucher_feedback_enabled)
+        self.assertAlmostEqual(cfg.productive_credit_voucher_deposit_share, 0.384157)
+        self.assertAlmostEqual(cfg.productive_credit_voucher_deposit_cap_rate_per_month, 0.143206)
+        self.assertTrue(cfg.productive_credit_voucher_activity_boost_enabled)
+        self.assertAlmostEqual(cfg.productive_credit_voucher_source_weight_boost, 0.50)
+        self.assertAlmostEqual(cfg.productive_credit_voucher_source_size_multiplier, 1.25)
         self.assertTrue(cfg.ordinary_stable_spend_protection_enabled)
         self.assertAlmostEqual(cfg.ordinary_stable_spend_buffer_voucher_share, 0.05)
         self.assertTrue(cfg.producer_loan_failure_backfill_enabled)
@@ -339,6 +352,101 @@ class RegenBondRevisionTests(unittest.TestCase):
 
         self.assertAlmostEqual(producer_pool.vault.get(engine.cfg.stable_symbol) - before, 270.0)
         self.assertAlmostEqual(engine._productive_credit_inflow_usd_tick, 270.0)
+
+    def test_productive_credit_voucher_feedback_splits_inflow_without_double_counting(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_deposits_enabled=True,
+                productive_credit_enabled=True,
+                productive_credit_return_rate=1.0,
+                productive_credit_lag_ticks=1,
+                productive_credit_voucher_feedback_enabled=True,
+                productive_credit_voucher_deposit_share=0.40,
+                productive_credit_voucher_deposit_cap_rate_per_month=0.0,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        voucher_id = producer.voucher_spec.voucher_id
+        value = engine._asset_value(producer_pool, voucher_id)
+        before_stable = producer_pool.vault.get(engine.cfg.stable_symbol)
+        before_voucher = producer_pool.vault.get(voucher_id)
+        before_capacity = engine._producer_deposit_credit_capacity_usd()
+
+        engine.tick = 1
+        engine._schedule_productive_credit_inflow(producer.pool_id, 100.0, voucher_id)
+        engine.tick = 2
+        engine._apply_productive_credit_inflows()
+
+        self.assertAlmostEqual(engine._productive_credit_inflow_usd_tick, 100.0)
+        self.assertAlmostEqual(engine._productive_credit_stable_retained_usd_tick, 60.0)
+        self.assertAlmostEqual(engine._productive_credit_voucher_deposit_usd_tick, 40.0)
+        self.assertAlmostEqual(producer_pool.vault.get(engine.cfg.stable_symbol) - before_stable, 60.0)
+        self.assertAlmostEqual(producer_pool.vault.get(voucher_id) - before_voucher, 40.0 / value)
+        self.assertAlmostEqual(
+            engine._producer_deposit_credit_capacity_usd() - before_capacity,
+            100.0 * engine.cfg.lender_voucher_cap_deposit_multiple,
+        )
+
+    def test_productive_credit_voucher_feedback_cap_bounds_issued_vouchers(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_deposits_enabled=True,
+                productive_credit_enabled=True,
+                productive_credit_return_rate=1.0,
+                productive_credit_lag_ticks=1,
+                productive_credit_voucher_feedback_enabled=True,
+                productive_credit_voucher_deposit_share=1.0,
+                productive_credit_voucher_deposit_cap_rate_per_month=0.20,
+                random_request_amount_mean=100.0,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        current_stable = producer_pool.vault.get(engine.cfg.stable_symbol)
+        if current_stable > 0.0:
+            engine._vault_sub(producer_pool, engine.cfg.stable_symbol, current_stable, "test_clear", "test")
+        current_voucher = producer_pool.vault.get(producer.voucher_spec.voucher_id)
+        if current_voucher > 0.0:
+            engine._vault_sub(producer_pool, producer.voucher_spec.voucher_id, current_voucher, "test_clear", "test")
+
+        engine.tick = 1
+        engine._schedule_productive_credit_inflow(producer.pool_id, 100.0, producer.voucher_spec.voucher_id)
+        engine.tick = 2
+        engine._apply_productive_credit_inflows()
+
+        self.assertAlmostEqual(engine._productive_credit_voucher_deposit_usd_tick, 5.0)
+        self.assertAlmostEqual(engine._productive_credit_stable_retained_usd_tick, 95.0)
+        self.assertAlmostEqual(engine._productive_credit_voucher_deposit_cap_clipped_usd_tick, 95.0)
+
+    def test_productive_credit_voucher_activity_boosts_own_voucher_source_weight(self):
+        engine = SimulationEngine(
+            small_config(
+                productive_credit_voucher_activity_boost_enabled=True,
+                productive_credit_voucher_activity_boost_window_ticks=4,
+                productive_credit_voucher_source_weight_boost=1.0,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        voucher_id = producer.voucher_spec.voucher_id
+        stable_id = engine.cfg.stable_symbol
+        current_stable = producer_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(producer_pool, stable_id, current_stable, "test_clear", "test")
+        current_voucher = producer_pool.vault.get(voucher_id)
+        if current_voucher > 0.0:
+            engine._vault_sub(producer_pool, voucher_id, current_voucher, "test_clear", "test")
+        engine._vault_add(producer_pool, stable_id, 100.0, "test_seed", "test")
+        engine._vault_add(producer_pool, voucher_id, 100.0, "test_seed", "test")
+        engine.tick = 10
+        before = engine._source_asset_selection_weights(producer_pool, [stable_id, voucher_id])
+
+        engine._mark_productive_credit_voucher_activity(producer_pool.pool_id, voucher_id)
+        after = engine._source_asset_selection_weights(producer_pool, [stable_id, voucher_id])
+
+        self.assertAlmostEqual(after[0], before[0])
+        self.assertAlmostEqual(after[1], before[1] * 2.0)
 
     def test_historical_voucher_backing_is_recorded_as_producer_deposit(self):
         engine = SimulationEngine(
@@ -875,6 +983,54 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(summary["material_decline_swap_volume_decline"], 1)
         self.assertIn("swap_volume_decline", summary["material_decline_reasons"])
         self.assertIn("swap_volume_decline_vs_no_bond", summary["binding_constraint"])
+
+    def test_frontier_safety_reports_baseline_productive_credit_feedback(self):
+        baseline_row = {
+            "route_success_rate_cumulative": 1.0,
+            "swap_volume_usd_total": 100.0,
+            "transactions_total": 100.0,
+            "swap_count_vchr_to_vchr_total": 80.0,
+            "stable_value_share_in_active_pools": 0.10,
+            "voucher_value_share_in_active_pools": 0.90,
+            "household_cash_stress_ratio": 0.0,
+            "consumer_stable_reserve_stress_ratio": 0.0,
+            "community_stable_reserve_stress_ratio": 0.0,
+            "stable_liquidity_leakage_ratio_cumulative": 0.0,
+            "producer_deposit_credit_capacity_usd": 500.0,
+            "productive_credit_inflow_usd_total": 100.0,
+            "productive_credit_stable_retained_usd_total": 60.0,
+            "productive_credit_voucher_deposit_usd_total": 40.0,
+        }
+        row = {
+            **baseline_row,
+            "bond_principal_usd": 1000.0,
+            "principal_ratio": 0.05,
+            "network_scale": "current",
+            "coupon_target_annual": 0.0,
+            "bond_fee_service_share": 0.5,
+            "issuer_service_coverage_ratio": 1.0,
+            "issuer_paid_coverage_ratio": 1.0,
+            "issuer_service_cash_headroom_ratio": 2.0,
+            "issuer_available_service_cash_headroom_ratio": 2.0,
+            "issuer_scheduled_debt_service_due_usd": 100.0,
+            "issuer_actual_bondholder_payment_usd": 100.0,
+            "issuer_unpaid_scheduled_claim_usd": 0.0,
+            "realized_edge_top_share": 0.0,
+            "producer_deposit_credit_capacity_usd": 750.0,
+            "productive_credit_inflow_usd_total": 150.0,
+            "productive_credit_stable_retained_usd_total": 90.0,
+            "productive_credit_voucher_deposit_usd_total": 60.0,
+        }
+
+        baseline = frontier_baseline_metrics([baseline_row] * 5)
+        summary = summarize_frontier_cell([row] * 5, baseline, 0.85, "diagnostic")
+
+        self.assertAlmostEqual(summary["baseline_productive_credit_inflow_usd_total_p50"], 100.0)
+        self.assertAlmostEqual(summary["baseline_productive_credit_voucher_deposit_usd_total_p50"], 40.0)
+        self.assertAlmostEqual(summary["incremental_productive_credit_inflow_usd_total_p50"], 50.0)
+        self.assertAlmostEqual(summary["incremental_productive_credit_voucher_deposit_usd_total_p50"], 20.0)
+        self.assertAlmostEqual(summary["productive_credit_voucher_deposit_ratio_vs_baseline"], 1.5)
+        self.assertAlmostEqual(summary["producer_deposit_credit_capacity_ratio_vs_baseline"], 1.5)
 
     def test_producer_debt_maturity_repayment_recovers_lender_stable(self):
         engine = SimulationEngine(

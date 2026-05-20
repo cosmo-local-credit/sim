@@ -267,6 +267,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--productive-credit-voucher-deposit-share",
+        type=float,
+        default=None,
+        help=(
+            "Optional override for the frontier share of productive-credit inflow "
+            "issued as new producer voucher deposits. Defaults to calibration."
+        ),
+    )
+    parser.add_argument(
+        "--productive-credit-voucher-deposit-cap-rate-per-month",
+        type=float,
+        default=None,
+        help=(
+            "Optional override for the monthly cap on loan-induced voucher deposits. "
+            "Defaults to calibration."
+        ),
+    )
+    parser.add_argument(
         "--frontier-mode",
         default="adaptive",
         choices=("adaptive", "grid"),
@@ -482,6 +500,8 @@ SHARD_CONFIG_KEYS = (
     "bond_service_lockbox_mode",
     "bond_service_lockbox_coverage_ratio",
     "producer_debt_contract_service_margin_rate",
+    "productive_credit_voucher_deposit_share",
+    "productive_credit_voucher_deposit_cap_rate_per_month",
     "frontier_mode",
     "frontier_refinement_rounds",
     "route_success_floor",
@@ -864,15 +884,22 @@ def load_calibration(calibration_dir: Path) -> Calibration:
             tier = str(row.get("tier", "")).strip().lower()
             if tier:
                 productive_credit_by_tier[tier] = {key: safe_float(value) for key, value in row.items() if key != "tier"}
-    for tier, rate in borrow_return_by_tier.items():
-        productive_credit_by_tier.setdefault(
-            tier,
-            {
-                "productive_credit_return_rate": rate,
-                "productive_credit_lag_ticks_p50": 2.0,
-                "productive_credit_lag_ticks_p90": 12.0,
-            },
-        )
+    aggregate_productive_credit = productive_credit_by_tier.get("all", {})
+    for tier in TIER_ORDER:
+        if tier in productive_credit_by_tier:
+            continue
+        if aggregate_productive_credit:
+            row = dict(aggregate_productive_credit)
+            row["aggregate_fallback"] = 1.0
+            productive_credit_by_tier[tier] = row
+            continue
+        rate = borrow_return_by_tier.get(tier, 0.0)
+        productive_credit_by_tier[tier] = {
+            "productive_credit_return_rate": rate,
+            "productive_credit_lag_ticks_p50": 2.0,
+            "productive_credit_lag_ticks_p90": 12.0,
+            "aggregate_fallback": 0.0,
+        }
 
     def load_metric_table(name: str) -> dict[str, float]:
         path = calibration_dir / name
@@ -1078,6 +1105,8 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
     voucher_deposit_rate = 0.0
     productive_return_rate = 0.0
     productive_lag_ticks = 0.0
+    productive_voucher_deposit_share = 0.0
+    productive_voucher_deposit_cap_rate = 0.0
     weight_total = 0.0
     for tier in TIER_ORDER:
         weight = calibration.tier_probs.get(tier, 0.0)
@@ -1091,15 +1120,33 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
             prod.get("productive_credit_return_rate", calibration.borrow_return_by_tier.get(tier, 0.0))
         )
         productive_lag_ticks += weight * safe_float(prod.get("productive_credit_lag_ticks_p50", 2.0))
+        productive_voucher_deposit_share += weight * safe_float(
+            prod.get("loan_induced_voucher_deposit_share_default", 0.0)
+        )
+        productive_voucher_deposit_cap_rate += weight * safe_float(
+            prod.get("loan_induced_voucher_deposit_cap_rate_per_month", dep.get("voucher_deposit_rate_per_month", 0.0))
+        )
         weight_total += weight
     if weight_total > 1e-9:
         productive_lag_ticks = productive_lag_ticks / weight_total
+        productive_voucher_deposit_share = productive_voucher_deposit_share / weight_total
+        productive_voucher_deposit_cap_rate = productive_voucher_deposit_cap_rate / weight_total
     else:
         productive_lag_ticks = 2.0
     setattr(args, f"_{prefix}_producer_stable_deposit_rate_per_month", stable_deposit_rate)
     setattr(args, f"_{prefix}_producer_voucher_deposit_rate_per_month", voucher_deposit_rate)
     setattr(args, f"_{prefix}_productive_credit_return_rate", productive_return_rate)
     setattr(args, f"_{prefix}_productive_credit_lag_ticks", max(1, int(round(productive_lag_ticks))))
+    setattr(
+        args,
+        f"_{prefix}_productive_credit_voucher_deposit_share",
+        max(0.0, min(1.0, productive_voucher_deposit_share)),
+    )
+    setattr(
+        args,
+        f"_{prefix}_productive_credit_voucher_deposit_cap_rate_per_month",
+        max(0.0, productive_voucher_deposit_cap_rate),
+    )
     debt_maturity_recovery_rate = safe_float(
         calibration.settlement_reliability_anchors.get("mature_borrow_proxy_value_support_rate")
     )
@@ -1315,6 +1362,32 @@ def scenario_config(
         cfg.productive_credit_lag_ticks = max(
             1, int(getattr(args, "_frontier_productive_credit_lag_ticks", 2))
         )
+        cfg.productive_credit_voucher_feedback_enabled = True
+        cfg.productive_credit_voucher_deposit_share = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(args, "productive_credit_voucher_deposit_share", None)
+                    if getattr(args, "productive_credit_voucher_deposit_share", None) is not None
+                    else getattr(args, "_frontier_productive_credit_voucher_deposit_share", 0.0)
+                ),
+            ),
+        )
+        cfg.productive_credit_voucher_deposit_cap_rate_per_month = max(
+            0.0,
+            float(
+                getattr(args, "productive_credit_voucher_deposit_cap_rate_per_month", None)
+                if getattr(args, "productive_credit_voucher_deposit_cap_rate_per_month", None) is not None
+                else getattr(args, "_frontier_productive_credit_voucher_deposit_cap_rate_per_month", 0.0)
+            ),
+        )
+        cfg.productive_credit_voucher_activity_boost_enabled = True
+        cfg.productive_credit_voucher_activity_boost_window_ticks = max(
+            1, int(getattr(args, "issuer_payment_stride", 13))
+        )
+        cfg.productive_credit_voucher_source_weight_boost = 0.50
+        cfg.productive_credit_voucher_source_size_multiplier = 1.25
         cfg.producer_debt_maturity_enabled = True
         cfg.producer_debt_maturity_ticks = max(1, int(getattr(args, "issuer_payment_stride", 13)))
         cfg.producer_debt_maturity_recovery_rate = 1.0
@@ -1997,6 +2070,9 @@ def run_one(
             "producer_deposit_stable_usd_tick",
             "producer_deposit_voucher_usd_tick",
             "productive_credit_inflow_usd_tick",
+            "productive_credit_stable_retained_usd_tick",
+            "productive_credit_voucher_deposit_usd_tick",
+            "productive_credit_voucher_deposit_cap_clipped_usd_tick",
             "producer_debt_cash_service_due_usd_tick",
             "producer_debt_cash_service_paid_usd_tick",
             "producer_debt_matured_usd_tick",
@@ -2402,6 +2478,28 @@ def run_one(
             "producer_deposit_credit_capacity_usd": latest.get("producer_deposit_credit_capacity_usd", 0.0),
             "productive_credit_inflow_usd": latest.get("productive_credit_inflow_usd_tick", 0.0),
             "productive_credit_inflow_usd_total": cumulative_float["productive_credit_inflow_usd_tick"],
+            "productive_credit_stable_retained_usd": latest.get(
+                "productive_credit_stable_retained_usd_tick", 0.0
+            ),
+            "productive_credit_stable_retained_usd_total": cumulative_float[
+                "productive_credit_stable_retained_usd_tick"
+            ],
+            "productive_credit_voucher_deposit_usd": latest.get(
+                "productive_credit_voucher_deposit_usd_tick", 0.0
+            ),
+            "productive_credit_voucher_deposit_usd_total": cumulative_float[
+                "productive_credit_voucher_deposit_usd_tick"
+            ],
+            "productive_credit_voucher_deposit_cap_clipped_usd": latest.get(
+                "productive_credit_voucher_deposit_cap_clipped_usd_tick", 0.0
+            ),
+            "productive_credit_voucher_deposit_cap_clipped_usd_total": cumulative_float[
+                "productive_credit_voucher_deposit_cap_clipped_usd_tick"
+            ],
+            "productive_credit_voucher_deposit_share": (
+                cumulative_float["productive_credit_voucher_deposit_usd_tick"]
+                / max(1e-9, cumulative_float["productive_credit_inflow_usd_tick"])
+            ),
             "producer_debt_active_obligations": latest.get("producer_debt_active_obligations", 0),
             "producer_debt_active_usd": latest.get("producer_debt_active_usd", 0.0),
             "producer_debt_cash_service_due_usd": latest.get(
@@ -2663,6 +2761,27 @@ def run_one(
         safe_float(final.get("repayment_volume_usd_total"))
         / max(1e-9, safe_float(final.get("loan_issuance_volume_usd_total")))
     )
+    for tier in TIER_ORDER:
+        pool_ids = [pid for pid, pool_tier in pool_tiers.items() if pool_tier == tier]
+        inflow = sum(engine._productive_credit_inflow_usd_by_pool.get(pid, 0.0) for pid in pool_ids)
+        stable_retained = sum(
+            engine._productive_credit_stable_retained_usd_by_pool.get(pid, 0.0)
+            for pid in pool_ids
+        )
+        voucher_deposit = sum(
+            engine._productive_credit_voucher_deposit_usd_by_pool.get(pid, 0.0)
+            for pid in pool_ids
+        )
+        tier_summary_fields.update(
+            {
+                f"engine_productive_credit_inflow_usd_{tier}": inflow,
+                f"engine_productive_credit_stable_retained_usd_{tier}": stable_retained,
+                f"engine_productive_credit_voucher_deposit_usd_{tier}": voucher_deposit,
+                f"engine_productive_credit_voucher_deposit_share_{tier}": (
+                    voucher_deposit / max(1e-9, inflow)
+                ),
+            }
+        )
     failure = {
         "scenario": scenario,
         "run": run_index,
@@ -3512,6 +3631,24 @@ def engine_validation_moments(
         safe_float(current_circulation.get("voucher_to_stable_share"))
         + safe_float(current_circulation.get("stable_to_voucher_share"))
     )
+    productive_credit_all = calibration.productive_credit_by_tier.get("all", {})
+    empirical_productive_voucher_share = safe_float(
+        productive_credit_all.get("loan_induced_voucher_deposit_share_default")
+    )
+    empirical_producer_cash_deposit = sum(
+        safe_float(row.get("cash_deposit_value"))
+        for row in calibration.producer_deposit_by_tier.values()
+    )
+    empirical_producer_voucher_deposit = sum(
+        safe_float(row.get("voucher_deposit_value"))
+        for row in calibration.producer_deposit_by_tier.values()
+    )
+    empirical_producer_deposit_total = (
+        empirical_producer_cash_deposit + empirical_producer_voucher_deposit
+    )
+    empirical_producer_voucher_deposit_share = (
+        empirical_producer_voucher_deposit / max(1e-9, empirical_producer_deposit_total)
+    )
     aggregate_specs = [
         (
             "all",
@@ -3682,6 +3819,36 @@ def engine_validation_moments(
             "repayment",
             "",
             [safe_float(row.get("raw_engine_repayment_loan_flow_ratio")) for row in summaries],
+            None,
+            False,
+        ),
+        (
+            "all",
+            "productive_credit_voucher_deposit_share",
+            "productive_capacity",
+            empirical_productive_voucher_share,
+            [
+                safe_float(row.get("productive_credit_voucher_deposit_usd_total"))
+                / max(1e-9, safe_float(row.get("productive_credit_inflow_usd_total")))
+                for row in summaries
+            ],
+            None,
+            False,
+        ),
+        (
+            "all",
+            "producer_voucher_deposit_share",
+            "liquidity",
+            empirical_producer_voucher_deposit_share,
+            [
+                safe_float(row.get("producer_deposit_voucher_usd_total"))
+                / max(
+                    1e-9,
+                    safe_float(row.get("producer_deposit_stable_usd_total"))
+                    + safe_float(row.get("producer_deposit_voucher_usd_total")),
+                )
+                for row in summaries
+            ],
             None,
             False,
         ),
@@ -4321,6 +4488,25 @@ def summarize_frontier_cell(
     producer_credit_capacity_values = [
         safe_float(row.get("producer_deposit_credit_capacity_usd")) for row in rows
     ]
+    productive_credit_inflow_values = [
+        safe_float(row.get("productive_credit_inflow_usd_total")) for row in rows
+    ]
+    productive_credit_stable_retained_values = [
+        safe_float(row.get("productive_credit_stable_retained_usd_total")) for row in rows
+    ]
+    productive_credit_voucher_deposit_values = [
+        safe_float(row.get("productive_credit_voucher_deposit_usd_total")) for row in rows
+    ]
+    productive_credit_voucher_deposit_cap_clipped_values = [
+        safe_float(row.get("productive_credit_voucher_deposit_cap_clipped_usd_total")) for row in rows
+    ]
+    productive_credit_voucher_deposit_share_values = [
+        voucher / max(1e-9, inflow)
+        for voucher, inflow in zip(
+            productive_credit_voucher_deposit_values,
+            productive_credit_inflow_values,
+        )
+    ]
     loan_issuance_volume_values = [
         safe_float(row.get("loan_issuance_volume_usd_total")) for row in rows
     ]
@@ -4431,6 +4617,13 @@ def summarize_frontier_cell(
     community_stress_p95 = percentile(community_stress_values, 0.95)
     leakage_p50 = percentile(leakage_values, 0.50)
     leakage_p95 = percentile(leakage_values, 0.95)
+    producer_credit_capacity_p50 = percentile(producer_credit_capacity_values, 0.50)
+    productive_credit_inflow_p50 = percentile(productive_credit_inflow_values, 0.50)
+    productive_credit_stable_retained_p50 = percentile(productive_credit_stable_retained_values, 0.50)
+    productive_credit_voucher_deposit_p50 = percentile(productive_credit_voucher_deposit_values, 0.50)
+    productive_credit_voucher_deposit_share_p50 = percentile(
+        productive_credit_voucher_deposit_share_values, 0.50
+    )
     baseline_stress_p50 = baseline.get("household_cash_stress_p50", 0.0)
     baseline_stress_p95 = baseline.get("household_cash_stress_p95", baseline_stress_p50)
     baseline_consumer_stress_p50 = baseline.get("consumer_cash_stress_p50", baseline_stress_p50)
@@ -4448,6 +4641,17 @@ def summarize_frontier_cell(
     baseline_stable_share_p50 = baseline.get("stable_value_share_p50", 0.0)
     baseline_stable_share_p95 = baseline.get("stable_value_share_p95", baseline_stable_share_p50)
     baseline_voucher_share_p50 = baseline.get("voucher_value_share_p50", 0.0)
+    baseline_producer_credit_capacity_p50 = baseline.get("producer_deposit_credit_capacity_usd_p50", 0.0)
+    baseline_productive_credit_inflow_p50 = baseline.get("productive_credit_inflow_usd_total_p50", 0.0)
+    baseline_productive_credit_stable_retained_p50 = baseline.get(
+        "productive_credit_stable_retained_usd_total_p50", 0.0
+    )
+    baseline_productive_credit_voucher_deposit_p50 = baseline.get(
+        "productive_credit_voucher_deposit_usd_total_p50", 0.0
+    )
+    baseline_productive_credit_voucher_deposit_share_p50 = baseline.get(
+        "productive_credit_voucher_deposit_share_p50", 0.0
+    )
     stress_delta_p95 = max(0.0, stress_p95 - baseline_stress_p95)
     consumer_stress_delta_p95 = max(0.0, consumer_stress_p95 - baseline_consumer_stress_p95)
     consumer_stress_delta_p50 = max(0.0, consumer_stress_p50 - baseline_consumer_stress_p50)
@@ -4626,7 +4830,33 @@ def summarize_frontier_cell(
         "producer_debt_closed_not_held_at_maturity_usd_total_p50": percentile(
             producer_debt_closed_not_held_at_maturity_values, 0.50
         ),
-        "producer_deposit_credit_capacity_usd_p50": percentile(producer_credit_capacity_values, 0.50),
+        "producer_deposit_credit_capacity_usd_p50": producer_credit_capacity_p50,
+        "productive_credit_inflow_usd_total_p50": productive_credit_inflow_p50,
+        "productive_credit_stable_retained_usd_total_p50": productive_credit_stable_retained_p50,
+        "productive_credit_voucher_deposit_usd_total_p50": productive_credit_voucher_deposit_p50,
+        "productive_credit_voucher_deposit_cap_clipped_usd_total_p50": percentile(
+            productive_credit_voucher_deposit_cap_clipped_values, 0.50
+        ),
+        "productive_credit_voucher_deposit_share_p50": productive_credit_voucher_deposit_share_p50,
+        "producer_deposit_credit_capacity_ratio_vs_baseline": (
+            producer_credit_capacity_p50 / max(1e-9, baseline_producer_credit_capacity_p50)
+        ),
+        "incremental_productive_credit_inflow_usd_total_p50": (
+            productive_credit_inflow_p50 - baseline_productive_credit_inflow_p50
+        ),
+        "incremental_productive_credit_stable_retained_usd_total_p50": (
+            productive_credit_stable_retained_p50 - baseline_productive_credit_stable_retained_p50
+        ),
+        "incremental_productive_credit_voucher_deposit_usd_total_p50": (
+            productive_credit_voucher_deposit_p50 - baseline_productive_credit_voucher_deposit_p50
+        ),
+        "productive_credit_inflow_ratio_vs_baseline": (
+            productive_credit_inflow_p50 / max(1e-9, baseline_productive_credit_inflow_p50)
+        ),
+        "productive_credit_voucher_deposit_ratio_vs_baseline": (
+            productive_credit_voucher_deposit_p50
+            / max(1e-9, baseline_productive_credit_voucher_deposit_p50)
+        ),
         "loan_issuance_volume_usd_total_p50": percentile(loan_issuance_volume_values, 0.50),
         "producer_debt_originated_usd_total_p50": percentile(producer_debt_originated_values, 0.50),
         "loan_issuance_to_credit_capacity_p50": percentile(loan_issuance_to_capacity_values, 0.50),
@@ -4708,6 +4938,17 @@ def summarize_frontier_cell(
         "baseline_community_cash_stress_p95": baseline_community_stress_p95,
         "baseline_liquidity_leakage_p50": baseline_leakage_p50,
         "baseline_liquidity_leakage_p95": baseline_leakage_p95,
+        "baseline_producer_deposit_credit_capacity_usd_p50": baseline_producer_credit_capacity_p50,
+        "baseline_productive_credit_inflow_usd_total_p50": baseline_productive_credit_inflow_p50,
+        "baseline_productive_credit_stable_retained_usd_total_p50": (
+            baseline_productive_credit_stable_retained_p50
+        ),
+        "baseline_productive_credit_voucher_deposit_usd_total_p50": (
+            baseline_productive_credit_voucher_deposit_p50
+        ),
+        "baseline_productive_credit_voucher_deposit_share_p50": (
+            baseline_productive_credit_voucher_deposit_share_p50
+        ),
         "stable_dependency_delta_p95": stable_dependency_delta_p95,
         "material_decline_route_success_decline": int(route_decline),
         "material_decline_swap_volume_decline": int(swap_volume_decline),
@@ -5100,6 +5341,22 @@ def frontier_job_id(phase: str, scale: str, ratio: float, coupon: float, share: 
 
 
 def frontier_baseline_metrics(baseline_rows: list[dict[str, object]]) -> dict[str, float]:
+    productive_credit_inflow_values = [
+        safe_float(row.get("productive_credit_inflow_usd_total")) for row in baseline_rows
+    ]
+    productive_credit_stable_retained_values = [
+        safe_float(row.get("productive_credit_stable_retained_usd_total")) for row in baseline_rows
+    ]
+    productive_credit_voucher_deposit_values = [
+        safe_float(row.get("productive_credit_voucher_deposit_usd_total")) for row in baseline_rows
+    ]
+    productive_credit_voucher_deposit_share_values = [
+        voucher / max(1e-9, inflow)
+        for voucher, inflow in zip(
+            productive_credit_voucher_deposit_values,
+            productive_credit_inflow_values,
+        )
+    ]
     return {
         "route_success_p50": percentile(
             [safe_float(row.get("route_success_rate_cumulative")) for row in baseline_rows], 0.50
@@ -5166,6 +5423,19 @@ def frontier_baseline_metrics(baseline_rows: list[dict[str, object]]) -> dict[st
         ),
         "liquidity_leakage_p95": percentile(
             [safe_float(row.get("stable_liquidity_leakage_ratio_cumulative")) for row in baseline_rows], 0.95
+        ),
+        "producer_deposit_credit_capacity_usd_p50": percentile(
+            [safe_float(row.get("producer_deposit_credit_capacity_usd")) for row in baseline_rows], 0.50
+        ),
+        "productive_credit_inflow_usd_total_p50": percentile(productive_credit_inflow_values, 0.50),
+        "productive_credit_stable_retained_usd_total_p50": percentile(
+            productive_credit_stable_retained_values, 0.50
+        ),
+        "productive_credit_voucher_deposit_usd_total_p50": percentile(
+            productive_credit_voucher_deposit_values, 0.50
+        ),
+        "productive_credit_voucher_deposit_share_p50": percentile(
+            productive_credit_voucher_deposit_share_values, 0.50
         ),
     }
 

@@ -261,6 +261,13 @@ class ScenarioConfig:
     productive_credit_enabled: bool = False
     productive_credit_return_rate: float = 0.0
     productive_credit_lag_ticks: int = 2
+    productive_credit_voucher_feedback_enabled: bool = False
+    productive_credit_voucher_deposit_share: float = 0.0
+    productive_credit_voucher_deposit_cap_rate_per_month: float = 0.0
+    productive_credit_voucher_activity_boost_enabled: bool = False
+    productive_credit_voucher_activity_boost_window_ticks: int = 13
+    productive_credit_voucher_source_weight_boost: float = 0.0
+    productive_credit_voucher_source_size_multiplier: float = 1.0
     producer_debt_contract_repayment_enabled: bool = False
     producer_debt_contract_service_margin_rate: float = 0.0
     producer_debt_contract_revenue_rate: float = 0.0

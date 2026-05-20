@@ -121,6 +121,16 @@ run_frontier() {
   local default_coupons="$6"
   local default_shares="$7"
   local output_dir="${OUTPUT:-$OUTPUT_ROOT/$default_output}"
+  local frontier_extra_args=()
+  if [[ -n "${PRODUCTIVE_CREDIT_VOUCHER_DEPOSIT_SHARE:-}" ]]; then
+    frontier_extra_args+=(--productive-credit-voucher-deposit-share "$PRODUCTIVE_CREDIT_VOUCHER_DEPOSIT_SHARE")
+  fi
+  if [[ -n "${PRODUCTIVE_CREDIT_VOUCHER_DEPOSIT_CAP_RATE_PER_MONTH:-}" ]]; then
+    frontier_extra_args+=(
+      --productive-credit-voucher-deposit-cap-rate-per-month
+      "$PRODUCTIVE_CREDIT_VOUCHER_DEPOSIT_CAP_RATE_PER_MONTH"
+    )
+  fi
   echo "[batch] writing frontier artifacts to $output_dir"
   echo "[batch] bond service lockbox: mode=${BOND_SERVICE_LOCKBOX_MODE:-remaining_schedule} coverage=${BOND_SERVICE_LOCKBOX_COVERAGE_RATIO:-1.25}"
   echo "[batch] producer debt contract service margin: ${PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-0.50}"
@@ -138,6 +148,7 @@ run_frontier() {
     --bond-service-lockbox-mode "${BOND_SERVICE_LOCKBOX_MODE:-remaining_schedule}" \
     --bond-service-lockbox-coverage-ratio "${BOND_SERVICE_LOCKBOX_COVERAGE_RATIO:-1.25}" \
     --producer-debt-contract-service-margin-rate "${PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-0.50}" \
+    "${frontier_extra_args[@]}" \
     --runs "${RUNS:-$default_runs}" \
     --ticks "${TICKS:-$default_ticks}" \
     --term "${BOND_TERM:-260}" \
@@ -169,6 +180,10 @@ case "$JOB" in
   frontier-maturity-smoke)
     run_frontier 2 260 bond_issuer_frontier_maturity_smoke current 0.05 0 0.50
     ;;
+  frontier-feedback-probe)
+    FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}" \
+      run_frontier 2 260 bond_issuer_frontier_feedback_probe current 0,0.01,0.02,0.05,0.10,0.25,0.50,1.00,1.50 0 0.50
+    ;;
   frontier-pilot)
     run_frontier 20 260 bond_issuer_frontier_pilot current,connected_2x,connected_5x 0.05,0.10,0.20,0.40,0.80,1.50 0,0.06,0.12 0.25,0.50,0.75
     ;;
@@ -177,7 +192,7 @@ case "$JOB" in
     ;;
   *)
     echo "Unknown job: $JOB" >&2
-    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, frontier-smoke, frontier-maturity-smoke, frontier-pilot, frontier-publication" >&2
+    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, frontier-smoke, frontier-maturity-smoke, frontier-feedback-probe, frontier-pilot, frontier-publication" >&2
     exit 2
     ;;
 esac
