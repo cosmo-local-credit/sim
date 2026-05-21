@@ -378,6 +378,15 @@ def parse_args() -> argparse.Namespace:
         help="Maximum share of a target lender-held voucher inventory considered in one purchase attempt.",
     )
     parser.add_argument(
+        "--lender-voucher-purchase-stable-budget-usd-per-tick",
+        type=float,
+        default=0.0,
+        help=(
+            "Experimental calibrated stable purchase budget injected per tick for "
+            "consumer/third-party purchases of lender-held producer vouchers."
+        ),
+    )
+    parser.add_argument(
         "--frontier-mode",
         default="adaptive",
         choices=("adaptive", "grid"),
@@ -609,6 +618,7 @@ SHARD_CONFIG_KEYS = (
     "lender_voucher_purchase_attempts_per_tick",
     "lender_voucher_purchase_consumer_share",
     "lender_voucher_purchase_inventory_share",
+    "lender_voucher_purchase_stable_budget_usd_per_tick",
     "frontier_mode",
     "frontier_refinement_rounds",
     "route_success_floor",
@@ -1608,6 +1618,13 @@ def scenario_config(
             0.0,
             float(getattr(args, "lender_voucher_purchase_inventory_share", 0.05) or 0.0),
         )
+        cfg.lender_voucher_purchase_stable_budget_usd_per_tick = max(
+            0.0,
+            float(
+                getattr(args, "lender_voucher_purchase_stable_budget_usd_per_tick", 0.0)
+                or 0.0
+            ),
+        )
         cfg.liquidity_mandate_mode = "community_deficit_then_lender"
         cfg.route_substitution_enabled = True
         cfg.route_substitution_max_alternatives = 3
@@ -2366,6 +2383,9 @@ def run_one(
             "third_party_voucher_purchase_no_target_tick",
             "third_party_voucher_purchase_stable_spent_usd_tick",
             "third_party_voucher_purchase_voucher_value_acquired_usd_tick",
+            "lender_voucher_purchase_stable_budget_onramp_usd_tick",
+            "consumer_voucher_purchase_stable_budget_onramp_usd_tick",
+            "third_party_voucher_purchase_stable_budget_onramp_usd_tick",
             "fee_conversion_attempted_usd_tick",
             "fee_conversion_success_usd_tick",
             "fee_conversion_failed_usd_tick",
@@ -2524,6 +2544,9 @@ def run_one(
             ),
             "configured_lender_voucher_purchase_inventory_share": safe_float(
                 getattr(cfg, "lender_voucher_purchase_inventory_share", 0.0)
+            ),
+            "configured_lender_voucher_purchase_stable_budget_usd_per_tick": safe_float(
+                getattr(cfg, "lender_voucher_purchase_stable_budget_usd_per_tick", 0.0)
             ),
             "stable_symbol": unit_diagnostics.get("stable_symbol", ""),
             "stable_unit_value_usd": unit_diagnostics.get("stable_unit_value_usd", 1.0),
@@ -3013,6 +3036,30 @@ def run_one(
             "third_party_voucher_purchase_voucher_value_acquired_usd_total": latest.get(
                 "third_party_voucher_purchase_voucher_value_acquired_usd_total",
                 cumulative_float["third_party_voucher_purchase_voucher_value_acquired_usd_tick"],
+            ),
+            "lender_voucher_purchase_stable_budget_remaining_usd": latest.get(
+                "lender_voucher_purchase_stable_budget_remaining_usd_tick", 0.0
+            ),
+            "lender_voucher_purchase_stable_budget_onramp_usd": latest.get(
+                "lender_voucher_purchase_stable_budget_onramp_usd_tick", 0.0
+            ),
+            "lender_voucher_purchase_stable_budget_onramp_usd_total": latest.get(
+                "lender_voucher_purchase_stable_budget_onramp_usd_total",
+                cumulative_float["lender_voucher_purchase_stable_budget_onramp_usd_tick"],
+            ),
+            "consumer_voucher_purchase_stable_budget_onramp_usd": latest.get(
+                "consumer_voucher_purchase_stable_budget_onramp_usd_tick", 0.0
+            ),
+            "consumer_voucher_purchase_stable_budget_onramp_usd_total": latest.get(
+                "consumer_voucher_purchase_stable_budget_onramp_usd_total",
+                cumulative_float["consumer_voucher_purchase_stable_budget_onramp_usd_tick"],
+            ),
+            "third_party_voucher_purchase_stable_budget_onramp_usd": latest.get(
+                "third_party_voucher_purchase_stable_budget_onramp_usd_tick", 0.0
+            ),
+            "third_party_voucher_purchase_stable_budget_onramp_usd_total": latest.get(
+                "third_party_voucher_purchase_stable_budget_onramp_usd_total",
+                cumulative_float["third_party_voucher_purchase_stable_budget_onramp_usd_tick"],
             ),
             "lender_recovered_stable_usd": latest.get("lender_recovered_stable_usd_tick", 0.0),
             "lender_recovered_stable_usd_total": cumulative_float[
@@ -5358,6 +5405,18 @@ def summarize_frontier_cell(
         safe_float(row.get("third_party_voucher_purchase_voucher_value_acquired_usd_total"))
         for row in rows
     ]
+    lender_voucher_purchase_budget_onramp_values = [
+        safe_float(row.get("lender_voucher_purchase_stable_budget_onramp_usd_total"))
+        for row in rows
+    ]
+    consumer_voucher_purchase_budget_onramp_values = [
+        safe_float(row.get("consumer_voucher_purchase_stable_budget_onramp_usd_total"))
+        for row in rows
+    ]
+    third_party_voucher_purchase_budget_onramp_values = [
+        safe_float(row.get("third_party_voucher_purchase_stable_budget_onramp_usd_total"))
+        for row in rows
+    ]
     lender_recovered_stable_values = [
         safe_float(row.get("lender_recovered_stable_usd_total")) for row in rows
     ]
@@ -5411,6 +5470,12 @@ def summarize_frontier_cell(
     v2v_count_p50 = percentile(v2v_count_values, 0.50)
     v2v_volume_p50 = percentile(v2v_volume_values, 0.50)
     v2v_share_p50 = percentile(v2v_share_values, 0.50)
+    ordinary_swap_count_p50 = percentile(ordinary_swap_count_values, 0.50)
+    ordinary_swap_volume_p50 = percentile(ordinary_swap_volume_values, 0.50)
+    ordinary_stable_source_count_p50 = percentile(ordinary_stable_source_count_values, 0.50)
+    ordinary_stable_source_volume_p50 = percentile(ordinary_stable_source_volume_values, 0.50)
+    ordinary_voucher_source_count_p50 = percentile(ordinary_voucher_source_count_values, 0.50)
+    ordinary_voucher_source_volume_p50 = percentile(ordinary_voucher_source_volume_values, 0.50)
     stable_share_p50 = percentile(stable_share_values, 0.50)
     stable_share_p95 = percentile(stable_share_values, 0.95)
     voucher_share_p50 = percentile(voucher_share_values, 0.50)
@@ -5442,6 +5507,7 @@ def summarize_frontier_cell(
     baseline_leakage_p50 = baseline.get("liquidity_leakage_p50", 0.0)
     baseline_leakage_p95 = baseline.get("liquidity_leakage_p95", baseline_leakage_p50)
     baseline_v2v_count_p50 = baseline.get("voucher_to_voucher_count_p50", 0.0)
+    baseline_v2v_volume_p50 = baseline.get("voucher_to_voucher_volume_p50", 0.0)
     baseline_v2v_share_p50 = baseline.get("voucher_to_voucher_share_p50", 0.0)
     baseline_stable_share_p50 = baseline.get("stable_value_share_p50", 0.0)
     baseline_stable_share_p95 = baseline.get("stable_value_share_p95", baseline_stable_share_p50)
@@ -5457,7 +5523,14 @@ def summarize_frontier_cell(
     baseline_productive_credit_voucher_deposit_share_p50 = baseline.get(
         "productive_credit_voucher_deposit_share_p50", 0.0
     )
+    baseline_ordinary_swap_count_p50 = baseline.get("ordinary_swap_count_total_p50", 0.0)
     baseline_ordinary_swap_volume_p50 = baseline.get("ordinary_swap_volume_usd_total_p50", 0.0)
+    baseline_ordinary_stable_source_count_p50 = baseline.get(
+        "ordinary_stable_source_swap_count_total_p50", 0.0
+    )
+    baseline_ordinary_stable_source_volume_p50 = baseline.get(
+        "ordinary_stable_source_swap_volume_usd_total_p50", 0.0
+    )
     baseline_ordinary_voucher_source_volume_p50 = baseline.get(
         "ordinary_voucher_source_swap_volume_usd_total_p50", 0.0
     )
@@ -5475,13 +5548,68 @@ def summarize_frontier_cell(
     baseline_swap_p50 = baseline.get("swap_volume_p50", 0.0)
     route_success_delta_vs_baseline = route_p50 - baseline_route_p50
     swap_volume_ratio_vs_baseline = swap_p50 / max(1e-9, baseline_swap_p50)
+    ordinary_swap_count_ratio_vs_baseline = ordinary_swap_count_p50 / max(
+        1e-9, baseline_ordinary_swap_count_p50
+    )
+    ordinary_swap_volume_ratio_vs_baseline = ordinary_swap_volume_p50 / max(
+        1e-9, baseline_ordinary_swap_volume_p50
+    )
+    ordinary_stable_source_count_ratio_vs_baseline = ordinary_stable_source_count_p50 / max(
+        1e-9, baseline_ordinary_stable_source_count_p50
+    )
+    ordinary_stable_source_volume_ratio_vs_baseline = ordinary_stable_source_volume_p50 / max(
+        1e-9, baseline_ordinary_stable_source_volume_p50
+    )
+    ordinary_voucher_source_count_ratio_vs_baseline = ordinary_voucher_source_count_p50 / max(
+        1e-9, baseline_ordinary_voucher_source_count_p50
+    )
+    ordinary_voucher_source_volume_ratio_vs_baseline = ordinary_voucher_source_volume_p50 / max(
+        1e-9, baseline_ordinary_voucher_source_volume_p50
+    )
+    voucher_to_voucher_volume_ratio_vs_baseline = v2v_volume_p50 / max(
+        1e-9, baseline_v2v_volume_p50
+    )
     route_decline = route_p50 < baseline_route_p50 - 0.05
     swap_volume_decline = baseline_swap_p50 > 0.0 and swap_p50 < baseline_swap_p50 * 0.85
+    ordinary_swap_count_decline = (
+        baseline_ordinary_swap_count_p50 > 0.0
+        and ordinary_swap_count_p50 < baseline_ordinary_swap_count_p50 * 0.85
+    )
+    ordinary_swap_volume_decline = (
+        baseline_ordinary_swap_volume_p50 > 0.0
+        and ordinary_swap_volume_p50 < baseline_ordinary_swap_volume_p50 * 0.85
+    )
+    ordinary_stable_source_count_decline = (
+        baseline_ordinary_stable_source_count_p50 > 0.0
+        and ordinary_stable_source_count_p50 < baseline_ordinary_stable_source_count_p50 * 0.85
+    )
+    ordinary_stable_source_volume_decline = (
+        baseline_ordinary_stable_source_volume_p50 > 0.0
+        and ordinary_stable_source_volume_p50 < baseline_ordinary_stable_source_volume_p50 * 0.85
+    )
+    ordinary_voucher_source_count_decline = (
+        baseline_ordinary_voucher_source_count_p50 > 0.0
+        and ordinary_voucher_source_count_p50 < baseline_ordinary_voucher_source_count_p50 * 0.85
+    )
+    ordinary_voucher_source_volume_decline = (
+        baseline_ordinary_voucher_source_volume_p50 > 0.0
+        and ordinary_voucher_source_volume_p50 < baseline_ordinary_voucher_source_volume_p50 * 0.85
+    )
     v2v_count_decline = (
         baseline_v2v_count_p50 > 0.0 and v2v_count_p50 < baseline_v2v_count_p50 * 0.85
     )
+    v2v_volume_decline = (
+        baseline_v2v_volume_p50 > 0.0 and v2v_volume_p50 < baseline_v2v_volume_p50 * 0.85
+    )
     v2v_share_decline = (
         baseline_v2v_share_p50 > 0.0 and v2v_share_p50 < max(0.0, baseline_v2v_share_p50 - 0.10)
+    )
+    voucher_circulation_decline = (
+        v2v_count_decline
+        or v2v_volume_decline
+        or v2v_share_decline
+        or ordinary_voucher_source_count_decline
+        or ordinary_voucher_source_volume_decline
     )
     voucher_value_share_decline = (
         baseline_voucher_share_p50 > 0.0 and voucher_share_p50 < max(0.0, baseline_voucher_share_p50 - 0.15)
@@ -5492,9 +5620,7 @@ def summarize_frontier_cell(
     leakage_increase = leakage_p50 > baseline_leakage_p50 + 0.05
     material_decline = (
         route_decline
-        or swap_volume_decline
-        or v2v_count_decline
-        or v2v_share_decline
+        or voucher_circulation_decline
         or stable_dependency_increase
         or voucher_value_share_decline
         or consumer_stress_increase
@@ -5514,8 +5640,6 @@ def summarize_frontier_cell(
         constraints.append("p05_route_success")
     elif route_success_mode == "relative" and route_decline:
         constraints.append("route_success_decline_vs_no_bond")
-    if swap_volume_decline:
-        constraints.append("swap_volume_decline_vs_no_bond")
     if consumer_stress_delta_p95 > 0.20:
         constraints.append("p95_consumer_cash_stress_delta")
     if community_stress_delta_p95 > 0.20:
@@ -5530,6 +5654,14 @@ def summarize_frontier_cell(
         constraints.append("voucher_to_voucher_count_decline_vs_no_bond")
     if v2v_share_decline:
         constraints.append("voucher_to_voucher_share_decline_vs_no_bond")
+    if v2v_volume_decline:
+        constraints.append("voucher_to_voucher_volume_decline_vs_no_bond")
+    if ordinary_voucher_source_count_decline:
+        constraints.append("ordinary_voucher_source_count_decline_vs_no_bond")
+    if ordinary_voucher_source_volume_decline:
+        constraints.append("ordinary_voucher_source_volume_decline_vs_no_bond")
+    if voucher_circulation_decline:
+        constraints.append("voucher_circulation_decline_vs_no_bond")
     if stable_dependency_increase:
         constraints.append("p95_stable_dependency_delta")
     if voucher_value_share_decline:
@@ -5537,14 +5669,31 @@ def summarize_frontier_cell(
     if material_decline:
         constraints.append("material_decline_vs_no_bond")
     material_reasons = []
+    diagnostic_reasons = []
     if route_decline:
         material_reasons.append("route_success_decline")
     if swap_volume_decline:
-        material_reasons.append("swap_volume_decline")
+        diagnostic_reasons.append("total_swap_volume_decline")
+    if ordinary_swap_count_decline:
+        diagnostic_reasons.append("ordinary_swap_count_decline")
+    if ordinary_swap_volume_decline:
+        diagnostic_reasons.append("ordinary_swap_volume_decline")
+    if ordinary_stable_source_count_decline:
+        diagnostic_reasons.append("ordinary_stable_source_count_decline")
+    if ordinary_stable_source_volume_decline:
+        diagnostic_reasons.append("ordinary_stable_source_volume_decline")
     if v2v_count_decline:
         material_reasons.append("voucher_to_voucher_count_decline")
+    if v2v_volume_decline:
+        material_reasons.append("voucher_to_voucher_volume_decline")
     if v2v_share_decline:
         material_reasons.append("voucher_to_voucher_share_decline")
+    if ordinary_voucher_source_count_decline:
+        material_reasons.append("ordinary_voucher_source_count_decline")
+    if ordinary_voucher_source_volume_decline:
+        material_reasons.append("ordinary_voucher_source_volume_decline")
+    if voucher_circulation_decline:
+        material_reasons.append("voucher_circulation_decline")
     if stable_dependency_increase:
         material_reasons.append("stable_dependency_increase")
     if consumer_stress_increase:
@@ -5631,31 +5780,25 @@ def summarize_frontier_cell(
         "realized_edge_concentration_p95": percentile(concentration_values, 0.95),
         "swap_volume_usd_total_p50": swap_p50,
         "swap_volume_ratio_vs_baseline": swap_volume_ratio_vs_baseline,
-        "ordinary_swap_count_total_p50": percentile(ordinary_swap_count_values, 0.50),
-        "ordinary_swap_volume_usd_total_p50": percentile(ordinary_swap_volume_values, 0.50),
-        "ordinary_swap_volume_ratio_vs_baseline": (
-            percentile(ordinary_swap_volume_values, 0.50)
-            / max(1e-9, baseline_ordinary_swap_volume_p50)
+        "ordinary_swap_count_total_p50": ordinary_swap_count_p50,
+        "ordinary_swap_volume_usd_total_p50": ordinary_swap_volume_p50,
+        "ordinary_swap_count_ratio_vs_baseline": ordinary_swap_count_ratio_vs_baseline,
+        "ordinary_swap_volume_ratio_vs_baseline": ordinary_swap_volume_ratio_vs_baseline,
+        "ordinary_stable_source_swap_count_total_p50": ordinary_stable_source_count_p50,
+        "ordinary_stable_source_swap_volume_usd_total_p50": ordinary_stable_source_volume_p50,
+        "ordinary_stable_source_swap_count_ratio_vs_baseline": (
+            ordinary_stable_source_count_ratio_vs_baseline
         ),
-        "ordinary_stable_source_swap_count_total_p50": percentile(
-            ordinary_stable_source_count_values, 0.50
+        "ordinary_stable_source_swap_volume_ratio_vs_baseline": (
+            ordinary_stable_source_volume_ratio_vs_baseline
         ),
-        "ordinary_stable_source_swap_volume_usd_total_p50": percentile(
-            ordinary_stable_source_volume_values, 0.50
-        ),
-        "ordinary_voucher_source_swap_count_total_p50": percentile(
-            ordinary_voucher_source_count_values, 0.50
-        ),
-        "ordinary_voucher_source_swap_volume_usd_total_p50": percentile(
-            ordinary_voucher_source_volume_values, 0.50
-        ),
+        "ordinary_voucher_source_swap_count_total_p50": ordinary_voucher_source_count_p50,
+        "ordinary_voucher_source_swap_volume_usd_total_p50": ordinary_voucher_source_volume_p50,
         "ordinary_voucher_source_swap_count_ratio_vs_baseline": (
-            percentile(ordinary_voucher_source_count_values, 0.50)
-            / max(1e-9, baseline_ordinary_voucher_source_count_p50)
+            ordinary_voucher_source_count_ratio_vs_baseline
         ),
         "ordinary_voucher_source_swap_volume_ratio_vs_baseline": (
-            percentile(ordinary_voucher_source_volume_values, 0.50)
-            / max(1e-9, baseline_ordinary_voucher_source_volume_p50)
+            ordinary_voucher_source_volume_ratio_vs_baseline
         ),
         "loan_route_swap_count_total_p50": percentile(loan_route_swap_count_values, 0.50),
         "loan_route_swap_volume_usd_total_p50": percentile(loan_route_swap_volume_values, 0.50),
@@ -5693,6 +5836,7 @@ def summarize_frontier_cell(
         ),
         "voucher_to_voucher_count_p50": v2v_count_p50,
         "voucher_to_voucher_volume_p50": v2v_volume_p50,
+        "voucher_to_voucher_volume_ratio_vs_baseline": voucher_to_voucher_volume_ratio_vs_baseline,
         "voucher_to_voucher_share_p50": v2v_share_p50,
         "voucher_to_stable_count_p50": percentile(v2stable_count_values, 0.50),
         "stable_to_voucher_count_p50": percentile(stable2v_count_values, 0.50),
@@ -5869,6 +6013,15 @@ def summarize_frontier_cell(
         "third_party_voucher_purchase_voucher_value_acquired_usd_total_p50": percentile(
             third_party_voucher_purchase_voucher_acquired_values, 0.50
         ),
+        "lender_voucher_purchase_stable_budget_onramp_usd_total_p50": percentile(
+            lender_voucher_purchase_budget_onramp_values, 0.50
+        ),
+        "consumer_voucher_purchase_stable_budget_onramp_usd_total_p50": percentile(
+            consumer_voucher_purchase_budget_onramp_values, 0.50
+        ),
+        "third_party_voucher_purchase_stable_budget_onramp_usd_total_p50": percentile(
+            third_party_voucher_purchase_budget_onramp_values, 0.50
+        ),
         "lender_recovered_stable_usd_total_p50": percentile(lender_recovered_stable_values, 0.50),
         "lender_recovered_stable_borrower_regular_usd_total_p50": percentile(
             lender_recovered_stable_borrower_regular_values, 0.50
@@ -5907,7 +6060,14 @@ def summarize_frontier_cell(
         ),
         "baseline_route_success_p50": baseline.get("route_success_p50", 0.0),
         "baseline_swap_volume_p50": baseline.get("swap_volume_p50", 0.0),
+        "baseline_ordinary_swap_count_total_p50": baseline_ordinary_swap_count_p50,
         "baseline_ordinary_swap_volume_usd_total_p50": baseline_ordinary_swap_volume_p50,
+        "baseline_ordinary_stable_source_swap_count_total_p50": (
+            baseline_ordinary_stable_source_count_p50
+        ),
+        "baseline_ordinary_stable_source_swap_volume_usd_total_p50": (
+            baseline_ordinary_stable_source_volume_p50
+        ),
         "baseline_ordinary_voucher_source_swap_count_total_p50": (
             baseline_ordinary_voucher_source_count_p50
         ),
@@ -5915,6 +6075,7 @@ def summarize_frontier_cell(
             baseline_ordinary_voucher_source_volume_p50
         ),
         "baseline_voucher_to_voucher_count_p50": baseline_v2v_count_p50,
+        "baseline_voucher_to_voucher_volume_p50": baseline_v2v_volume_p50,
         "baseline_voucher_to_voucher_share_p50": baseline_v2v_share_p50,
         "baseline_stable_value_share_p50": baseline_stable_share_p50,
         "baseline_stable_value_share_p95": baseline_stable_share_p95,
@@ -5952,17 +6113,42 @@ def summarize_frontier_cell(
         ),
         "stable_dependency_delta_p95": stable_dependency_delta_p95,
         "material_decline_route_success_decline": int(route_decline),
-        "material_decline_swap_volume_decline": int(swap_volume_decline),
+        "diagnostic_total_swap_volume_decline": int(swap_volume_decline),
+        "diagnostic_ordinary_swap_count_decline": int(ordinary_swap_count_decline),
+        "diagnostic_ordinary_swap_volume_decline": int(ordinary_swap_volume_decline),
+        "diagnostic_ordinary_stable_source_count_decline": int(
+            ordinary_stable_source_count_decline
+        ),
+        "diagnostic_ordinary_stable_source_volume_decline": int(
+            ordinary_stable_source_volume_decline
+        ),
+        "material_decline_swap_volume_decline": 0,
+        "material_decline_voucher_circulation_decline": int(voucher_circulation_decline),
         "material_decline_voucher_to_voucher_count_decline": int(v2v_count_decline),
+        "material_decline_voucher_to_voucher_volume_decline": int(v2v_volume_decline),
         "material_decline_voucher_to_voucher_share_decline": int(v2v_share_decline),
+        "material_decline_ordinary_voucher_source_count_decline": int(
+            ordinary_voucher_source_count_decline
+        ),
+        "material_decline_ordinary_voucher_source_volume_decline": int(
+            ordinary_voucher_source_volume_decline
+        ),
         "material_decline_stable_dependency_increase": int(stable_dependency_increase),
         "material_decline_consumer_stress_increase": int(consumer_stress_increase),
         "material_decline_community_stress_increase": int(community_stress_increase),
         "material_decline_leakage_increase": int(leakage_increase),
         "material_decline_voucher_share_decline": int(voucher_value_share_decline),
         "material_decline_reasons": ";".join(material_reasons),
+        "diagnostic_decline_reasons": ";".join(diagnostic_reasons),
         "voucher_to_voucher_count_decline_vs_no_bond": int(v2v_count_decline),
+        "voucher_to_voucher_volume_decline_vs_no_bond": int(v2v_volume_decline),
         "voucher_to_voucher_share_decline_vs_no_bond": int(v2v_share_decline),
+        "ordinary_voucher_source_count_decline_vs_no_bond": int(
+            ordinary_voucher_source_count_decline
+        ),
+        "ordinary_voucher_source_volume_decline_vs_no_bond": int(
+            ordinary_voucher_source_volume_decline
+        ),
         "voucher_value_share_decline_vs_no_bond": int(voucher_value_share_decline),
         "material_decline_vs_no_bond": int(material_decline),
         "safe": int(not constraints),
@@ -6406,6 +6592,9 @@ def frontier_baseline_metrics(baseline_rows: list[dict[str, object]]) -> dict[st
         "voucher_to_voucher_count_p50": percentile(
             [safe_float(row.get("swap_count_vchr_to_vchr_total")) for row in baseline_rows], 0.50
         ),
+        "voucher_to_voucher_volume_p50": percentile(
+            [safe_float(row.get("swap_volume_vchr_to_vchr_total")) for row in baseline_rows], 0.50
+        ),
         "voucher_to_voucher_share_p50": percentile(
             [
                 safe_float(row.get("swap_count_vchr_to_vchr_total"))
@@ -6486,6 +6675,20 @@ def frontier_baseline_metrics(baseline_rows: list[dict[str, object]]) -> dict[st
         ),
         "ordinary_swap_volume_usd_total_p50": percentile(
             [safe_float(row.get("ordinary_swap_volume_usd_total")) for row in baseline_rows], 0.50
+        ),
+        "ordinary_swap_count_total_p50": percentile(
+            [safe_float(row.get("ordinary_swap_count_total")) for row in baseline_rows], 0.50
+        ),
+        "ordinary_stable_source_swap_count_total_p50": percentile(
+            [safe_float(row.get("ordinary_stable_source_swap_count_total")) for row in baseline_rows],
+            0.50,
+        ),
+        "ordinary_stable_source_swap_volume_usd_total_p50": percentile(
+            [
+                safe_float(row.get("ordinary_stable_source_swap_volume_usd_total"))
+                for row in baseline_rows
+            ],
+            0.50,
         ),
         "ordinary_voucher_source_swap_count_total_p50": percentile(
             [safe_float(row.get("ordinary_voucher_source_swap_count_total")) for row in baseline_rows], 0.50

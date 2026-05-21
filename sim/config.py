@@ -190,6 +190,7 @@ class ScenarioConfig:
     lender_voucher_purchase_inventory_share: float = 0.05
     lender_voucher_purchase_min_usd: float = 1.0
     lender_voucher_purchase_max_usd: float | None = None
+    lender_voucher_purchase_stable_budget_usd_per_tick: float = 0.0
     waterfall_alpha_ops_share: float = 0.20
     waterfall_beta_liquidity_share: float = 0.40
     waterfall_gamma_insurance_share: float = 0.40

@@ -196,6 +196,12 @@ run_frontier() {
       "$LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE"
     )
   fi
+  if [[ -n "${LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK:-}" ]]; then
+    frontier_extra_args+=(
+      --lender-voucher-purchase-stable-budget-usd-per-tick
+      "$LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK"
+    )
+  fi
   shared_debt_margin="${PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-0.0}"
   stable_debt_margin="${PRODUCER_STABLE_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-$shared_debt_margin}"
   voucher_debt_margin="${PRODUCER_VOUCHER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-$shared_debt_margin}"
@@ -210,7 +216,7 @@ run_frontier() {
   echo "[batch] ablation flags: voucher_boost=${DISABLE_PRODUCTIVE_CREDIT_VOUCHER_ACTIVITY_BOOST:-0} stable_protection=${DISABLE_ORDINARY_STABLE_SPEND_PROTECTION:-0} loan_backfill=${DISABLE_PRODUCER_LOAN_FAILURE_BACKFILL:-0}"
   echo "[batch] voucher-loan fallback: enabled=${ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK:-0} activity_boost=${ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST:-0} max_targets=${PRODUCER_VOUCHER_LOAN_MAX_TARGET_CANDIDATES:-3}"
   echo "[batch] primary voucher borrowing: enabled=${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-0} attempt_share=${PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE:-0.50}"
-  echo "[batch] lender voucher purchase demand: enabled=${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-0} attempts_per_tick=${LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK:-5} consumer_share=${LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE:-0.75} inventory_share=${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05}"
+  echo "[batch] lender voucher purchase demand: enabled=${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-0} attempts_per_tick=${LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK:-5} consumer_share=${LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE:-0.75} inventory_share=${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05} stable_budget_usd_per_tick=${LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK:-0.0}"
   run_monte_carlo "${PYTHON_BIN}" scripts/run_regenbond_monte_carlo.py \
     --scenario bond_issuer_frontier \
     --network-scales "${NETWORK_SCALES:-$default_scales}" \
@@ -285,6 +291,7 @@ case "$JOB" in
       LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK="${LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK:-5}" \
       LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE="${LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE:-0.75}" \
       LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE="${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05}" \
+      LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK="${LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK:-77.164163}" \
       OUTPUT="${OUTPUT:-$OUTPUT_ROOT/bond_issuer_frontier_rola_regeneration_probe}" \
       run_frontier 5 260 bond_issuer_frontier_rola_regeneration_probe current 0,0.005,0.01,0.02,0.03,0.04,0.05 0 0.50
     ;;

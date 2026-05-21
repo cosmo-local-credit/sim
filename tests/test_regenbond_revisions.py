@@ -367,6 +367,50 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(engine._consumer_voucher_purchase_success_tick, 0)
         self.assertEqual(engine._consumer_voucher_purchase_reserve_protected_tick, 1)
 
+    def test_consumer_voucher_purchase_budget_supports_purchase_above_reserve(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_consumers=1,
+                max_pools=4,
+                ordinary_stable_spend_protection_enabled=True,
+                ordinary_stable_spend_buffer_voucher_share=0.0,
+                lender_voucher_purchase_demand_enabled=True,
+                lender_voucher_purchase_stable_budget_usd_per_tick=5.0,
+                lender_voucher_purchase_min_usd=1.0,
+                lender_voucher_purchase_inventory_share=0.05,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        consumer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "consumer")
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        for pool in (producer_pool, consumer_pool, lender_pool):
+            pool.values.set_value(voucher_id, 1.0)
+        lender_pool.list_asset_with_value_and_limit(voucher_id, value=1.0, window_len=10, cap_in=500.0)
+        lender_pool.list_asset_with_value_and_limit(stable_id, value=1.0, window_len=10, cap_in=500.0)
+        current_voucher = lender_pool.vault.get(voucher_id)
+        if current_voucher > 0.0:
+            engine._vault_sub(lender_pool, voucher_id, current_voucher, "test_clear", "test")
+        current_stable = consumer_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(consumer_pool, stable_id, current_stable, "test_clear", "test")
+        engine._vault_add(lender_pool, voucher_id, 40.0, "test_seed", "test")
+        engine._vault_add(consumer_pool, stable_id, 10.0, "test_seed", "test")
+        consumer_pool.policy.min_stable_reserve = 10.0
+        engine._lender_voucher_purchase_stable_budget_remaining_usd_tick = 5.0
+        engine.tick = 1
+
+        purchased = engine._attempt_lender_voucher_purchase("consumer")
+
+        self.assertTrue(purchased)
+        self.assertEqual(engine._consumer_voucher_purchase_success_tick, 1)
+        self.assertGreater(engine._consumer_voucher_purchase_stable_budget_onramp_usd_tick, 0.0)
+        self.assertGreater(engine._lender_voucher_purchase_stable_budget_onramp_usd_tick, 0.0)
+        self.assertGreater(engine._stable_onramp_usd_tick, 0.0)
+        self.assertGreaterEqual(consumer_pool.vault.get(stable_id), consumer_pool.policy.min_stable_reserve)
+
     def test_snapshot_reports_lender_stable_available_above_reserve(self):
         engine = SimulationEngine(small_config())
         stable_id = engine.cfg.stable_symbol
@@ -636,6 +680,7 @@ class RegenBondRevisionTests(unittest.TestCase):
             "lender_voucher_purchase_attempts_per_tick",
             "lender_voucher_purchase_consumer_share",
             "lender_voucher_purchase_inventory_share",
+            "lender_voucher_purchase_stable_budget_usd_per_tick",
         ):
             self.assertIn(key, SHARD_CONFIG_KEYS)
 
@@ -1283,7 +1328,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(summary["safe"], 0)
         self.assertIn("p50_available_service_cash_headroom", summary["binding_constraint"])
 
-    def test_frontier_safety_decomposes_material_decline_reasons(self):
+    def test_frontier_safety_keeps_total_swap_volume_decline_diagnostic(self):
         row = {
             "bond_principal_usd": 1000.0,
             "principal_ratio": 0.05,
@@ -1326,10 +1371,12 @@ class RegenBondRevisionTests(unittest.TestCase):
 
         summary = summarize_frontier_cell([row] * 5, baseline, 0.85, "diagnostic")
 
-        self.assertEqual(summary["safe"], 0)
-        self.assertEqual(summary["material_decline_swap_volume_decline"], 1)
-        self.assertIn("swap_volume_decline", summary["material_decline_reasons"])
-        self.assertIn("swap_volume_decline_vs_no_bond", summary["binding_constraint"])
+        self.assertEqual(summary["safe"], 1)
+        self.assertEqual(summary["diagnostic_total_swap_volume_decline"], 1)
+        self.assertEqual(summary["material_decline_swap_volume_decline"], 0)
+        self.assertEqual(summary["material_decline_vs_no_bond"], 0)
+        self.assertIn("total_swap_volume_decline", summary["diagnostic_decline_reasons"])
+        self.assertNotIn("swap_volume_decline_vs_no_bond", summary["binding_constraint"])
 
     def test_frontier_safety_reports_baseline_productive_credit_feedback(self):
         baseline_row = {

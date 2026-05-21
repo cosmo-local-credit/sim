@@ -279,6 +279,13 @@ class SimulationEngine:
         self._third_party_voucher_purchase_stable_spent_usd_total: float = 0.0
         self._third_party_voucher_purchase_voucher_value_acquired_usd_tick: float = 0.0
         self._third_party_voucher_purchase_voucher_value_acquired_usd_total: float = 0.0
+        self._lender_voucher_purchase_stable_budget_remaining_usd_tick: float = 0.0
+        self._lender_voucher_purchase_stable_budget_onramp_usd_tick: float = 0.0
+        self._lender_voucher_purchase_stable_budget_onramp_usd_total: float = 0.0
+        self._consumer_voucher_purchase_stable_budget_onramp_usd_tick: float = 0.0
+        self._consumer_voucher_purchase_stable_budget_onramp_usd_total: float = 0.0
+        self._third_party_voucher_purchase_stable_budget_onramp_usd_tick: float = 0.0
+        self._third_party_voucher_purchase_stable_budget_onramp_usd_total: float = 0.0
         self._route_context_count_tick: Dict[str, int] = {}
         self._route_context_count_total: Dict[str, int] = {}
         self._route_context_volume_usd_tick: Dict[str, float] = {}
@@ -5857,6 +5864,10 @@ class SimulationEngine:
             self._third_party_voucher_purchase_no_target_tick = 0
             self._third_party_voucher_purchase_stable_spent_usd_tick = 0.0
             self._third_party_voucher_purchase_voucher_value_acquired_usd_tick = 0.0
+            self._lender_voucher_purchase_stable_budget_remaining_usd_tick = 0.0
+            self._lender_voucher_purchase_stable_budget_onramp_usd_tick = 0.0
+            self._consumer_voucher_purchase_stable_budget_onramp_usd_tick = 0.0
+            self._third_party_voucher_purchase_stable_budget_onramp_usd_tick = 0.0
             self._route_context_count_tick = {}
             self._route_context_volume_usd_tick = {}
             self._route_context_source_stable_count_tick = {}
@@ -6289,6 +6300,8 @@ class SimulationEngine:
         for pool in self.pools.values():
             if pool.policy.system_pool or pool.policy.paused:
                 continue
+            if not pool.registry.is_listed(stable_id):
+                continue
             if buyer_kind == "consumer":
                 if pool.policy.role != "consumer":
                     continue
@@ -6307,7 +6320,48 @@ class SimulationEngine:
                 sources.append(pool)
             elif stable_have > 1e-9:
                 saw_reserve_blocked = True
+                if self._lender_voucher_purchase_stable_budget_remaining_usd_tick > 1e-9:
+                    sources.append(pool)
+            elif self._lender_voucher_purchase_stable_budget_remaining_usd_tick > 1e-9:
+                sources.append(pool)
         return sources, saw_stable, saw_reserve_blocked
+
+    def _apply_voucher_purchase_stable_budget(
+        self,
+        buyer_kind: str,
+        source_pool: "Pool",
+        needed_usd: float,
+    ) -> float:
+        needed_usd = max(0.0, float(needed_usd))
+        budget_usd = max(
+            0.0,
+            float(self._lender_voucher_purchase_stable_budget_remaining_usd_tick),
+        )
+        if needed_usd <= 1e-9 or budget_usd <= 1e-9:
+            return 0.0
+        stable_id = self.cfg.stable_symbol
+        stable_value = self._asset_value(source_pool, stable_id)
+        if stable_value <= 1e-12:
+            stable_value = 1.0
+        applied_usd = min(needed_usd, budget_usd)
+        self._vault_add(
+            source_pool,
+            stable_id,
+            applied_usd / stable_value,
+            "lender_voucher_purchase_budget_income",
+            "purchase_budget",
+        )
+        self._lender_voucher_purchase_stable_budget_remaining_usd_tick -= applied_usd
+        self._lender_voucher_purchase_stable_budget_onramp_usd_tick += applied_usd
+        self._lender_voucher_purchase_stable_budget_onramp_usd_total += applied_usd
+        if buyer_kind == "consumer":
+            self._consumer_voucher_purchase_stable_budget_onramp_usd_tick += applied_usd
+            self._consumer_voucher_purchase_stable_budget_onramp_usd_total += applied_usd
+        else:
+            self._third_party_voucher_purchase_stable_budget_onramp_usd_tick += applied_usd
+            self._third_party_voucher_purchase_stable_budget_onramp_usd_total += applied_usd
+        self._stable_onramp_usd_tick += applied_usd
+        return applied_usd
 
     def _record_voucher_purchase_failure(self, buyer_kind: str, reason: str) -> None:
         if buyer_kind == "consumer":
@@ -6403,10 +6457,20 @@ class SimulationEngine:
             0.0,
             float(getattr(self.cfg, "lender_voucher_purchase_stable_to_voucher_value_ratio", 0.563188) or 0.0),
         )
-        stable_spend_usd = min(spendable_usd, target_score * inventory_share * ratio)
+        target_spend_usd = target_score * inventory_share * ratio
         max_usd = getattr(self.cfg, "lender_voucher_purchase_max_usd", None)
         if max_usd is not None:
-            stable_spend_usd = min(stable_spend_usd, max(0.0, float(max_usd)))
+            target_spend_usd = min(target_spend_usd, max(0.0, float(max_usd)))
+        if target_spend_usd > spendable_usd + 1e-9:
+            self._apply_voucher_purchase_stable_budget(
+                buyer_kind,
+                source_pool,
+                target_spend_usd - spendable_usd,
+            )
+            spendable_usd = (
+                self._ordinary_source_spendable_amount(source_pool, stable_id) * stable_value
+            )
+        stable_spend_usd = min(spendable_usd, target_spend_usd)
         min_usd = max(0.0, float(getattr(self.cfg, "lender_voucher_purchase_min_usd", 1.0) or 0.0))
         if stable_spend_usd < min_usd or stable_spend_usd <= 1e-9:
             reason = "reserve_protected" if spendable_usd <= 1e-9 and saw_reserve_blocked else "no_stable"
@@ -6464,6 +6528,10 @@ class SimulationEngine:
         attempts = max(0, int(getattr(self.cfg, "lender_voucher_purchase_attempts_per_tick", 0) or 0))
         if attempts <= 0:
             return
+        self._lender_voucher_purchase_stable_budget_remaining_usd_tick = max(
+            0.0,
+            float(getattr(self.cfg, "lender_voucher_purchase_stable_budget_usd_per_tick", 0.0) or 0.0),
+        )
         consumer_share = max(
             0.0,
             min(1.0, float(getattr(self.cfg, "lender_voucher_purchase_consumer_share", 0.75) or 0.0)),
@@ -7998,6 +8066,27 @@ class SimulationEngine:
                 ),
                 "third_party_voucher_purchase_voucher_value_acquired_usd_total": float(
                     self._third_party_voucher_purchase_voucher_value_acquired_usd_total
+                ),
+                "lender_voucher_purchase_stable_budget_remaining_usd_tick": float(
+                    self._lender_voucher_purchase_stable_budget_remaining_usd_tick
+                ),
+                "lender_voucher_purchase_stable_budget_onramp_usd_tick": float(
+                    self._lender_voucher_purchase_stable_budget_onramp_usd_tick
+                ),
+                "lender_voucher_purchase_stable_budget_onramp_usd_total": float(
+                    self._lender_voucher_purchase_stable_budget_onramp_usd_total
+                ),
+                "consumer_voucher_purchase_stable_budget_onramp_usd_tick": float(
+                    self._consumer_voucher_purchase_stable_budget_onramp_usd_tick
+                ),
+                "consumer_voucher_purchase_stable_budget_onramp_usd_total": float(
+                    self._consumer_voucher_purchase_stable_budget_onramp_usd_total
+                ),
+                "third_party_voucher_purchase_stable_budget_onramp_usd_tick": float(
+                    self._third_party_voucher_purchase_stable_budget_onramp_usd_tick
+                ),
+                "third_party_voucher_purchase_stable_budget_onramp_usd_total": float(
+                    self._third_party_voucher_purchase_stable_budget_onramp_usd_total
                 ),
                 "producer_debt_matured_usd_tick": float(self._producer_debt_matured_usd_tick),
                 "producer_debt_matured_usd_total": float(self._producer_debt_matured_usd_total),
