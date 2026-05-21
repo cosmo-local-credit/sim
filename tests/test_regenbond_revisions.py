@@ -150,8 +150,10 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(obligation.lender_pool_id, lender_pool.pool_id)
         self.assertEqual(obligation.voucher_id, borrower_voucher)
         self.assertGreater(obligation.borrowed_usd, 0.0)
-        self.assertAlmostEqual(obligation.cash_service_due_usd, 0.0)
-        self.assertAlmostEqual(obligation.cash_service_remaining_usd, 0.0)
+        expected_cash_service = obligation.borrowed_usd * engine._producer_debt_contract_service_multiplier()
+        self.assertGreater(expected_cash_service, 0.0)
+        self.assertAlmostEqual(obligation.cash_service_due_usd, expected_cash_service)
+        self.assertAlmostEqual(obligation.cash_service_remaining_usd, expected_cash_service)
         self.assertAlmostEqual(engine._productive_credit_inflow_usd_tick, 0.0)
         self.assertEqual(engine._productive_credit_queue, {})
         self.assertAlmostEqual(engine._producer_debt_stable_recovered_usd_tick, 0.0)
@@ -203,6 +205,14 @@ class RegenBondRevisionTests(unittest.TestCase):
         lender_pool.policy.min_stable_reserve = 0.0
         engine._producer_deposit_value_by_voucher[borrower_voucher] = 100.0
         engine.tick = 1
+        engine._register_producer_debt_obligation(
+            issuer_pool.pool_id,
+            lender_pool.pool_id,
+            target_voucher,
+            100.0,
+            100.0,
+        )
+        target_obligation = engine._producer_debt_obligations[0]
         engine._noam_last_refresh_tick = -1
 
         attempted = engine._attempt_repayment(borrower_pool)
@@ -212,8 +222,19 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(engine._producer_primary_voucher_loan_executed_tick, 1)
         self.assertEqual(engine._producer_voucher_loan_executed_tick, 1)
         self.assertEqual(engine._producer_loan_executed_tick, 0)
-        self.assertEqual(len(engine._producer_debt_obligations), 1)
-        self.assertAlmostEqual(engine._producer_debt_obligations[0].cash_service_due_usd, 0.0)
+        self.assertEqual(len(engine._producer_debt_obligations), 2)
+        borrower_obligations = [
+            obligation for obligation in engine._producer_debt_obligations
+            if obligation.producer_pool_id == borrower_pool.pool_id
+        ]
+        self.assertEqual(len(borrower_obligations), 1)
+        obligation = borrower_obligations[0]
+        expected_cash_service = obligation.borrowed_usd * engine._producer_debt_contract_service_multiplier()
+        self.assertGreater(expected_cash_service, 0.0)
+        self.assertAlmostEqual(obligation.cash_service_due_usd, expected_cash_service)
+        self.assertAlmostEqual(obligation.cash_service_remaining_usd, expected_cash_service)
+        self.assertLess(target_obligation.remaining_voucher_units, 100.0)
+        self.assertAlmostEqual(target_obligation.cash_service_remaining_usd, 100.0)
         self.assertAlmostEqual(engine._productive_credit_inflow_usd_tick, 0.0)
         self.assertAlmostEqual(engine._producer_debt_stable_recovered_usd_tick, 0.0)
         self.assertAlmostEqual(engine._bond_service_reserved_usd_tick, 0.0)

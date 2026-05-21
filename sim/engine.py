@@ -7178,7 +7178,15 @@ class SimulationEngine:
                         receipt.asset_in,
                         float(receipt.amount_in),
                         float(receipt.amount_in) * self._asset_value(pool, receipt.asset_in),
-                        contract_cash_service=False,
+                    )
+                if self._is_producer_voucher(receipt.asset_out):
+                    self._reduce_producer_debt_obligations(
+                        pool.pool_id,
+                        receipt.asset_out,
+                        gross_out,
+                        "producer_voucher_swap_out",
+                        source_pool_id=source_pool.pool_id,
+                        source_role=source_pool.policy.role,
                     )
             elif (
                 pool.policy.role == "lender"
