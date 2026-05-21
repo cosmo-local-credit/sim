@@ -196,9 +196,17 @@ run_frontier() {
       "$LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE"
     )
   fi
+  shared_debt_margin="${PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-0.0}"
+  stable_debt_margin="${PRODUCER_STABLE_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-$shared_debt_margin}"
+  voucher_debt_margin="${PRODUCER_VOUCHER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-$shared_debt_margin}"
   echo "[batch] writing frontier artifacts to $output_dir"
   echo "[batch] bond service lockbox: mode=${BOND_SERVICE_LOCKBOX_MODE:-remaining_schedule} coverage=${BOND_SERVICE_LOCKBOX_COVERAGE_RATIO:-1.25}"
-  echo "[batch] producer debt contract service margin: ${PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-0.50}"
+  echo "[batch] producer shared debt contract service margin: $shared_debt_margin"
+  echo "[batch] producer stable debt contract service margin: $stable_debt_margin"
+  echo "[batch] producer voucher debt contract service margin: $voucher_debt_margin"
+  if [[ -n "${PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-}" ]]; then
+    echo "[batch] shared producer debt contract service margin override: $PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE"
+  fi
   echo "[batch] ablation flags: voucher_boost=${DISABLE_PRODUCTIVE_CREDIT_VOUCHER_ACTIVITY_BOOST:-0} stable_protection=${DISABLE_ORDINARY_STABLE_SPEND_PROTECTION:-0} loan_backfill=${DISABLE_PRODUCER_LOAN_FAILURE_BACKFILL:-0}"
   echo "[batch] voucher-loan fallback: enabled=${ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK:-0} activity_boost=${ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST:-0} max_targets=${PRODUCER_VOUCHER_LOAN_MAX_TARGET_CANDIDATES:-3}"
   echo "[batch] primary voucher borrowing: enabled=${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-0} attempt_share=${PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE:-0.50}"
@@ -216,7 +224,9 @@ run_frontier() {
     --route-success-floor "${ROUTE_SUCCESS_FLOOR:-0.85}" \
     --bond-service-lockbox-mode "${BOND_SERVICE_LOCKBOX_MODE:-remaining_schedule}" \
     --bond-service-lockbox-coverage-ratio "${BOND_SERVICE_LOCKBOX_COVERAGE_RATIO:-1.25}" \
-    --producer-debt-contract-service-margin-rate "${PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-0.50}" \
+    --producer-debt-contract-service-margin-rate "$shared_debt_margin" \
+    --producer-stable-debt-contract-service-margin-rate "$stable_debt_margin" \
+    --producer-voucher-debt-contract-service-margin-rate "$voucher_debt_margin" \
     "${frontier_extra_args[@]}" \
     --runs "${RUNS:-$default_runs}" \
     --ticks "${TICKS:-$default_ticks}" \

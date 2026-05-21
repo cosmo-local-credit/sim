@@ -63,6 +63,7 @@ class ProducerDebtObligation:
     original_voucher_units: float
     remaining_voucher_units: float
     borrowed_usd: float
+    debt_kind: str = "stable"
     cash_service_due_usd: float = 0.0
     cash_service_remaining_usd: float = 0.0
 
@@ -3069,13 +3070,35 @@ class SimulationEngine:
     def _producer_debt_contract_repayment_enabled(self) -> bool:
         return bool(getattr(self.cfg, "producer_debt_contract_repayment_enabled", False))
 
-    def _producer_debt_contract_service_multiplier(self) -> float:
+    def _producer_debt_contract_service_margin(self, debt_kind: str = "stable") -> float:
         if not self._producer_debt_contract_repayment_enabled():
-            return 1.0
+            return 0.0
+        kind = str(debt_kind or "stable").lower()
+        specific_margin = None
+        if kind == "voucher":
+            specific_margin = getattr(
+                self.cfg,
+                "producer_voucher_debt_contract_service_margin_rate",
+                None,
+            )
+        elif kind == "stable":
+            specific_margin = getattr(
+                self.cfg,
+                "producer_stable_debt_contract_service_margin_rate",
+                None,
+            )
+        if specific_margin is None:
+            specific_margin = getattr(self.cfg, "producer_debt_contract_service_margin_rate", 0.0)
         margin = max(
             0.0,
-            float(getattr(self.cfg, "producer_debt_contract_service_margin_rate", 0.0) or 0.0),
+            float(specific_margin or 0.0),
         )
+        return margin
+
+    def _producer_debt_contract_service_multiplier(self, debt_kind: str = "stable") -> float:
+        if not self._producer_debt_contract_repayment_enabled():
+            return 1.0
+        margin = self._producer_debt_contract_service_margin(debt_kind)
         return 1.0 + margin
 
     def _producer_debt_contract_revenue_rate(self) -> float:
@@ -3141,6 +3164,7 @@ class SimulationEngine:
         voucher_units: float,
         borrowed_usd: float,
         contract_cash_service: bool = True,
+        debt_kind: str = "stable",
     ) -> None:
         if not bool(self.cfg.producer_debt_maturity_enabled):
             return
@@ -3156,9 +3180,12 @@ class SimulationEngine:
         if spec is None or spec.issuer_id != producer_pool.steward_id:
             return
         maturity = max(1, int(self.cfg.producer_debt_maturity_ticks or 1))
+        normalized_debt_kind = "voucher" if str(debt_kind or "").lower() == "voucher" else "stable"
         cash_service_due = 0.0
         if contract_cash_service and self._producer_debt_contract_repayment_enabled():
-            cash_service_due = float(borrowed_usd) * self._producer_debt_contract_service_multiplier()
+            cash_service_due = float(borrowed_usd) * self._producer_debt_contract_service_multiplier(
+                normalized_debt_kind
+            )
         obligation = ProducerDebtObligation(
             obligation_id=self._next_producer_debt_obligation_id,
             producer_pool_id=producer_pool_id,
@@ -3169,6 +3196,7 @@ class SimulationEngine:
             original_voucher_units=float(voucher_units),
             remaining_voucher_units=float(voucher_units),
             borrowed_usd=float(borrowed_usd),
+            debt_kind=normalized_debt_kind,
             cash_service_due_usd=cash_service_due,
             cash_service_remaining_usd=cash_service_due,
         )
@@ -3189,6 +3217,7 @@ class SimulationEngine:
                 "producer_pool_id": producer_pool_id,
                 "voucher_units": float(voucher_units),
                 "due_tick": obligation.due_tick,
+                "debt_kind": normalized_debt_kind,
                 "cash_service_due_usd": cash_service_due,
                 "contract_cash_service": bool(contract_cash_service),
             },
@@ -3491,7 +3520,7 @@ class SimulationEngine:
 
     def _obligation_cash_service_multiplier(self, obligation: ProducerDebtObligation) -> float:
         if obligation.borrowed_usd <= 1e-9:
-            return self._producer_debt_contract_service_multiplier()
+            return self._producer_debt_contract_service_multiplier(obligation.debt_kind)
         if obligation.cash_service_due_usd <= 1e-9:
             return 1.0
         return max(1.0, obligation.cash_service_due_usd / obligation.borrowed_usd)
@@ -7162,6 +7191,7 @@ class SimulationEngine:
                     receipt.asset_in,
                     float(receipt.amount_in),
                     float(receipt.amount_in) * self._asset_value(pool, receipt.asset_in),
+                    debt_kind="stable",
                 )
             elif (
                 str(route_context or "") == "voucher_loan"
@@ -7178,6 +7208,7 @@ class SimulationEngine:
                         receipt.asset_in,
                         float(receipt.amount_in),
                         float(receipt.amount_in) * self._asset_value(pool, receipt.asset_in),
+                        debt_kind="voucher",
                     )
                 if self._is_producer_voucher(receipt.asset_out):
                     self._reduce_producer_debt_obligations(

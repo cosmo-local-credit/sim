@@ -260,10 +260,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--producer-debt-contract-service-margin-rate",
         type=float,
-        default=0.50,
+        default=None,
         help=(
-            "Bond-frontier borrower cash-service margin above principal. The "
-            "default 0.50 targets bond repayment plus issuer operating/risk headroom."
+            "Shared bond-frontier borrower cash-service margin above principal. "
+            "Defaults to 0.0 until calibrated; sweep with values such as 0, "
+            "0.02, 0.05, 0.10, and 0.15."
+        ),
+    )
+    parser.add_argument(
+        "--producer-stable-debt-contract-service-margin-rate",
+        type=float,
+        default=None,
+        help=(
+            "Optional sensitivity override for stable-loan debt. Defaults to "
+            "the shared producer debt contract service margin."
+        ),
+    )
+    parser.add_argument(
+        "--producer-voucher-debt-contract-service-margin-rate",
+        type=float,
+        default=None,
+        help=(
+            "Optional sensitivity override for voucher-to-voucher debt. Defaults "
+            "to the shared producer debt contract service margin."
         ),
     )
     parser.add_argument(
@@ -574,6 +593,8 @@ SHARD_CONFIG_KEYS = (
     "bond_service_lockbox_mode",
     "bond_service_lockbox_coverage_ratio",
     "producer_debt_contract_service_margin_rate",
+    "producer_stable_debt_contract_service_margin_rate",
+    "producer_voucher_debt_contract_service_margin_rate",
     "productive_credit_voucher_deposit_share",
     "productive_credit_voucher_deposit_cap_rate_per_month",
     "disable_productive_credit_voucher_activity_boost",
@@ -1496,15 +1517,36 @@ def scenario_config(
             0.0,
             float(getattr(args, "bond_service_lockbox_coverage_ratio", 1.25) or 0.0),
         )
-        contract_margin = max(
+        legacy_margin = getattr(args, "producer_debt_contract_service_margin_rate", None)
+        stable_margin_arg = getattr(args, "producer_stable_debt_contract_service_margin_rate", None)
+        voucher_margin_arg = getattr(args, "producer_voucher_debt_contract_service_margin_rate", None)
+        shared_contract_margin = max(
             0.0,
-            float(getattr(args, "producer_debt_contract_service_margin_rate", 0.50) or 0.0),
+            float(legacy_margin if legacy_margin is not None else 0.0),
+        )
+        stable_contract_margin = max(
+            0.0,
+            float(
+                stable_margin_arg
+                if stable_margin_arg is not None
+                else shared_contract_margin
+            ),
+        )
+        voucher_contract_margin = max(
+            0.0,
+            float(
+                voucher_margin_arg
+                if voucher_margin_arg is not None
+                else shared_contract_margin
+            ),
         )
         cfg.producer_debt_contract_repayment_enabled = True
-        cfg.producer_debt_contract_service_margin_rate = contract_margin
+        cfg.producer_debt_contract_service_margin_rate = shared_contract_margin
+        cfg.producer_stable_debt_contract_service_margin_rate = stable_contract_margin
+        cfg.producer_voucher_debt_contract_service_margin_rate = voucher_contract_margin
         cfg.producer_debt_contract_revenue_rate = max(
             cfg.productive_credit_return_rate,
-            1.0 + contract_margin,
+            1.0 + stable_contract_margin,
         )
         cfg.ordinary_stable_spend_protection_enabled = not bool(
             getattr(args, "disable_ordinary_stable_spend_protection", False)
@@ -1963,6 +2005,21 @@ def bond_metrics(latest: dict[str, object], cfg: ScenarioConfig, tick: int) -> d
         if scheduled_due > 1e-9
         else (999.0 if principal <= 1e-9 else 0.0)
     )
+    issuer_lockbox_surplus = max(0.0, returned + lockbox_balance - scheduled_due)
+    issuer_excess_recovered_stable = max(0.0, sweepable_pending_recovered_stable)
+    issuer_operating_surplus = max(0.0, available_service_cash - scheduled_due)
+    issuer_fee_waterfall_ops = safe_float(latest.get("waterfall_ops_alloc_usd_total"))
+    issuer_sustainability_resources = issuer_operating_surplus + issuer_fee_waterfall_ops
+    issuer_operating_surplus_headroom = (
+        issuer_operating_surplus / scheduled_due
+        if scheduled_due > 1e-9
+        else (999.0 if principal <= 1e-9 else 0.0)
+    )
+    issuer_sustainability_headroom = (
+        issuer_sustainability_resources / scheduled_due
+        if scheduled_due > 1e-9
+        else (999.0 if principal <= 1e-9 else 0.0)
+    )
     coupon_coverage = returned / coupon_due if coupon_due > 1e-9 else 1.0
     simple_yield = returned / principal if principal > 1e-9 else 0.0
     annualized_yield = simple_yield / elapsed_years if principal > 1e-9 else 0.0
@@ -1998,6 +2055,13 @@ def bond_metrics(latest: dict[str, object], cfg: ScenarioConfig, tick: int) -> d
         "issuer_service_cash_headroom_ratio": service_cash_headroom,
         "issuer_available_service_cash_usd": available_service_cash,
         "issuer_available_service_cash_headroom_ratio": available_service_cash_headroom,
+        "issuer_lockbox_surplus_usd": issuer_lockbox_surplus,
+        "issuer_excess_recovered_stable_usd": issuer_excess_recovered_stable,
+        "issuer_operating_surplus_usd": issuer_operating_surplus,
+        "issuer_operating_surplus_headroom_ratio": issuer_operating_surplus_headroom,
+        "issuer_fee_waterfall_ops_usd": issuer_fee_waterfall_ops,
+        "issuer_sustainability_resources_usd": issuer_sustainability_resources,
+        "issuer_sustainability_headroom_ratio": issuer_sustainability_headroom,
         "lender_recovered_stable_sweepable_pending_usd_total": sweepable_pending_recovered_stable,
         "bond_service_lockbox_target_usd": safe_float(latest.get("bond_service_lockbox_target_usd")),
         "bond_service_lockbox_coverage_ratio": safe_float(
@@ -2433,6 +2497,15 @@ def run_one(
                     f"_{control_prefix}_productive_credit_voucher_deposit_cap_rate_per_month",
                     0.0,
                 )
+            ),
+            "configured_producer_debt_contract_service_margin_rate": safe_float(
+                getattr(cfg, "producer_debt_contract_service_margin_rate", 0.0)
+            ),
+            "configured_producer_stable_debt_contract_service_margin_rate": safe_float(
+                getattr(cfg, "producer_stable_debt_contract_service_margin_rate", 0.0)
+            ),
+            "configured_producer_voucher_debt_contract_service_margin_rate": safe_float(
+                getattr(cfg, "producer_voucher_debt_contract_service_margin_rate", 0.0)
             ),
             "configured_producer_primary_voucher_borrowing_enabled": int(
                 bool(getattr(cfg, "producer_primary_voucher_borrowing_enabled", False))
@@ -3117,6 +3190,20 @@ def run_one(
             "fee_service_converted_voucher_reserved_usd_epoch": latest.get(
                 "fee_service_converted_voucher_reserved_usd_epoch", 0.0
             ),
+            "waterfall_ops_alloc_usd_epoch": latest.get("waterfall_ops_alloc_usd_epoch", 0.0),
+            "waterfall_ops_alloc_usd_total": cumulative_float["waterfall_ops_alloc_usd_epoch"],
+            "waterfall_insurance_alloc_usd_epoch": latest.get(
+                "waterfall_insurance_alloc_usd_epoch", 0.0
+            ),
+            "waterfall_insurance_alloc_usd_total": cumulative_float[
+                "waterfall_insurance_alloc_usd_epoch"
+            ],
+            "waterfall_mandates_alloc_usd_epoch": latest.get(
+                "waterfall_mandates_alloc_usd_epoch", 0.0
+            ),
+            "waterfall_mandates_alloc_usd_total": cumulative_float[
+                "waterfall_mandates_alloc_usd_epoch"
+            ],
             "quarterly_clearing_usd": latest.get("quarterly_clearing_usd_tick", 0.0),
             "quarterly_clearing_usd_total": cumulative_float["quarterly_clearing_usd_tick"],
             "quarterly_clearing_lender_liquidity_before_tick": latest.get(
@@ -4964,6 +5051,27 @@ def summarize_frontier_cell(
     scheduled_payment_values = [scheduled_payment_coverage(row) for row in rows]
     service_cash_headroom_values = [service_cash_headroom(row) for row in rows]
     available_service_cash_headroom_values = [available_service_cash_headroom(row) for row in rows]
+    issuer_lockbox_surplus_values = [
+        safe_float(row.get("issuer_lockbox_surplus_usd")) for row in rows
+    ]
+    issuer_excess_recovered_stable_values = [
+        safe_float(row.get("issuer_excess_recovered_stable_usd")) for row in rows
+    ]
+    issuer_operating_surplus_values = [
+        safe_float(row.get("issuer_operating_surplus_usd")) for row in rows
+    ]
+    issuer_operating_surplus_headroom_values = [
+        safe_float(row.get("issuer_operating_surplus_headroom_ratio")) for row in rows
+    ]
+    issuer_fee_waterfall_ops_values = [
+        safe_float(row.get("issuer_fee_waterfall_ops_usd")) for row in rows
+    ]
+    issuer_sustainability_resources_values = [
+        safe_float(row.get("issuer_sustainability_resources_usd")) for row in rows
+    ]
+    issuer_sustainability_headroom_values = [
+        safe_float(row.get("issuer_sustainability_headroom_ratio")) for row in rows
+    ]
     route_values = [safe_float(row.get("route_success_rate_cumulative")) for row in rows]
     fixed_route_values = [safe_float(row.get("route_fixed_success_rate_cumulative")) for row in rows]
     substitution_route_values = [
@@ -5454,6 +5562,14 @@ def summarize_frontier_cell(
         "coupon_target_annual": first.get("coupon_target_annual", 0.0),
         "bond_fee_service_share": first.get("bond_fee_service_share", 0.0),
         "principal_ratio": first.get("principal_ratio", 0.0),
+        "producer_stable_debt_contract_service_margin_rate": first.get(
+            "configured_producer_stable_debt_contract_service_margin_rate",
+            first.get("configured_producer_debt_contract_service_margin_rate", 0.0),
+        ),
+        "producer_voucher_debt_contract_service_margin_rate": first.get(
+            "configured_producer_voucher_debt_contract_service_margin_rate",
+            first.get("configured_producer_debt_contract_service_margin_rate", 0.0),
+        ),
         "principal_usd_p50": percentile(principal_values, 0.50),
         "runs": len(rows),
         "service_coverage_p05": percentile(service_values, 0.05),
@@ -5469,6 +5585,21 @@ def summarize_frontier_cell(
         ),
         "available_service_cash_headroom_p50": percentile(
             available_service_cash_headroom_values, 0.50
+        ),
+        "issuer_lockbox_surplus_usd_p50": percentile(issuer_lockbox_surplus_values, 0.50),
+        "issuer_excess_recovered_stable_usd_p50": percentile(
+            issuer_excess_recovered_stable_values, 0.50
+        ),
+        "issuer_operating_surplus_usd_p50": percentile(issuer_operating_surplus_values, 0.50),
+        "issuer_operating_surplus_headroom_ratio_p50": percentile(
+            issuer_operating_surplus_headroom_values, 0.50
+        ),
+        "issuer_fee_waterfall_ops_usd_p50": percentile(issuer_fee_waterfall_ops_values, 0.50),
+        "issuer_sustainability_resources_usd_p50": percentile(
+            issuer_sustainability_resources_values, 0.50
+        ),
+        "issuer_sustainability_headroom_ratio_p50": percentile(
+            issuer_sustainability_headroom_values, 0.50
         ),
         "issuer_scheduled_debt_service_due_p50": percentile(scheduled_due_values, 0.50),
         "issuer_actual_bondholder_payment_p50": percentile(actual_payment_values, 0.50),
@@ -6085,6 +6216,12 @@ def issuer_cashflow_summary_rows(safety_rows: list[dict[str, object]]) -> list[d
                 "coupon_target_annual": row.get("coupon_target_annual", 0.0),
                 "bond_fee_service_share": row.get("bond_fee_service_share", 0.0),
                 "principal_ratio": row.get("principal_ratio", 0.0),
+                "producer_stable_debt_contract_service_margin_rate": row.get(
+                    "producer_stable_debt_contract_service_margin_rate", 0.0
+                ),
+                "producer_voucher_debt_contract_service_margin_rate": row.get(
+                    "producer_voucher_debt_contract_service_margin_rate", 0.0
+                ),
                 "principal_usd_p50": row.get("principal_usd_p50", 0.0),
                 "service_coverage_p05": row.get("service_coverage_p05", 0.0),
                 "service_coverage_p50": row.get("service_coverage_p50", 0.0),
@@ -6103,6 +6240,21 @@ def issuer_cashflow_summary_rows(safety_rows: list[dict[str, object]]) -> list[d
                 ),
                 "available_service_cash_headroom_p50": row.get(
                     "available_service_cash_headroom_p50", row.get("service_cash_headroom_p50", 0.0)
+                ),
+                "issuer_lockbox_surplus_usd_p50": row.get("issuer_lockbox_surplus_usd_p50", 0.0),
+                "issuer_excess_recovered_stable_usd_p50": row.get(
+                    "issuer_excess_recovered_stable_usd_p50", 0.0
+                ),
+                "issuer_operating_surplus_usd_p50": row.get("issuer_operating_surplus_usd_p50", 0.0),
+                "issuer_operating_surplus_headroom_ratio_p50": row.get(
+                    "issuer_operating_surplus_headroom_ratio_p50", 0.0
+                ),
+                "issuer_fee_waterfall_ops_usd_p50": row.get("issuer_fee_waterfall_ops_usd_p50", 0.0),
+                "issuer_sustainability_resources_usd_p50": row.get(
+                    "issuer_sustainability_resources_usd_p50", 0.0
+                ),
+                "issuer_sustainability_headroom_ratio_p50": row.get(
+                    "issuer_sustainability_headroom_ratio_p50", 0.0
                 ),
                 "bond_service_lockbox_target_usd_p50": row.get("bond_service_lockbox_target_usd_p50", 0.0),
                 "bond_service_lockbox_coverage_ratio_p50": row.get(
@@ -6366,6 +6518,8 @@ def calibration_activity_audit_rows(
         "configured_productive_credit_stable_retained_share": 0.0,
         "configured_productive_credit_voucher_deposit_share": 0.0,
         "configured_productive_credit_voucher_deposit_cap_rate_per_month": 0.0,
+        "configured_producer_stable_debt_contract_service_margin_rate": 0.0,
+        "configured_producer_voucher_debt_contract_service_margin_rate": 0.0,
         "realized_productive_credit_inflow_usd_p50": 0.0,
         "realized_productive_credit_stable_retained_usd_p50": 0.0,
         "realized_productive_credit_voucher_deposit_usd_p50": 0.0,
@@ -6382,6 +6536,14 @@ def calibration_activity_audit_rows(
     }
 
     audit_rows: list[dict[str, object]] = []
+    legacy_margin = getattr(args, "producer_debt_contract_service_margin_rate", None)
+    shared_margin = legacy_margin if legacy_margin is not None else 0.0
+    configured_stable_margin = getattr(args, "producer_stable_debt_contract_service_margin_rate", None)
+    configured_voucher_margin = getattr(args, "producer_voucher_debt_contract_service_margin_rate", None)
+    if configured_stable_margin is None:
+        configured_stable_margin = shared_margin
+    if configured_voucher_margin is None:
+        configured_voucher_margin = shared_margin
     for tier in TIER_ORDER:
         dep = calibration.producer_deposit_by_tier.get(tier, {})
         prod = calibration.productive_credit_by_tier.get(tier, {})
@@ -6415,6 +6577,12 @@ def calibration_activity_audit_rows(
                 "configured_productive_credit_voucher_deposit_share": voucher_share,
                 "configured_productive_credit_voucher_deposit_cap_rate_per_month": safe_float(
                     prod.get("loan_induced_voucher_deposit_cap_rate_per_month")
+                ),
+                "configured_producer_stable_debt_contract_service_margin_rate": safe_float(
+                    configured_stable_margin
+                ),
+                "configured_producer_voucher_debt_contract_service_margin_rate": safe_float(
+                    configured_voucher_margin
                 ),
             }
         )
@@ -6482,6 +6650,12 @@ def calibration_activity_audit_rows(
             "configured_productive_credit_voucher_deposit_share": configured_voucher_share,
             "configured_productive_credit_voucher_deposit_cap_rate_per_month": safe_float(
                 getattr(args, f"_{prefix}_productive_credit_voucher_deposit_cap_rate_per_month", 0.0)
+            ),
+            "configured_producer_stable_debt_contract_service_margin_rate": safe_float(
+                configured_stable_margin
+            ),
+            "configured_producer_voucher_debt_contract_service_margin_rate": safe_float(
+                configured_voucher_margin
             ),
             "realized_productive_credit_inflow_usd_p50": percentile(productive_inflow_values, 0.50),
             "realized_productive_credit_stable_retained_usd_p50": percentile(

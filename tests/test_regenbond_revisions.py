@@ -150,7 +150,10 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(obligation.lender_pool_id, lender_pool.pool_id)
         self.assertEqual(obligation.voucher_id, borrower_voucher)
         self.assertGreater(obligation.borrowed_usd, 0.0)
-        expected_cash_service = obligation.borrowed_usd * engine._producer_debt_contract_service_multiplier()
+        self.assertEqual(obligation.debt_kind, "voucher")
+        expected_cash_service = (
+            obligation.borrowed_usd * engine._producer_debt_contract_service_multiplier("voucher")
+        )
         self.assertGreater(expected_cash_service, 0.0)
         self.assertAlmostEqual(obligation.cash_service_due_usd, expected_cash_service)
         self.assertAlmostEqual(obligation.cash_service_remaining_usd, expected_cash_service)
@@ -229,7 +232,10 @@ class RegenBondRevisionTests(unittest.TestCase):
         ]
         self.assertEqual(len(borrower_obligations), 1)
         obligation = borrower_obligations[0]
-        expected_cash_service = obligation.borrowed_usd * engine._producer_debt_contract_service_multiplier()
+        self.assertEqual(obligation.debt_kind, "voucher")
+        expected_cash_service = (
+            obligation.borrowed_usd * engine._producer_debt_contract_service_multiplier("voucher")
+        )
         self.assertGreater(expected_cash_service, 0.0)
         self.assertAlmostEqual(obligation.cash_service_due_usd, expected_cash_service)
         self.assertAlmostEqual(obligation.cash_service_remaining_usd, expected_cash_service)
@@ -581,8 +587,10 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(cfg.bond_service_lockbox_mode, "remaining_schedule")
         self.assertAlmostEqual(cfg.bond_service_lockbox_coverage_ratio, 1.25)
         self.assertTrue(cfg.producer_debt_contract_repayment_enabled)
-        self.assertAlmostEqual(cfg.producer_debt_contract_service_margin_rate, 0.50)
-        self.assertAlmostEqual(cfg.producer_debt_contract_revenue_rate, 1.50)
+        self.assertAlmostEqual(cfg.producer_debt_contract_service_margin_rate, 0.0)
+        self.assertAlmostEqual(cfg.producer_stable_debt_contract_service_margin_rate, 0.0)
+        self.assertAlmostEqual(cfg.producer_voucher_debt_contract_service_margin_rate, 0.0)
+        self.assertAlmostEqual(cfg.producer_debt_contract_revenue_rate, 1.0)
         self.assertTrue(cfg.productive_credit_voucher_feedback_enabled)
         self.assertAlmostEqual(cfg.productive_credit_voucher_deposit_share, 0.384157)
         self.assertAlmostEqual(cfg.productive_credit_voucher_deposit_cap_rate_per_month, 0.143206)
@@ -1410,6 +1418,77 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(engine._producer_debt_stable_recovered_usd_total, 50.0)
         self.assertAlmostEqual(engine._producer_debt_defaulted_usd_total, 0.0)
         self.assertEqual(len(engine._producer_debt_obligations), 0)
+
+    def test_producer_debt_contract_uses_channel_specific_margins(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+                producer_stable_debt_contract_service_margin_rate=0.05,
+                producer_voucher_debt_contract_service_margin_rate=0.02,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        lender_pool.values.set_value(voucher_id, 1.0)
+
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+            debt_kind="stable",
+        )
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+            debt_kind="voucher",
+        )
+
+        self.assertAlmostEqual(engine._producer_debt_obligations[0].cash_service_due_usd, 105.0)
+        self.assertEqual(engine._producer_debt_obligations[0].debt_kind, "stable")
+        self.assertAlmostEqual(engine._producer_debt_obligations[1].cash_service_due_usd, 102.0)
+        self.assertEqual(engine._producer_debt_obligations[1].debt_kind, "voucher")
+
+    def test_producer_debt_contract_shared_margin_applies_to_all_channels(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+                producer_debt_contract_service_margin_rate=0.03,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        lender_pool.values.set_value(voucher_id, 1.0)
+
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+            debt_kind="stable",
+        )
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+            debt_kind="voucher",
+        )
+
+        self.assertAlmostEqual(engine._producer_debt_obligations[0].cash_service_due_usd, 103.0)
+        self.assertAlmostEqual(engine._producer_debt_obligations[1].cash_service_due_usd, 103.0)
 
     def test_producer_debt_maturity_applies_default_rate(self):
         engine = SimulationEngine(

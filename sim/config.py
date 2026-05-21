@@ -283,6 +283,8 @@ class ScenarioConfig:
     productive_credit_voucher_source_size_multiplier: float = 1.0
     producer_debt_contract_repayment_enabled: bool = False
     producer_debt_contract_service_margin_rate: float = 0.0
+    producer_stable_debt_contract_service_margin_rate: float | None = None
+    producer_voucher_debt_contract_service_margin_rate: float | None = None
     producer_debt_contract_revenue_rate: float = 0.0
     producer_debt_maturity_enabled: bool = False
     producer_debt_maturity_ticks: int = 13

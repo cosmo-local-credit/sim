@@ -130,10 +130,13 @@ comparable to a 260-week inventory or full-horizon flow share.
 Frontier runs also enable a producer debt contract cash-service layer. Producer
 borrowing still starts as own-voucher-in/stable-out through an eligible lender
 pool, but the borrower now owes contract cash service in addition to the
-tradable voucher exposure. The current frontier default sets the contract
-service margin to `50%` over borrowed principal. That margin is a scenario
-assumption for bond service, issuer operations, and risk headroom; it is not a
-claim about a deployed interest rate.
+tradable voucher exposure. The current frontier default is principal-only
+contract cash service (`0%` service margin) until an empirical debt-service
+margin is calibrated. Stable and voucher-to-voucher obligations use the same
+shared margin by default; channel-specific margin flags are available only for
+explicit sensitivity/ablation runs. Issuer sustainability is reported
+separately through fee service, excess recovered stable, lockbox surplus, and
+available operating-surplus diagnostics.
 
 The Streamlit app includes a **RegenBond MC** tab that runs this same script as
 a subprocess and displays the exact CLI-equivalent command. For identical

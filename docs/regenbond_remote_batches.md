@@ -189,12 +189,15 @@ stable, divided by scheduled due. Excess available headroom above scheduled
 service is candidate issuer operating and risk-capital headroom, not proven
 profit until explicit issuer costs are modeled.
 
-Current frontier defaults also enable producer debt contract cash service with
-`PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE=0.50`. Producer borrowing still
-enters lender pools as own-voucher-in/stable-out, but the borrower owes cash
-service of principal plus this margin. The margin is the current scenario
-assumption for bond-service sufficiency and issuer operating/risk headroom; it
-can be overridden for sensitivity runs.
+Current frontier defaults also enable producer debt contract cash service.
+Until an empirical debt-service margin is calibrated, the default shared margin
+is `PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE=0.0`, meaning borrowers owe
+principal cash service but no additional modeled interest/service charge.
+Stable and voucher-to-voucher obligations use the same shared margin by
+default. Channel-specific overrides remain available only for explicit
+sensitivity/ablation runs. Issuer sustainability is measured separately from
+borrower service margins through fee service, excess recovered stable, lockbox
+surplus, and operating-surplus diagnostics.
 
 ## Calibration Bundle
 
@@ -598,12 +601,15 @@ hidden 260-week repayment failures before spending time on `frontier-pilot`.
 ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
 ```
 
-Sensitivity run with an explicit producer debt contract service margin:
+Sensitivity run with an explicit shared producer debt contract service margin:
 
 ```bash
-PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE=0.50 \
+PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE=0.05 \
   ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
 ```
+
+Channel-specific overrides can still be used for ablation runs, but they should
+not be interpreted as current default assumptions without empirical support.
 
 Control run with the old next-payment reserve:
 
