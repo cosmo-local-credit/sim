@@ -285,6 +285,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--disable-productive-credit-voucher-activity-boost",
+        action="store_true",
+        help="Frontier ablation: keep voucher deposits but disable post-inflow voucher activity boost.",
+    )
+    parser.add_argument(
+        "--disable-ordinary-stable-spend-protection",
+        action="store_true",
+        help="Frontier ablation: allow ordinary producer/consumer stable-source swaps to spend below reserve buffers.",
+    )
+    parser.add_argument(
+        "--disable-producer-loan-failure-backfill",
+        action="store_true",
+        help="Frontier ablation: do not backfill failed loan route attempts with ordinary community swaps.",
+    )
+    parser.add_argument(
         "--frontier-mode",
         default="adaptive",
         choices=("adaptive", "grid"),
@@ -502,6 +517,9 @@ SHARD_CONFIG_KEYS = (
     "producer_debt_contract_service_margin_rate",
     "productive_credit_voucher_deposit_share",
     "productive_credit_voucher_deposit_cap_rate_per_month",
+    "disable_productive_credit_voucher_activity_boost",
+    "disable_ordinary_stable_spend_protection",
+    "disable_producer_loan_failure_backfill",
     "frontier_mode",
     "frontier_refinement_rounds",
     "route_success_floor",
@@ -1382,7 +1400,9 @@ def scenario_config(
                 else getattr(args, "_frontier_productive_credit_voucher_deposit_cap_rate_per_month", 0.0)
             ),
         )
-        cfg.productive_credit_voucher_activity_boost_enabled = True
+        cfg.productive_credit_voucher_activity_boost_enabled = not bool(
+            getattr(args, "disable_productive_credit_voucher_activity_boost", False)
+        )
         cfg.productive_credit_voucher_activity_boost_window_ticks = max(
             1, int(getattr(args, "issuer_payment_stride", 13))
         )
@@ -1418,9 +1438,13 @@ def scenario_config(
             cfg.productive_credit_return_rate,
             1.0 + contract_margin,
         )
-        cfg.ordinary_stable_spend_protection_enabled = True
+        cfg.ordinary_stable_spend_protection_enabled = not bool(
+            getattr(args, "disable_ordinary_stable_spend_protection", False)
+        )
         cfg.ordinary_stable_spend_buffer_voucher_share = 0.05
-        cfg.producer_loan_failure_backfill_enabled = True
+        cfg.producer_loan_failure_backfill_enabled = not bool(
+            getattr(args, "disable_producer_loan_failure_backfill", False)
+        )
         cfg.producer_loan_failure_backfill_max_attempts = 1
         cfg.liquidity_mandate_mode = "community_deficit_then_lender"
         cfg.route_substitution_enabled = True
@@ -2056,6 +2080,22 @@ def run_one(
             "swap_count_usd_to_vchr_tick",
             "swap_count_vchr_to_usd_tick",
             "swap_count_vchr_to_vchr_tick",
+            "ordinary_swap_count_tick",
+            "ordinary_swap_volume_usd_tick",
+            "ordinary_stable_source_swap_count_tick",
+            "ordinary_stable_source_swap_volume_usd_tick",
+            "ordinary_voucher_source_swap_count_tick",
+            "ordinary_voucher_source_swap_volume_usd_tick",
+            "loan_route_swap_count_tick",
+            "loan_route_swap_volume_usd_tick",
+            "repayment_route_swap_count_tick",
+            "repayment_route_swap_volume_usd_tick",
+            "loan_backfill_swap_count_tick",
+            "loan_backfill_swap_volume_usd_tick",
+            "productive_boosted_voucher_swap_count_tick",
+            "productive_boosted_voucher_swap_volume_usd_tick",
+            "ordinary_stable_spend_protected_skip_count_tick",
+            "ordinary_stable_spend_protected_skip_value_usd_tick",
             "repayment_volume_usd",
             "loan_issuance_volume_usd",
             "producer_debt_originated_usd_tick",
@@ -2204,6 +2244,10 @@ def run_one(
         cumulative_positive_flow_stable_share = (
             cumulative_stable_flow_positive / max(1e-9, cumulative_positive_flow_total)
         )
+        control_prefix = "frontier" if scenario == "bond_issuer_frontier" else "validation"
+        configured_voucher_deposit_share = safe_float(
+            getattr(args, f"_{control_prefix}_productive_credit_voucher_deposit_share", 0.0)
+        )
 
         common = {
             "scenario": scenario,
@@ -2218,6 +2262,23 @@ def run_one(
             "certified_backing_capacity_usd": getattr(args, "_current_certified_capacity_usd", 0.0),
             "kes_per_usd": getattr(args, "_calibration_kes_per_usd", 0.0),
             "voucher_unit_value_usd": getattr(args, "_voucher_unit_value_usd", 1.0),
+            "configured_producer_stable_deposit_rate_per_month": safe_float(
+                getattr(args, f"_{control_prefix}_producer_stable_deposit_rate_per_month", 0.0)
+            ),
+            "configured_producer_voucher_deposit_rate_per_month": safe_float(
+                getattr(args, f"_{control_prefix}_producer_voucher_deposit_rate_per_month", 0.0)
+            ),
+            "configured_productive_credit_stable_retained_share": max(
+                0.0, 1.0 - configured_voucher_deposit_share
+            ),
+            "configured_productive_credit_voucher_deposit_share": configured_voucher_deposit_share,
+            "configured_productive_credit_voucher_deposit_cap_rate_per_month": safe_float(
+                getattr(
+                    args,
+                    f"_{control_prefix}_productive_credit_voucher_deposit_cap_rate_per_month",
+                    0.0,
+                )
+            ),
             "stable_symbol": unit_diagnostics.get("stable_symbol", ""),
             "stable_unit_value_usd": unit_diagnostics.get("stable_unit_value_usd", 1.0),
             "sample_producer_voucher_id": unit_diagnostics.get("sample_producer_voucher_id", ""),
@@ -2303,6 +2364,78 @@ def run_one(
             "swap_count_vchr_to_usd_total": cumulative_float["swap_count_vchr_to_usd_tick"],
             "swap_count_vchr_to_vchr_tick": latest.get("swap_count_vchr_to_vchr_tick", 0),
             "swap_count_vchr_to_vchr_total": cumulative_float["swap_count_vchr_to_vchr_tick"],
+            "ordinary_swap_count_tick": latest.get("ordinary_swap_count_tick", 0),
+            "ordinary_swap_count_total": cumulative_float["ordinary_swap_count_tick"],
+            "ordinary_swap_volume_usd_tick": latest.get("ordinary_swap_volume_usd_tick", 0.0),
+            "ordinary_swap_volume_usd_total": cumulative_float["ordinary_swap_volume_usd_tick"],
+            "ordinary_stable_source_swap_count_tick": latest.get(
+                "ordinary_stable_source_swap_count_tick", 0
+            ),
+            "ordinary_stable_source_swap_count_total": cumulative_float[
+                "ordinary_stable_source_swap_count_tick"
+            ],
+            "ordinary_stable_source_swap_volume_usd_tick": latest.get(
+                "ordinary_stable_source_swap_volume_usd_tick", 0.0
+            ),
+            "ordinary_stable_source_swap_volume_usd_total": cumulative_float[
+                "ordinary_stable_source_swap_volume_usd_tick"
+            ],
+            "ordinary_voucher_source_swap_count_tick": latest.get(
+                "ordinary_voucher_source_swap_count_tick", 0
+            ),
+            "ordinary_voucher_source_swap_count_total": cumulative_float[
+                "ordinary_voucher_source_swap_count_tick"
+            ],
+            "ordinary_voucher_source_swap_volume_usd_tick": latest.get(
+                "ordinary_voucher_source_swap_volume_usd_tick", 0.0
+            ),
+            "ordinary_voucher_source_swap_volume_usd_total": cumulative_float[
+                "ordinary_voucher_source_swap_volume_usd_tick"
+            ],
+            "loan_route_swap_count_tick": latest.get("loan_route_swap_count_tick", 0),
+            "loan_route_swap_count_total": cumulative_float["loan_route_swap_count_tick"],
+            "loan_route_swap_volume_usd_tick": latest.get("loan_route_swap_volume_usd_tick", 0.0),
+            "loan_route_swap_volume_usd_total": cumulative_float["loan_route_swap_volume_usd_tick"],
+            "repayment_route_swap_count_tick": latest.get("repayment_route_swap_count_tick", 0),
+            "repayment_route_swap_count_total": cumulative_float["repayment_route_swap_count_tick"],
+            "repayment_route_swap_volume_usd_tick": latest.get(
+                "repayment_route_swap_volume_usd_tick", 0.0
+            ),
+            "repayment_route_swap_volume_usd_total": cumulative_float[
+                "repayment_route_swap_volume_usd_tick"
+            ],
+            "loan_backfill_swap_count_tick": latest.get("loan_backfill_swap_count_tick", 0),
+            "loan_backfill_swap_count_total": cumulative_float["loan_backfill_swap_count_tick"],
+            "loan_backfill_swap_volume_usd_tick": latest.get(
+                "loan_backfill_swap_volume_usd_tick", 0.0
+            ),
+            "loan_backfill_swap_volume_usd_total": cumulative_float[
+                "loan_backfill_swap_volume_usd_tick"
+            ],
+            "productive_boosted_voucher_swap_count_tick": latest.get(
+                "productive_boosted_voucher_swap_count_tick", 0
+            ),
+            "productive_boosted_voucher_swap_count_total": cumulative_float[
+                "productive_boosted_voucher_swap_count_tick"
+            ],
+            "productive_boosted_voucher_swap_volume_usd_tick": latest.get(
+                "productive_boosted_voucher_swap_volume_usd_tick", 0.0
+            ),
+            "productive_boosted_voucher_swap_volume_usd_total": cumulative_float[
+                "productive_boosted_voucher_swap_volume_usd_tick"
+            ],
+            "ordinary_stable_spend_protected_skip_count_tick": latest.get(
+                "ordinary_stable_spend_protected_skip_count_tick", 0
+            ),
+            "ordinary_stable_spend_protected_skip_count_total": cumulative_float[
+                "ordinary_stable_spend_protected_skip_count_tick"
+            ],
+            "ordinary_stable_spend_protected_skip_value_usd_tick": latest.get(
+                "ordinary_stable_spend_protected_skip_value_usd_tick", 0.0
+            ),
+            "ordinary_stable_spend_protected_skip_value_usd_total": cumulative_float[
+                "ordinary_stable_spend_protected_skip_value_usd_tick"
+            ],
             "route_success_rate_tick": route_success_rate(latest),
             "route_success_rate_cumulative": route_success_total,
             "route_found_total": cumulative["route_found"],
@@ -4270,6 +4403,18 @@ def write_engine_validation_aggregate(
     write_csv(output_dir / f"engine_validation_bond_timeseries{suffix}", list(bond_rows[0].keys()) if bond_rows else [], bond_rows)
     write_csv(output_dir / f"engine_validation_network_timeseries{suffix}", list(network_rows[0].keys()) if network_rows else [], network_rows)
     write_csv(output_dir / f"engine_validation_failure_metrics{suffix}", list(failures[0].keys()) if failures else [], failures)
+    audit_rows = calibration_activity_audit_rows(
+        args,
+        calibration,
+        summaries,
+        scenario="sarafu_engine_validation",
+        prefix="validation",
+    )
+    write_csv(
+        output_dir / f"calibration_activity_audit{suffix}",
+        list(audit_rows[0].keys()) if audit_rows else [],
+        audit_rows,
+    )
     if not partial:
         write_engine_validation_table(output_dir, rows, status)
         if not args.no_png:
@@ -4453,6 +4598,48 @@ def summarize_frontier_cell(
     v2stable_count_values = [safe_float(row.get("swap_count_vchr_to_usd_total")) for row in rows]
     stable2v_count_values = [safe_float(row.get("swap_count_usd_to_vchr_total")) for row in rows]
     transaction_values = [safe_float(row.get("transactions_total")) for row in rows]
+    ordinary_swap_count_values = [safe_float(row.get("ordinary_swap_count_total")) for row in rows]
+    ordinary_swap_volume_values = [safe_float(row.get("ordinary_swap_volume_usd_total")) for row in rows]
+    ordinary_stable_source_count_values = [
+        safe_float(row.get("ordinary_stable_source_swap_count_total")) for row in rows
+    ]
+    ordinary_stable_source_volume_values = [
+        safe_float(row.get("ordinary_stable_source_swap_volume_usd_total")) for row in rows
+    ]
+    ordinary_voucher_source_count_values = [
+        safe_float(row.get("ordinary_voucher_source_swap_count_total")) for row in rows
+    ]
+    ordinary_voucher_source_volume_values = [
+        safe_float(row.get("ordinary_voucher_source_swap_volume_usd_total")) for row in rows
+    ]
+    loan_route_swap_count_values = [safe_float(row.get("loan_route_swap_count_total")) for row in rows]
+    loan_route_swap_volume_values = [
+        safe_float(row.get("loan_route_swap_volume_usd_total")) for row in rows
+    ]
+    repayment_route_swap_count_values = [
+        safe_float(row.get("repayment_route_swap_count_total")) for row in rows
+    ]
+    repayment_route_swap_volume_values = [
+        safe_float(row.get("repayment_route_swap_volume_usd_total")) for row in rows
+    ]
+    loan_backfill_swap_count_values = [
+        safe_float(row.get("loan_backfill_swap_count_total")) for row in rows
+    ]
+    loan_backfill_swap_volume_values = [
+        safe_float(row.get("loan_backfill_swap_volume_usd_total")) for row in rows
+    ]
+    productive_boosted_voucher_swap_count_values = [
+        safe_float(row.get("productive_boosted_voucher_swap_count_total")) for row in rows
+    ]
+    productive_boosted_voucher_swap_volume_values = [
+        safe_float(row.get("productive_boosted_voucher_swap_volume_usd_total")) for row in rows
+    ]
+    stable_spend_protection_skip_count_values = [
+        safe_float(row.get("ordinary_stable_spend_protected_skip_count_total")) for row in rows
+    ]
+    stable_spend_protection_skip_value_values = [
+        safe_float(row.get("ordinary_stable_spend_protected_skip_value_usd_total")) for row in rows
+    ]
     stable_share_values = [safe_float(row.get("stable_value_share_in_active_pools")) for row in rows]
     voucher_share_values = [safe_float(row.get("voucher_value_share_in_active_pools")) for row in rows]
     stable_to_voucher_ratio_values = [
@@ -4488,6 +4675,12 @@ def summarize_frontier_cell(
     producer_credit_capacity_values = [
         safe_float(row.get("producer_deposit_credit_capacity_usd")) for row in rows
     ]
+    producer_deposit_stable_values = [
+        safe_float(row.get("producer_deposit_stable_usd_total")) for row in rows
+    ]
+    producer_deposit_voucher_values = [
+        safe_float(row.get("producer_deposit_voucher_usd_total")) for row in rows
+    ]
     productive_credit_inflow_values = [
         safe_float(row.get("productive_credit_inflow_usd_total")) for row in rows
     ]
@@ -4506,6 +4699,17 @@ def summarize_frontier_cell(
             productive_credit_voucher_deposit_values,
             productive_credit_inflow_values,
         )
+    ]
+    producer_organic_voucher_deposit_values = [
+        max(0.0, total - productive)
+        for total, productive in zip(
+            producer_deposit_voucher_values,
+            productive_credit_voucher_deposit_values,
+        )
+    ]
+    producer_deposit_voucher_share_values = [
+        voucher / max(1e-9, stable + voucher)
+        for stable, voucher in zip(producer_deposit_stable_values, producer_deposit_voucher_values)
     ]
     loan_issuance_volume_values = [
         safe_float(row.get("loan_issuance_volume_usd_total")) for row in rows
@@ -4652,6 +4856,13 @@ def summarize_frontier_cell(
     baseline_productive_credit_voucher_deposit_share_p50 = baseline.get(
         "productive_credit_voucher_deposit_share_p50", 0.0
     )
+    baseline_ordinary_swap_volume_p50 = baseline.get("ordinary_swap_volume_usd_total_p50", 0.0)
+    baseline_ordinary_voucher_source_volume_p50 = baseline.get(
+        "ordinary_voucher_source_swap_volume_usd_total_p50", 0.0
+    )
+    baseline_ordinary_voucher_source_count_p50 = baseline.get(
+        "ordinary_voucher_source_swap_count_total_p50", 0.0
+    )
     stress_delta_p95 = max(0.0, stress_p95 - baseline_stress_p95)
     consumer_stress_delta_p95 = max(0.0, consumer_stress_p95 - baseline_consumer_stress_p95)
     consumer_stress_delta_p50 = max(0.0, consumer_stress_p50 - baseline_consumer_stress_p50)
@@ -4796,6 +5007,54 @@ def summarize_frontier_cell(
         "realized_edge_concentration_p95": percentile(concentration_values, 0.95),
         "swap_volume_usd_total_p50": swap_p50,
         "swap_volume_ratio_vs_baseline": swap_volume_ratio_vs_baseline,
+        "ordinary_swap_count_total_p50": percentile(ordinary_swap_count_values, 0.50),
+        "ordinary_swap_volume_usd_total_p50": percentile(ordinary_swap_volume_values, 0.50),
+        "ordinary_swap_volume_ratio_vs_baseline": (
+            percentile(ordinary_swap_volume_values, 0.50)
+            / max(1e-9, baseline_ordinary_swap_volume_p50)
+        ),
+        "ordinary_stable_source_swap_count_total_p50": percentile(
+            ordinary_stable_source_count_values, 0.50
+        ),
+        "ordinary_stable_source_swap_volume_usd_total_p50": percentile(
+            ordinary_stable_source_volume_values, 0.50
+        ),
+        "ordinary_voucher_source_swap_count_total_p50": percentile(
+            ordinary_voucher_source_count_values, 0.50
+        ),
+        "ordinary_voucher_source_swap_volume_usd_total_p50": percentile(
+            ordinary_voucher_source_volume_values, 0.50
+        ),
+        "ordinary_voucher_source_swap_count_ratio_vs_baseline": (
+            percentile(ordinary_voucher_source_count_values, 0.50)
+            / max(1e-9, baseline_ordinary_voucher_source_count_p50)
+        ),
+        "ordinary_voucher_source_swap_volume_ratio_vs_baseline": (
+            percentile(ordinary_voucher_source_volume_values, 0.50)
+            / max(1e-9, baseline_ordinary_voucher_source_volume_p50)
+        ),
+        "loan_route_swap_count_total_p50": percentile(loan_route_swap_count_values, 0.50),
+        "loan_route_swap_volume_usd_total_p50": percentile(loan_route_swap_volume_values, 0.50),
+        "repayment_route_swap_count_total_p50": percentile(repayment_route_swap_count_values, 0.50),
+        "repayment_route_swap_volume_usd_total_p50": percentile(
+            repayment_route_swap_volume_values, 0.50
+        ),
+        "loan_backfill_swap_count_total_p50": percentile(loan_backfill_swap_count_values, 0.50),
+        "loan_backfill_swap_volume_usd_total_p50": percentile(
+            loan_backfill_swap_volume_values, 0.50
+        ),
+        "productive_boosted_voucher_swap_count_total_p50": percentile(
+            productive_boosted_voucher_swap_count_values, 0.50
+        ),
+        "productive_boosted_voucher_swap_volume_usd_total_p50": percentile(
+            productive_boosted_voucher_swap_volume_values, 0.50
+        ),
+        "ordinary_stable_spend_protected_skip_count_total_p50": percentile(
+            stable_spend_protection_skip_count_values, 0.50
+        ),
+        "ordinary_stable_spend_protected_skip_value_usd_total_p50": percentile(
+            stable_spend_protection_skip_value_values, 0.50
+        ),
         "voucher_to_voucher_count_p50": v2v_count_p50,
         "voucher_to_voucher_volume_p50": v2v_volume_p50,
         "voucher_to_voucher_share_p50": v2v_share_p50,
@@ -4831,6 +5090,14 @@ def summarize_frontier_cell(
             producer_debt_closed_not_held_at_maturity_values, 0.50
         ),
         "producer_deposit_credit_capacity_usd_p50": producer_credit_capacity_p50,
+        "producer_deposit_stable_usd_total_p50": percentile(producer_deposit_stable_values, 0.50),
+        "producer_deposit_voucher_usd_total_p50": percentile(producer_deposit_voucher_values, 0.50),
+        "producer_organic_voucher_deposit_usd_total_p50": percentile(
+            producer_organic_voucher_deposit_values, 0.50
+        ),
+        "producer_deposit_voucher_share_p50": percentile(
+            producer_deposit_voucher_share_values, 0.50
+        ),
         "productive_credit_inflow_usd_total_p50": productive_credit_inflow_p50,
         "productive_credit_stable_retained_usd_total_p50": productive_credit_stable_retained_p50,
         "productive_credit_voucher_deposit_usd_total_p50": productive_credit_voucher_deposit_p50,
@@ -4925,6 +5192,13 @@ def summarize_frontier_cell(
         ),
         "baseline_route_success_p50": baseline.get("route_success_p50", 0.0),
         "baseline_swap_volume_p50": baseline.get("swap_volume_p50", 0.0),
+        "baseline_ordinary_swap_volume_usd_total_p50": baseline_ordinary_swap_volume_p50,
+        "baseline_ordinary_voucher_source_swap_count_total_p50": (
+            baseline_ordinary_voucher_source_count_p50
+        ),
+        "baseline_ordinary_voucher_source_swap_volume_usd_total_p50": (
+            baseline_ordinary_voucher_source_volume_p50
+        ),
         "baseline_voucher_to_voucher_count_p50": baseline_v2v_count_p50,
         "baseline_voucher_to_voucher_share_p50": baseline_v2v_share_p50,
         "baseline_stable_value_share_p50": baseline_stable_share_p50,
@@ -4939,6 +5213,18 @@ def summarize_frontier_cell(
         "baseline_liquidity_leakage_p50": baseline_leakage_p50,
         "baseline_liquidity_leakage_p95": baseline_leakage_p95,
         "baseline_producer_deposit_credit_capacity_usd_p50": baseline_producer_credit_capacity_p50,
+        "baseline_producer_deposit_stable_usd_total_p50": baseline.get(
+            "producer_deposit_stable_usd_total_p50", 0.0
+        ),
+        "baseline_producer_deposit_voucher_usd_total_p50": baseline.get(
+            "producer_deposit_voucher_usd_total_p50", 0.0
+        ),
+        "baseline_producer_organic_voucher_deposit_usd_total_p50": baseline.get(
+            "producer_organic_voucher_deposit_usd_total_p50", 0.0
+        ),
+        "baseline_producer_deposit_voucher_share_p50": baseline.get(
+            "producer_deposit_voucher_share_p50", 0.0
+        ),
         "baseline_productive_credit_inflow_usd_total_p50": baseline_productive_credit_inflow_p50,
         "baseline_productive_credit_stable_retained_usd_total_p50": (
             baseline_productive_credit_stable_retained_p50
@@ -5341,6 +5627,12 @@ def frontier_job_id(phase: str, scale: str, ratio: float, coupon: float, share: 
 
 
 def frontier_baseline_metrics(baseline_rows: list[dict[str, object]]) -> dict[str, float]:
+    producer_deposit_stable_values = [
+        safe_float(row.get("producer_deposit_stable_usd_total")) for row in baseline_rows
+    ]
+    producer_deposit_voucher_values = [
+        safe_float(row.get("producer_deposit_voucher_usd_total")) for row in baseline_rows
+    ]
     productive_credit_inflow_values = [
         safe_float(row.get("productive_credit_inflow_usd_total")) for row in baseline_rows
     ]
@@ -5356,6 +5648,17 @@ def frontier_baseline_metrics(baseline_rows: list[dict[str, object]]) -> dict[st
             productive_credit_voucher_deposit_values,
             productive_credit_inflow_values,
         )
+    ]
+    producer_organic_voucher_deposit_values = [
+        max(0.0, total - productive)
+        for total, productive in zip(
+            producer_deposit_voucher_values,
+            productive_credit_voucher_deposit_values,
+        )
+    ]
+    producer_deposit_voucher_share_values = [
+        voucher / max(1e-9, stable + voucher)
+        for stable, voucher in zip(producer_deposit_stable_values, producer_deposit_voucher_values)
     ]
     return {
         "route_success_p50": percentile(
@@ -5427,6 +5730,14 @@ def frontier_baseline_metrics(baseline_rows: list[dict[str, object]]) -> dict[st
         "producer_deposit_credit_capacity_usd_p50": percentile(
             [safe_float(row.get("producer_deposit_credit_capacity_usd")) for row in baseline_rows], 0.50
         ),
+        "producer_deposit_stable_usd_total_p50": percentile(producer_deposit_stable_values, 0.50),
+        "producer_deposit_voucher_usd_total_p50": percentile(producer_deposit_voucher_values, 0.50),
+        "producer_organic_voucher_deposit_usd_total_p50": percentile(
+            producer_organic_voucher_deposit_values, 0.50
+        ),
+        "producer_deposit_voucher_share_p50": percentile(
+            producer_deposit_voucher_share_values, 0.50
+        ),
         "productive_credit_inflow_usd_total_p50": percentile(productive_credit_inflow_values, 0.50),
         "productive_credit_stable_retained_usd_total_p50": percentile(
             productive_credit_stable_retained_values, 0.50
@@ -5437,7 +5748,201 @@ def frontier_baseline_metrics(baseline_rows: list[dict[str, object]]) -> dict[st
         "productive_credit_voucher_deposit_share_p50": percentile(
             productive_credit_voucher_deposit_share_values, 0.50
         ),
+        "ordinary_swap_volume_usd_total_p50": percentile(
+            [safe_float(row.get("ordinary_swap_volume_usd_total")) for row in baseline_rows], 0.50
+        ),
+        "ordinary_voucher_source_swap_count_total_p50": percentile(
+            [safe_float(row.get("ordinary_voucher_source_swap_count_total")) for row in baseline_rows], 0.50
+        ),
+        "ordinary_voucher_source_swap_volume_usd_total_p50": percentile(
+            [safe_float(row.get("ordinary_voucher_source_swap_volume_usd_total")) for row in baseline_rows], 0.50
+        ),
     }
+
+
+def calibration_activity_audit_rows(
+    args: argparse.Namespace,
+    calibration: Calibration,
+    rows: list[dict[str, object]],
+    *,
+    scenario: str,
+    prefix: str,
+) -> list[dict[str, object]]:
+    field_template = {
+        "scenario": scenario,
+        "row_type": "",
+        "tier": "",
+        "configured_tier_probability": 0.0,
+        "configured_producer_stable_deposit_rate_per_month": 0.0,
+        "configured_producer_voucher_deposit_rate_per_month": 0.0,
+        "configured_producer_deposit_stable_share": 0.0,
+        "configured_producer_deposit_voucher_share": 0.0,
+        "configured_productive_credit_return_rate": 0.0,
+        "configured_productive_credit_lag_ticks_p50": 0.0,
+        "configured_productive_credit_stable_retained_share": 0.0,
+        "configured_productive_credit_voucher_deposit_share": 0.0,
+        "configured_productive_credit_voucher_deposit_cap_rate_per_month": 0.0,
+        "realized_productive_credit_inflow_usd_p50": 0.0,
+        "realized_productive_credit_stable_retained_usd_p50": 0.0,
+        "realized_productive_credit_voucher_deposit_usd_p50": 0.0,
+        "realized_productive_credit_voucher_deposit_share_p50": 0.0,
+        "realized_productive_credit_voucher_deposit_cap_clipped_usd_p50": 0.0,
+        "realized_producer_deposit_stable_usd_p50": 0.0,
+        "realized_producer_deposit_voucher_usd_p50": 0.0,
+        "realized_producer_deposit_voucher_share_p50": 0.0,
+        "realized_producer_organic_voucher_deposit_usd_p50": 0.0,
+        "realized_ordinary_swap_volume_usd_p50": 0.0,
+        "realized_ordinary_stable_source_swap_volume_usd_p50": 0.0,
+        "realized_ordinary_voucher_source_swap_volume_usd_p50": 0.0,
+        "realized_ordinary_stable_spend_protected_skip_value_usd_p50": 0.0,
+    }
+
+    audit_rows: list[dict[str, object]] = []
+    for tier in TIER_ORDER:
+        dep = calibration.producer_deposit_by_tier.get(tier, {})
+        prod = calibration.productive_credit_by_tier.get(tier, {})
+        voucher_share = safe_float(prod.get("loan_induced_voucher_deposit_share_default"))
+        stable_share = max(0.0, 1.0 - voucher_share)
+        row = dict(field_template)
+        row.update(
+            {
+                "row_type": "configured_tier",
+                "tier": tier,
+                "configured_tier_probability": safe_float(calibration.tier_probs.get(tier)),
+                "configured_producer_stable_deposit_rate_per_month": safe_float(
+                    dep.get("stable_deposit_rate_per_month")
+                ),
+                "configured_producer_voucher_deposit_rate_per_month": safe_float(
+                    dep.get("voucher_deposit_rate_per_month")
+                ),
+                "configured_producer_deposit_stable_share": safe_float(
+                    dep.get("stable_deposit_share_of_backing")
+                ),
+                "configured_producer_deposit_voucher_share": safe_float(
+                    dep.get("voucher_deposit_share_of_backing")
+                ),
+                "configured_productive_credit_return_rate": safe_float(
+                    prod.get("productive_credit_return_rate")
+                ),
+                "configured_productive_credit_lag_ticks_p50": safe_float(
+                    prod.get("productive_credit_lag_ticks_p50")
+                ),
+                "configured_productive_credit_stable_retained_share": stable_share,
+                "configured_productive_credit_voucher_deposit_share": voucher_share,
+                "configured_productive_credit_voucher_deposit_cap_rate_per_month": safe_float(
+                    prod.get("loan_induced_voucher_deposit_cap_rate_per_month")
+                ),
+            }
+        )
+        audit_rows.append(row)
+
+    stable_deposit_values = [safe_float(row.get("producer_deposit_stable_usd_total")) for row in rows]
+    voucher_deposit_values = [safe_float(row.get("producer_deposit_voucher_usd_total")) for row in rows]
+    productive_inflow_values = [safe_float(row.get("productive_credit_inflow_usd_total")) for row in rows]
+    productive_stable_values = [
+        safe_float(row.get("productive_credit_stable_retained_usd_total")) for row in rows
+    ]
+    productive_voucher_values = [
+        safe_float(row.get("productive_credit_voucher_deposit_usd_total")) for row in rows
+    ]
+    cap_clipped_values = [
+        safe_float(row.get("productive_credit_voucher_deposit_cap_clipped_usd_total")) for row in rows
+    ]
+    voucher_share_values = [
+        voucher / max(1e-9, inflow)
+        for voucher, inflow in zip(productive_voucher_values, productive_inflow_values)
+    ]
+    deposit_voucher_share_values = [
+        voucher / max(1e-9, stable + voucher)
+        for stable, voucher in zip(stable_deposit_values, voucher_deposit_values)
+    ]
+    organic_voucher_values = [
+        max(0.0, total - productive)
+        for total, productive in zip(voucher_deposit_values, productive_voucher_values)
+    ]
+    configured_voucher_share = safe_float(
+        getattr(args, f"_{prefix}_productive_credit_voucher_deposit_share", 0.0)
+    )
+    configured_deposit_stable_share = sum(
+        safe_float(calibration.tier_probs.get(tier))
+        * safe_float(calibration.producer_deposit_by_tier.get(tier, {}).get("stable_deposit_share_of_backing"))
+        for tier in TIER_ORDER
+    )
+    configured_deposit_voucher_share = sum(
+        safe_float(calibration.tier_probs.get(tier))
+        * safe_float(calibration.producer_deposit_by_tier.get(tier, {}).get("voucher_deposit_share_of_backing"))
+        for tier in TIER_ORDER
+    )
+    aggregate = dict(field_template)
+    aggregate.update(
+        {
+            "row_type": "realized_all_runs",
+            "tier": "all",
+            "configured_producer_stable_deposit_rate_per_month": safe_float(
+                getattr(args, f"_{prefix}_producer_stable_deposit_rate_per_month", 0.0)
+            ),
+            "configured_producer_voucher_deposit_rate_per_month": safe_float(
+                getattr(args, f"_{prefix}_producer_voucher_deposit_rate_per_month", 0.0)
+            ),
+            "configured_producer_deposit_stable_share": configured_deposit_stable_share,
+            "configured_producer_deposit_voucher_share": configured_deposit_voucher_share,
+            "configured_productive_credit_return_rate": safe_float(
+                getattr(args, f"_{prefix}_productive_credit_return_rate", 0.0)
+            ),
+            "configured_productive_credit_lag_ticks_p50": safe_float(
+                getattr(args, f"_{prefix}_productive_credit_lag_ticks", 0.0)
+            ),
+            "configured_productive_credit_stable_retained_share": max(
+                0.0, 1.0 - configured_voucher_share
+            ),
+            "configured_productive_credit_voucher_deposit_share": configured_voucher_share,
+            "configured_productive_credit_voucher_deposit_cap_rate_per_month": safe_float(
+                getattr(args, f"_{prefix}_productive_credit_voucher_deposit_cap_rate_per_month", 0.0)
+            ),
+            "realized_productive_credit_inflow_usd_p50": percentile(productive_inflow_values, 0.50),
+            "realized_productive_credit_stable_retained_usd_p50": percentile(
+                productive_stable_values, 0.50
+            ),
+            "realized_productive_credit_voucher_deposit_usd_p50": percentile(
+                productive_voucher_values, 0.50
+            ),
+            "realized_productive_credit_voucher_deposit_share_p50": percentile(
+                voucher_share_values, 0.50
+            ),
+            "realized_productive_credit_voucher_deposit_cap_clipped_usd_p50": percentile(
+                cap_clipped_values, 0.50
+            ),
+            "realized_producer_deposit_stable_usd_p50": percentile(stable_deposit_values, 0.50),
+            "realized_producer_deposit_voucher_usd_p50": percentile(voucher_deposit_values, 0.50),
+            "realized_producer_deposit_voucher_share_p50": percentile(
+                deposit_voucher_share_values, 0.50
+            ),
+            "realized_producer_organic_voucher_deposit_usd_p50": percentile(
+                organic_voucher_values, 0.50
+            ),
+            "realized_ordinary_swap_volume_usd_p50": percentile(
+                [safe_float(row.get("ordinary_swap_volume_usd_total")) for row in rows],
+                0.50,
+            ),
+            "realized_ordinary_stable_source_swap_volume_usd_p50": percentile(
+                [safe_float(row.get("ordinary_stable_source_swap_volume_usd_total")) for row in rows],
+                0.50,
+            ),
+            "realized_ordinary_voucher_source_swap_volume_usd_p50": percentile(
+                [safe_float(row.get("ordinary_voucher_source_swap_volume_usd_total")) for row in rows],
+                0.50,
+            ),
+            "realized_ordinary_stable_spend_protected_skip_value_usd_p50": percentile(
+                [
+                    safe_float(row.get("ordinary_stable_spend_protected_skip_value_usd_total"))
+                    for row in rows
+                ],
+                0.50,
+            ),
+        }
+    )
+    audit_rows.append(aggregate)
+    return audit_rows
 
 
 def load_frontier_cell_shard(job: dict[str, object], shard_root: Path, config_hash: str) -> dict[str, object] | None:
@@ -5768,6 +6273,7 @@ def frontier_summary_rows(
 
 def write_frontier_aggregate(
     args: argparse.Namespace,
+    calibration: Calibration,
     output_dir: Path,
     *,
     network_scales: list[str],
@@ -5785,6 +6291,18 @@ def write_frontier_aggregate(
     write_csv(output_dir / f"safe_injection_frontier{suffix}", list(frontier_rows[0].keys()) if frontier_rows else [], frontier_rows)
     write_csv(output_dir / f"network_scaling_summary{suffix}", list(headline_rows[0].keys()) if headline_rows else [], headline_rows)
     write_csv(output_dir / f"issuer_cashflow_summary{suffix}", list(issuer_rows[0].keys()) if issuer_rows else [], issuer_rows)
+    audit_rows = calibration_activity_audit_rows(
+        args,
+        calibration,
+        all_run_rows,
+        scenario="bond_issuer_frontier",
+        prefix="frontier",
+    )
+    write_csv(
+        output_dir / f"calibration_activity_audit{suffix}",
+        list(audit_rows[0].keys()) if audit_rows else [],
+        audit_rows,
+    )
     if not partial:
         write_frontier_tables(output_dir, safety_rows, frontier_rows)
         if not args.no_png:
@@ -5865,6 +6383,7 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
         _, safety_rows = safety_for_completed(baseline_results, cell_results)
         write_frontier_aggregate(
             args,
+            calibration,
             output_dir,
             network_scales=network_scales,
             all_run_rows=frontier_results_to_run_rows(results),
@@ -5919,6 +6438,7 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
         )
         write_frontier_aggregate(
             args,
+            calibration,
             output_dir,
             network_scales=network_scales,
             all_run_rows=frontier_results_to_run_rows(baseline_results + cell_results),
@@ -5996,6 +6516,7 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
 
     write_frontier_aggregate(
         args,
+        calibration,
         output_dir,
         network_scales=network_scales,
         all_run_rows=frontier_results_to_run_rows(baseline_results + all_cell_results),

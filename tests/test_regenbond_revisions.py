@@ -167,6 +167,50 @@ class RegenBondRevisionTests(unittest.TestCase):
         )
         self.assertLessEqual(engine._sample_amount_in(producer_pool, stable_id), 40.0 + 1e-9)
 
+    def test_ordinary_stable_spend_protection_records_blocked_source(self):
+        engine = SimulationEngine(
+            small_config(
+                ordinary_stable_spend_protection_enabled=True,
+                ordinary_stable_spend_buffer_voucher_share=0.05,
+            )
+        )
+        producer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "producer")
+        stable_id = engine.cfg.stable_symbol
+        voucher_id = next(asset for asset in producer_pool.vault.inventory if asset.startswith("VCHR:"))
+        current_stable = producer_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(producer_pool, stable_id, current_stable, "test_clear", "test")
+        current_voucher = producer_pool.vault.get(voucher_id)
+        if current_voucher > 0.0:
+            engine._vault_sub(producer_pool, voucher_id, current_voucher, "test_clear", "test")
+        engine._vault_add(producer_pool, stable_id, 10.0, "test_seed", "test")
+        engine._vault_add(producer_pool, voucher_id, 100.0, "test_seed", "test")
+        producer_pool.policy.min_stable_reserve = 20.0
+
+        engine._record_ordinary_stable_spend_protection_skip(producer_pool)
+
+        self.assertEqual(engine._ordinary_stable_spend_protected_skip_count_tick, 1)
+        self.assertAlmostEqual(engine._ordinary_stable_spend_protected_skip_value_usd_tick, 10.0)
+
+    def test_route_context_metrics_split_ordinary_and_loan_swaps(self):
+        engine = SimulationEngine(small_config(productive_credit_voucher_activity_boost_enabled=True))
+        producer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "producer")
+        stable_id = engine.cfg.stable_symbol
+        voucher_id = next(asset for asset in producer_pool.vault.inventory if asset.startswith("VCHR:"))
+        engine.tick = 5
+        engine._mark_productive_credit_voucher_activity(producer_pool.pool_id, voucher_id)
+
+        engine._record_route_context_swap("ordinary", producer_pool, voucher_id, 12.0)
+        engine._record_route_context_swap("loan", producer_pool, voucher_id, 8.0)
+        engine._record_route_context_swap("ordinary", producer_pool, stable_id, 4.0)
+
+        self.assertEqual(engine._route_context_count_tick["ordinary"], 2)
+        self.assertEqual(engine._route_context_count_tick["loan"], 1)
+        self.assertAlmostEqual(engine._route_context_volume_usd_tick["ordinary"], 16.0)
+        self.assertAlmostEqual(engine._route_context_source_voucher_volume_usd_tick["ordinary"], 12.0)
+        self.assertAlmostEqual(engine._route_context_source_stable_volume_usd_tick["ordinary"], 4.0)
+        self.assertEqual(engine._productive_boosted_voucher_swap_count_tick, 1)
+
     def test_failed_loan_route_backfill_attempts_ordinary_activity(self):
         engine = SimulationEngine(
             small_config(
@@ -177,8 +221,8 @@ class RegenBondRevisionTests(unittest.TestCase):
         producer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "producer")
         calls = []
 
-        def fake_random_route_request(source_pool=None, max_assets=None):
-            calls.append((source_pool, max_assets))
+        def fake_random_route_request(source_pool=None, max_assets=None, route_context="ordinary"):
+            calls.append((source_pool, max_assets, route_context))
             engine._noam_routing_swaps_tick += 1
             return 1
 
@@ -189,6 +233,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertIs(calls[0][0], producer_pool)
         self.assertEqual(calls[0][1], 1)
+        self.assertEqual(calls[0][2], "loan_backfill")
         self.assertEqual(engine._producer_loan_backfill_attempts_tick, 1)
         self.assertEqual(engine._producer_loan_backfill_executed_tick, 1)
 

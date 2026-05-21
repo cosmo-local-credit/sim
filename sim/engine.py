@@ -227,6 +227,26 @@ class SimulationEngine:
         self._producer_loan_lender_collateral_cap_usd_tick: float = 0.0
         self._producer_loan_lender_remaining_cap_usd_tick: float = 0.0
         self._producer_loan_lender_stable_available_usd_tick: float = 0.0
+        self._route_context_count_tick: Dict[str, int] = {}
+        self._route_context_count_total: Dict[str, int] = {}
+        self._route_context_volume_usd_tick: Dict[str, float] = {}
+        self._route_context_volume_usd_total: Dict[str, float] = {}
+        self._route_context_source_stable_count_tick: Dict[str, int] = {}
+        self._route_context_source_stable_count_total: Dict[str, int] = {}
+        self._route_context_source_stable_volume_usd_tick: Dict[str, float] = {}
+        self._route_context_source_stable_volume_usd_total: Dict[str, float] = {}
+        self._route_context_source_voucher_count_tick: Dict[str, int] = {}
+        self._route_context_source_voucher_count_total: Dict[str, int] = {}
+        self._route_context_source_voucher_volume_usd_tick: Dict[str, float] = {}
+        self._route_context_source_voucher_volume_usd_total: Dict[str, float] = {}
+        self._productive_boosted_voucher_swap_count_tick: int = 0
+        self._productive_boosted_voucher_swap_count_total: int = 0
+        self._productive_boosted_voucher_swap_volume_usd_tick: float = 0.0
+        self._productive_boosted_voucher_swap_volume_usd_total: float = 0.0
+        self._ordinary_stable_spend_protected_skip_count_tick: int = 0
+        self._ordinary_stable_spend_protected_skip_count_total: int = 0
+        self._ordinary_stable_spend_protected_skip_value_usd_tick: float = 0.0
+        self._ordinary_stable_spend_protected_skip_value_usd_total: float = 0.0
         self._fee_conversion_attempted_usd_tick: float = 0.0
         self._fee_conversion_success_usd_tick: float = 0.0
         self._fee_conversion_failed_usd_tick: float = 0.0
@@ -1710,6 +1730,70 @@ class SimulationEngine:
                     if asset.startswith("VCHR:") and self._productive_credit_voucher_activity_active(pool, asset):
                         weights[idx] *= 1.0 + boost
         return weights
+
+    @staticmethod
+    def _increment_float_map(store: Dict[str, float], key: str, amount: float) -> None:
+        store[key] = store.get(key, 0.0) + float(amount)
+
+    @staticmethod
+    def _increment_int_map(store: Dict[str, int], key: str, amount: int = 1) -> None:
+        store[key] = store.get(key, 0) + int(amount)
+
+    def _record_ordinary_stable_spend_protection_skip(self, pool: "Pool") -> None:
+        if pool.policy.role not in ("producer", "consumer"):
+            return
+        stable_id = self.cfg.stable_symbol
+        available = max(0.0, pool.vault.get(stable_id))
+        if available <= 1e-9:
+            return
+        preserve = self._ordinary_source_stable_preserve_units(pool)
+        if preserve <= 1e-9 or available > preserve + 1e-9:
+            return
+        blocked_usd = available * max(0.0, self._asset_value(pool, stable_id))
+        if blocked_usd <= 1e-9:
+            return
+        self._ordinary_stable_spend_protected_skip_count_tick += 1
+        self._ordinary_stable_spend_protected_skip_count_total += 1
+        self._ordinary_stable_spend_protected_skip_value_usd_tick += blocked_usd
+        self._ordinary_stable_spend_protected_skip_value_usd_total += blocked_usd
+
+    def _record_route_context_swap(
+        self,
+        route_context: str,
+        source_pool: "Pool",
+        source_asset: str,
+        swap_usd: float,
+    ) -> None:
+        context = str(route_context or "ordinary")
+        self._increment_int_map(self._route_context_count_tick, context)
+        self._increment_int_map(self._route_context_count_total, context)
+        self._increment_float_map(self._route_context_volume_usd_tick, context, swap_usd)
+        self._increment_float_map(self._route_context_volume_usd_total, context, swap_usd)
+        if source_asset == self.cfg.stable_symbol:
+            self._increment_int_map(self._route_context_source_stable_count_tick, context)
+            self._increment_int_map(self._route_context_source_stable_count_total, context)
+            self._increment_float_map(
+                self._route_context_source_stable_volume_usd_tick, context, swap_usd
+            )
+            self._increment_float_map(
+                self._route_context_source_stable_volume_usd_total, context, swap_usd
+            )
+        elif source_asset.startswith("VCHR:"):
+            self._increment_int_map(self._route_context_source_voucher_count_tick, context)
+            self._increment_int_map(self._route_context_source_voucher_count_total, context)
+            self._increment_float_map(
+                self._route_context_source_voucher_volume_usd_tick, context, swap_usd
+            )
+            self._increment_float_map(
+                self._route_context_source_voucher_volume_usd_total, context, swap_usd
+            )
+            if context == "ordinary" and self._productive_credit_voucher_activity_active(
+                source_pool, source_asset
+            ):
+                self._productive_boosted_voucher_swap_count_tick += 1
+                self._productive_boosted_voucher_swap_count_total += 1
+                self._productive_boosted_voucher_swap_volume_usd_tick += swap_usd
+                self._productive_boosted_voucher_swap_volume_usd_total += swap_usd
 
     def _productive_credit_voucher_activity_active(self, pool: "Pool", voucher_id: str) -> bool:
         if not bool(self.cfg.productive_credit_voucher_activity_boost_enabled):
@@ -4972,7 +5056,9 @@ class SimulationEngine:
             ))
             if not plan.ok:
                 break
-            ok = self.execute_route_from_pool(clc_pool.pool_id, plan, amount_used)
+            ok = self.execute_route_from_pool(
+                clc_pool.pool_id, plan, amount_used, route_context="fee_conversion"
+            )
             if not ok:
                 break
             after_stable = clc_pool.vault.get(stable_id)
@@ -5544,7 +5630,9 @@ class SimulationEngine:
                 self.log.add(Event(self.tick, "CLC_REBALANCE_FAILED", pool_id=clc_pool.pool_id,
                                    asset_id=voucher_id, amount=amount_used, meta={"reason": plan.reason}))
                 continue
-            if self.execute_route_from_pool(clc_pool.pool_id, plan, amount_used):
+            if self.execute_route_from_pool(
+                clc_pool.pool_id, plan, amount_used, route_context="clc_rebalance"
+            ):
                 amount_usd = amount_used * value
                 self.log.add(Event(self.tick, "CLC_REBALANCE_EXECUTED", pool_id=clc_pool.pool_id,
                                    asset_id=voucher_id, amount=amount_usd))
@@ -5623,6 +5711,16 @@ class SimulationEngine:
             self._producer_loan_lender_collateral_cap_usd_tick = 0.0
             self._producer_loan_lender_remaining_cap_usd_tick = 0.0
             self._producer_loan_lender_stable_available_usd_tick = 0.0
+            self._route_context_count_tick = {}
+            self._route_context_volume_usd_tick = {}
+            self._route_context_source_stable_count_tick = {}
+            self._route_context_source_stable_volume_usd_tick = {}
+            self._route_context_source_voucher_count_tick = {}
+            self._route_context_source_voucher_volume_usd_tick = {}
+            self._productive_boosted_voucher_swap_count_tick = 0
+            self._productive_boosted_voucher_swap_volume_usd_tick = 0.0
+            self._ordinary_stable_spend_protected_skip_count_tick = 0
+            self._ordinary_stable_spend_protected_skip_value_usd_tick = 0.0
             self._fee_conversion_attempted_usd_tick = 0.0
             self._fee_conversion_success_usd_tick = 0.0
             self._fee_conversion_failed_usd_tick = 0.0
@@ -5763,7 +5861,12 @@ class SimulationEngine:
                 self._stable_offramp_usd_month = 0.0
             self.snapshot_metrics()
 
-    def _random_route_request(self, source_pool: Optional["Pool"] = None, max_assets: Optional[int] = None) -> int:
+    def _random_route_request(
+        self,
+        source_pool: Optional["Pool"] = None,
+        max_assets: Optional[int] = None,
+        route_context: str = "ordinary",
+    ) -> int:
         """
         Choose a random source pool and try to swap some asset it holds into a different asset.
         Executes via escrow so multi-hop can touch multiple pools.
@@ -5780,6 +5883,9 @@ class SimulationEngine:
             return 0
         if not source_pool.vault.inventory:
             return 0
+
+        if route_context == "ordinary":
+            self._record_ordinary_stable_spend_protection_skip(source_pool)
 
         # try each asset_in with positive ordinary-spendable inventory
         asset_candidates = [
@@ -5863,7 +5969,9 @@ class SimulationEngine:
                         continue
                     self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
                                        meta={"hops": [h.__dict__ for h in plan.hops], "target": asset_out, "buddy_direct": True, "route_attempt_kind": attempt_kind}))
-                    ok = self.execute_route_from_pool(source_pool.pool_id, plan, amount_used)
+                    ok = self.execute_route_from_pool(
+                        source_pool.pool_id, plan, amount_used, route_context=route_context
+                    )
                     self._record_swap_attempt(source_pool.pool_id, success=ok)
                     if ok:
                         self._sticky_target_by_pool[(source_pool.pool_id, asset_in)] = asset_out
@@ -5896,7 +6004,9 @@ class SimulationEngine:
                     if self._validate_route_plan(sticky_plan, amount_in, source_pool):
                         self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
                                            meta={"hops": [h.__dict__ for h in sticky_plan.hops], "target": asset_out, "sticky": True, "route_attempt_kind": attempt_kind}))
-                        ok = self.execute_route_from_pool(source_pool.pool_id, sticky_plan, amount_in)
+                        ok = self.execute_route_from_pool(
+                            source_pool.pool_id, sticky_plan, amount_in, route_context=route_context
+                        )
                         self._record_swap_attempt(source_pool.pool_id, success=ok)
                         if ok:
                             self._sticky_target_by_pool[(source_pool.pool_id, asset_in)] = asset_out
@@ -5939,7 +6049,9 @@ class SimulationEngine:
                                    meta={"hops": [h.__dict__ for h in plan.hops], "target": asset_out, "route_attempt_kind": attempt_kind}))
 
                 # Execute with escrow:
-                ok = self.execute_route_from_pool(source_pool.pool_id, plan, amount_used)
+                ok = self.execute_route_from_pool(
+                    source_pool.pool_id, plan, amount_used, route_context=route_context
+                )
                 self._record_swap_attempt(source_pool.pool_id, success=ok)
                 if ok:
                     self._sticky_target_by_pool[(source_pool.pool_id, asset_in)] = asset_out
@@ -5958,7 +6070,9 @@ class SimulationEngine:
         before_swaps = int(self._noam_routing_swaps_tick + self._noam_clearing_swaps_tick)
         for _ in range(attempts):
             self._producer_loan_backfill_attempts_tick += 1
-            attempted = self._random_route_request(source_pool=source_pool, max_assets=1)
+            attempted = self._random_route_request(
+                source_pool=source_pool, max_assets=1, route_context="loan_backfill"
+            )
             after_swaps = int(self._noam_routing_swaps_tick + self._noam_clearing_swaps_tick)
             if after_swaps > before_swaps:
                 self._producer_loan_backfill_executed_tick += 1
@@ -6119,7 +6233,9 @@ class SimulationEngine:
                                    asset_id=asset_in, amount=amount_used, meta=meta))
                 self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
                                    meta={"hops": [h.__dict__ for h in plan.hops], "target": asset_out, "repayment": True, "buddy_direct": True}))
-                ok = self.execute_route_from_pool(source_pool.pool_id, plan, amount_used)
+                ok = self.execute_route_from_pool(
+                    source_pool.pool_id, plan, amount_used, route_context="repayment"
+                )
                 self._record_swap_attempt(source_pool.pool_id, success=ok)
                 if ok:
                     amount_usd = amount_used * self._asset_value(source_pool, asset_in)
@@ -6154,7 +6270,9 @@ class SimulationEngine:
 
         self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
                            meta={"hops": [h.__dict__ for h in plan.hops], "target": voucher_id, "repayment": True}))
-        ok = self.execute_route_from_pool(source_pool.pool_id, plan, amount_used)
+        ok = self.execute_route_from_pool(
+            source_pool.pool_id, plan, amount_used, route_context="repayment"
+        )
         self._record_swap_attempt(source_pool.pool_id, success=ok)
         if ok:
             amount_usd = amount_used * self._asset_value(source_pool, asset_in)
@@ -6282,7 +6400,9 @@ class SimulationEngine:
                                    meta={"hops": [h.__dict__ for h in plan.hops],
                                          "target": asset_out, "borrow": True, "buddy_direct": True}))
                 self._producer_loan_route_found_tick += 1
-                ok = self.execute_route_from_pool(source_pool.pool_id, plan, amount_used)
+                ok = self.execute_route_from_pool(
+                    source_pool.pool_id, plan, amount_used, route_context="loan"
+                )
                 self._record_swap_attempt(source_pool.pool_id, success=ok)
                 if ok:
                     amount_usd = amount_used * self._asset_value(source_pool, voucher_id)
@@ -6326,7 +6446,9 @@ class SimulationEngine:
                            meta={"hops": [h.__dict__ for h in plan.hops],
                                  "target": self.cfg.stable_symbol, "borrow": True}))
         self._producer_loan_route_found_tick += 1
-        ok = self.execute_route_from_pool(source_pool.pool_id, plan, amount_used)
+        ok = self.execute_route_from_pool(
+            source_pool.pool_id, plan, amount_used, route_context="loan"
+        )
         self._record_swap_attempt(source_pool.pool_id, success=ok)
         if ok:
             amount_usd = amount_used * self._asset_value(source_pool, voucher_id)
@@ -6340,7 +6462,13 @@ class SimulationEngine:
             self._producer_loan_execution_failed_tick += 1
         return True
 
-    def execute_route_from_pool(self, source_pool_id: str, plan: RoutePlan, amount_in: float) -> bool:
+    def execute_route_from_pool(
+        self,
+        source_pool_id: str,
+        plan: RoutePlan,
+        amount_in: float,
+        route_context: str = "ordinary",
+    ) -> bool:
         """
         Withdraw asset_in from source pool into escrow, execute hop swaps, deposit output back to source.
         If output is voucher, it may exit and redeem (your 'final settlement sink').
@@ -6397,7 +6525,13 @@ class SimulationEngine:
             escrow[hop.asset_out] = escrow.get(hop.asset_out, 0.0) + receipt.amount_out
 
             self.log.add(Event(self.tick, "SWAP_EXECUTED", pool_id=pool.pool_id,
-                   meta={"receipt": receipt.to_dict()}))
+                   meta={
+                       "receipt": receipt.to_dict(),
+                       "route_context": str(route_context or "ordinary"),
+                       "route_source_pool_id": source_pool_id,
+                       "route_source_role": source_pool.policy.role,
+                       "route_source_asset": asset_in,
+                   }))
             gross_out = receipt.amount_out + float(receipt.fees.total_fee)
             self._update_pool_caches(pool, receipt.asset_in, float(receipt.amount_in))
             self._update_pool_caches(pool, receipt.asset_out, -float(gross_out))
@@ -6480,6 +6614,7 @@ class SimulationEngine:
             self._swap_volume_usd_by_pool[pool.pool_id] = (
                 self._swap_volume_usd_by_pool.get(pool.pool_id, 0.0) + swap_usd
             )
+            self._record_route_context_swap(route_context, source_pool, asset_in, swap_usd)
             self._update_affinity(source_pool_id, pool.pool_id, swap_usd)
 
             if pool.policy.role in ("consumer", "producer") and current_asset.startswith("VCHR:"):
@@ -6820,6 +6955,43 @@ class SimulationEngine:
             utilization_rate = swap_volume_usd_tick / max(1e-9, total_pool_value)
             c_ratio = vol_vchr_to_usd / vol_usd_to_vchr if vol_usd_to_vchr > 1e-9 else 0.0
             beta_ratio = vol_vchr_to_vchr / vol_vchr_to_usd if vol_vchr_to_usd > 1e-9 else 0.0
+            def context_count(context: str, *, total: bool = False) -> int:
+                store = self._route_context_count_total if total else self._route_context_count_tick
+                return int(store.get(context, 0))
+
+            def context_volume(context: str, *, total: bool = False) -> float:
+                store = self._route_context_volume_usd_total if total else self._route_context_volume_usd_tick
+                return float(store.get(context, 0.0))
+
+            def context_source_count(context: str, source: str, *, total: bool = False) -> int:
+                if source == "stable":
+                    store = (
+                        self._route_context_source_stable_count_total
+                        if total
+                        else self._route_context_source_stable_count_tick
+                    )
+                else:
+                    store = (
+                        self._route_context_source_voucher_count_total
+                        if total
+                        else self._route_context_source_voucher_count_tick
+                    )
+                return int(store.get(context, 0))
+
+            def context_source_volume(context: str, source: str, *, total: bool = False) -> float:
+                if source == "stable":
+                    store = (
+                        self._route_context_source_stable_volume_usd_total
+                        if total
+                        else self._route_context_source_stable_volume_usd_tick
+                    )
+                else:
+                    store = (
+                        self._route_context_source_voucher_volume_usd_total
+                        if total
+                        else self._route_context_source_voucher_volume_usd_tick
+                    )
+                return float(store.get(context, 0.0))
 
             num_system = sum(1 for p in self.pools.values() if p.policy.system_pool)
             num_active = len(self.pools) - num_system
@@ -7140,6 +7312,66 @@ class SimulationEngine:
                 "route_substitution_failed_tick": int(route_substitution_failed),
                 "noam_routing_swaps_tick": int(self._noam_routing_swaps_tick),
                 "noam_clearing_swaps_tick": int(self._noam_clearing_swaps_tick),
+                "ordinary_swap_count_tick": context_count("ordinary"),
+                "ordinary_swap_count_total": context_count("ordinary", total=True),
+                "ordinary_swap_volume_usd_tick": context_volume("ordinary"),
+                "ordinary_swap_volume_usd_total": context_volume("ordinary", total=True),
+                "ordinary_stable_source_swap_count_tick": context_source_count("ordinary", "stable"),
+                "ordinary_stable_source_swap_count_total": context_source_count(
+                    "ordinary", "stable", total=True
+                ),
+                "ordinary_stable_source_swap_volume_usd_tick": context_source_volume(
+                    "ordinary", "stable"
+                ),
+                "ordinary_stable_source_swap_volume_usd_total": context_source_volume(
+                    "ordinary", "stable", total=True
+                ),
+                "ordinary_voucher_source_swap_count_tick": context_source_count("ordinary", "voucher"),
+                "ordinary_voucher_source_swap_count_total": context_source_count(
+                    "ordinary", "voucher", total=True
+                ),
+                "ordinary_voucher_source_swap_volume_usd_tick": context_source_volume(
+                    "ordinary", "voucher"
+                ),
+                "ordinary_voucher_source_swap_volume_usd_total": context_source_volume(
+                    "ordinary", "voucher", total=True
+                ),
+                "loan_route_swap_count_tick": context_count("loan"),
+                "loan_route_swap_count_total": context_count("loan", total=True),
+                "loan_route_swap_volume_usd_tick": context_volume("loan"),
+                "loan_route_swap_volume_usd_total": context_volume("loan", total=True),
+                "repayment_route_swap_count_tick": context_count("repayment"),
+                "repayment_route_swap_count_total": context_count("repayment", total=True),
+                "repayment_route_swap_volume_usd_tick": context_volume("repayment"),
+                "repayment_route_swap_volume_usd_total": context_volume("repayment", total=True),
+                "loan_backfill_swap_count_tick": context_count("loan_backfill"),
+                "loan_backfill_swap_count_total": context_count("loan_backfill", total=True),
+                "loan_backfill_swap_volume_usd_tick": context_volume("loan_backfill"),
+                "loan_backfill_swap_volume_usd_total": context_volume("loan_backfill", total=True),
+                "productive_boosted_voucher_swap_count_tick": int(
+                    self._productive_boosted_voucher_swap_count_tick
+                ),
+                "productive_boosted_voucher_swap_count_total": int(
+                    self._productive_boosted_voucher_swap_count_total
+                ),
+                "productive_boosted_voucher_swap_volume_usd_tick": float(
+                    self._productive_boosted_voucher_swap_volume_usd_tick
+                ),
+                "productive_boosted_voucher_swap_volume_usd_total": float(
+                    self._productive_boosted_voucher_swap_volume_usd_total
+                ),
+                "ordinary_stable_spend_protected_skip_count_tick": int(
+                    self._ordinary_stable_spend_protected_skip_count_tick
+                ),
+                "ordinary_stable_spend_protected_skip_count_total": int(
+                    self._ordinary_stable_spend_protected_skip_count_total
+                ),
+                "ordinary_stable_spend_protected_skip_value_usd_tick": float(
+                    self._ordinary_stable_spend_protected_skip_value_usd_tick
+                ),
+                "ordinary_stable_spend_protected_skip_value_usd_total": float(
+                    self._ordinary_stable_spend_protected_skip_value_usd_total
+                ),
                 "fee_pool_total_usd": fee_pool_total_usd,
                 "fee_clc_total_usd": fee_clc_total_usd,
                 "fee_pool_cumulative_usd": float(fee_pool_cumulative),

@@ -131,9 +131,25 @@ run_frontier() {
       "$PRODUCTIVE_CREDIT_VOUCHER_DEPOSIT_CAP_RATE_PER_MONTH"
     )
   fi
+  case "${DISABLE_PRODUCTIVE_CREDIT_VOUCHER_ACTIVITY_BOOST:-0}" in
+    1|true|TRUE|yes|YES)
+      frontier_extra_args+=(--disable-productive-credit-voucher-activity-boost)
+      ;;
+  esac
+  case "${DISABLE_ORDINARY_STABLE_SPEND_PROTECTION:-0}" in
+    1|true|TRUE|yes|YES)
+      frontier_extra_args+=(--disable-ordinary-stable-spend-protection)
+      ;;
+  esac
+  case "${DISABLE_PRODUCER_LOAN_FAILURE_BACKFILL:-0}" in
+    1|true|TRUE|yes|YES)
+      frontier_extra_args+=(--disable-producer-loan-failure-backfill)
+      ;;
+  esac
   echo "[batch] writing frontier artifacts to $output_dir"
   echo "[batch] bond service lockbox: mode=${BOND_SERVICE_LOCKBOX_MODE:-remaining_schedule} coverage=${BOND_SERVICE_LOCKBOX_COVERAGE_RATIO:-1.25}"
   echo "[batch] producer debt contract service margin: ${PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-0.50}"
+  echo "[batch] ablation flags: voucher_boost=${DISABLE_PRODUCTIVE_CREDIT_VOUCHER_ACTIVITY_BOOST:-0} stable_protection=${DISABLE_ORDINARY_STABLE_SPEND_PROTECTION:-0} loan_backfill=${DISABLE_PRODUCER_LOAN_FAILURE_BACKFILL:-0}"
   run_monte_carlo "${PYTHON_BIN}" scripts/run_regenbond_monte_carlo.py \
     --scenario bond_issuer_frontier \
     --network-scales "${NETWORK_SCALES:-$default_scales}" \
@@ -184,6 +200,18 @@ case "$JOB" in
     FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}" \
       run_frontier 2 260 bond_issuer_frontier_feedback_probe current 0,0.01,0.02,0.05,0.10,0.25,0.50,1.00,1.50 0 0.50
     ;;
+  frontier-low-principal-probe)
+    FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}" \
+      run_frontier 5 260 bond_issuer_frontier_low_principal_probe current 0,0.005,0.01,0.02,0.03,0.04,0.05 0 0.25,0.50,0.75
+    ;;
+  frontier-activity-ablation-probe)
+    FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}" \
+      DISABLE_PRODUCTIVE_CREDIT_VOUCHER_ACTIVITY_BOOST="${DISABLE_PRODUCTIVE_CREDIT_VOUCHER_ACTIVITY_BOOST:-1}" \
+      DISABLE_ORDINARY_STABLE_SPEND_PROTECTION="${DISABLE_ORDINARY_STABLE_SPEND_PROTECTION:-1}" \
+      DISABLE_PRODUCER_LOAN_FAILURE_BACKFILL="${DISABLE_PRODUCER_LOAN_FAILURE_BACKFILL:-1}" \
+      OUTPUT="${OUTPUT:-$OUTPUT_ROOT/bond_issuer_frontier_activity_ablation_probe}" \
+      run_frontier 5 260 bond_issuer_frontier_activity_ablation_probe current 0,0.005,0.01,0.02,0.03,0.04,0.05 0 0.50
+    ;;
   frontier-pilot)
     run_frontier 20 260 bond_issuer_frontier_pilot current,connected_2x,connected_5x 0.05,0.10,0.20,0.40,0.80,1.50 0,0.06,0.12 0.25,0.50,0.75
     ;;
@@ -192,7 +220,7 @@ case "$JOB" in
     ;;
   *)
     echo "Unknown job: $JOB" >&2
-    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, frontier-smoke, frontier-maturity-smoke, frontier-feedback-probe, frontier-pilot, frontier-publication" >&2
+    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, frontier-smoke, frontier-maturity-smoke, frontier-feedback-probe, frontier-low-principal-probe, frontier-activity-ablation-probe, frontier-pilot, frontier-publication" >&2
     exit 2
     ;;
 esac
