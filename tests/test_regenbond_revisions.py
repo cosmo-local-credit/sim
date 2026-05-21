@@ -2,6 +2,7 @@ import argparse
 import unittest
 
 from scripts.run_regenbond_monte_carlo import (
+    SHARD_CONFIG_KEYS,
     bond_metrics,
     frontier_baseline_metrics,
     scenario_config,
@@ -143,11 +144,79 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertGreater(engine._route_context_count_tick.get("voucher_loan", 0), 0)
         self.assertGreater(engine._route_context_source_voucher_volume_usd_tick.get("voucher_loan", 0.0), 0.0)
         self.assertGreater(lender_pool.vault.get(borrower_voucher), 0.0)
+        self.assertEqual(len(engine._producer_debt_obligations), 1)
+        obligation = engine._producer_debt_obligations[0]
+        self.assertEqual(obligation.producer_pool_id, borrower_pool.pool_id)
+        self.assertEqual(obligation.lender_pool_id, lender_pool.pool_id)
+        self.assertEqual(obligation.voucher_id, borrower_voucher)
+        self.assertGreater(obligation.borrowed_usd, 0.0)
+        self.assertAlmostEqual(obligation.cash_service_due_usd, 0.0)
+        self.assertAlmostEqual(obligation.cash_service_remaining_usd, 0.0)
         self.assertAlmostEqual(engine._productive_credit_inflow_usd_tick, 0.0)
         self.assertEqual(engine._productive_credit_queue, {})
         self.assertAlmostEqual(engine._producer_debt_stable_recovered_usd_tick, 0.0)
         self.assertAlmostEqual(engine._bond_service_reserved_usd_tick, 0.0)
         self.assertTrue(engine._producer_voucher_loan_activity_active(borrower_pool, borrower_voucher))
+
+    def test_primary_voucher_borrowing_can_run_when_stable_is_available(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_producers=2,
+                max_pools=4,
+                producer_deposits_enabled=True,
+                producer_primary_voucher_borrowing_enabled=True,
+                producer_primary_voucher_borrowing_attempt_share=1.0,
+                producer_voucher_loan_activity_boost_enabled=True,
+                productive_credit_voucher_activity_boost_window_ticks=4,
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+                loan_activity_period_ticks=1,
+                swap_size_min_usd=10.0,
+                random_request_amount_mean=10.0,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        producers = [agent for agent in engine.agents.values() if agent.role == "producer"]
+        borrower, voucher_issuer = producers[0], producers[1]
+        borrower_pool = engine.pools[borrower.pool_id]
+        issuer_pool = engine.pools[voucher_issuer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        borrower_voucher = borrower.voucher_spec.voucher_id
+        target_voucher = voucher_issuer.voucher_spec.voucher_id
+        for pool in (borrower_pool, issuer_pool, lender_pool):
+            pool.values.set_value(borrower_voucher, 1.0)
+            pool.values.set_value(target_voucher, 1.0)
+        lender_pool.list_asset_with_value_and_limit(borrower_voucher, value=1.0, window_len=10, cap_in=500.0)
+        lender_pool.list_asset_with_value_and_limit(target_voucher, value=1.0, window_len=10, cap_in=500.0)
+        engine.accept_index.setdefault(borrower_voucher, set()).add(lender_pool.pool_id)
+        engine.accept_index.setdefault(target_voucher, set()).add(lender_pool.pool_id)
+        for pool, asset in (
+            (borrower_pool, borrower_voucher),
+            (lender_pool, target_voucher),
+        ):
+            current = pool.vault.get(asset)
+            if current > 0.0:
+                engine._vault_sub(pool, asset, current, "test_clear", "test")
+        engine._vault_add(borrower_pool, borrower_voucher, 50.0, "test_seed", "test")
+        engine._vault_add(lender_pool, target_voucher, 100.0, "test_seed", "test")
+        engine._vault_add(lender_pool, stable_id, 100.0, "test_seed", "test")
+        lender_pool.policy.min_stable_reserve = 0.0
+        engine._producer_deposit_value_by_voucher[borrower_voucher] = 100.0
+        engine.tick = 1
+        engine._noam_last_refresh_tick = -1
+
+        attempted = engine._attempt_repayment(borrower_pool)
+
+        self.assertTrue(attempted)
+        self.assertEqual(engine._producer_primary_voucher_loan_attempts_tick, 1)
+        self.assertEqual(engine._producer_primary_voucher_loan_executed_tick, 1)
+        self.assertEqual(engine._producer_voucher_loan_executed_tick, 1)
+        self.assertEqual(engine._producer_loan_executed_tick, 0)
+        self.assertEqual(len(engine._producer_debt_obligations), 1)
+        self.assertAlmostEqual(engine._producer_debt_obligations[0].cash_service_due_usd, 0.0)
+        self.assertAlmostEqual(engine._productive_credit_inflow_usd_tick, 0.0)
+        self.assertAlmostEqual(engine._producer_debt_stable_recovered_usd_tick, 0.0)
+        self.assertAlmostEqual(engine._bond_service_reserved_usd_tick, 0.0)
 
     def test_voucher_loan_fallback_is_disabled_by_default(self):
         engine = SimulationEngine(
@@ -178,6 +247,98 @@ class RegenBondRevisionTests(unittest.TestCase):
 
         self.assertFalse(attempted)
         self.assertEqual(engine._producer_voucher_loan_attempts_tick, 0)
+
+    def test_consumer_voucher_purchase_recovers_stable_and_preserves_reserve(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_consumers=1,
+                max_pools=4,
+                producer_deposits_enabled=True,
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+                ordinary_stable_spend_protection_enabled=True,
+                ordinary_stable_spend_buffer_voucher_share=0.0,
+                lender_voucher_purchase_demand_enabled=True,
+                lender_voucher_purchase_min_usd=1.0,
+                lender_voucher_purchase_inventory_share=0.05,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        consumer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "consumer")
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        for pool in (producer_pool, consumer_pool, lender_pool):
+            pool.values.set_value(voucher_id, 1.0)
+        lender_pool.list_asset_with_value_and_limit(voucher_id, value=1.0, window_len=10, cap_in=500.0)
+        lender_pool.list_asset_with_value_and_limit(stable_id, value=1.0, window_len=10, cap_in=500.0)
+        current_voucher = lender_pool.vault.get(voucher_id)
+        if current_voucher > 0.0:
+            engine._vault_sub(lender_pool, voucher_id, current_voucher, "test_clear", "test")
+        current_stable = consumer_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(consumer_pool, stable_id, current_stable, "test_clear", "test")
+        engine._vault_add(lender_pool, voucher_id, 40.0, "test_seed", "test")
+        engine._vault_add(consumer_pool, stable_id, 20.0, "test_seed", "test")
+        consumer_pool.policy.min_stable_reserve = 10.0
+        engine.tick = 1
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            voucher_units=40.0,
+            borrowed_usd=40.0,
+        )
+
+        purchased = engine._attempt_lender_voucher_purchase("consumer")
+
+        self.assertTrue(purchased)
+        self.assertEqual(engine._consumer_voucher_purchase_attempts_tick, 1)
+        self.assertEqual(engine._consumer_voucher_purchase_success_tick, 1)
+        self.assertGreater(engine._consumer_voucher_purchase_stable_spent_usd_tick, 0.0)
+        self.assertGreater(engine._consumer_voucher_purchase_voucher_value_acquired_usd_tick, 0.0)
+        self.assertGreater(engine._lender_recovered_stable_consumer_purchase_usd_tick, 0.0)
+        self.assertGreater(engine._producer_debt_consumer_stable_purchase_usd_tick, 0.0)
+        self.assertGreaterEqual(consumer_pool.vault.get(stable_id), consumer_pool.policy.min_stable_reserve)
+
+    def test_consumer_voucher_purchase_reports_reserve_protected_failure(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_consumers=1,
+                max_pools=4,
+                ordinary_stable_spend_protection_enabled=True,
+                ordinary_stable_spend_buffer_voucher_share=0.0,
+                lender_voucher_purchase_demand_enabled=True,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        consumer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "consumer")
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        for pool in (producer_pool, consumer_pool, lender_pool):
+            pool.values.set_value(voucher_id, 1.0)
+        lender_pool.list_asset_with_value_and_limit(voucher_id, value=1.0, window_len=10, cap_in=500.0)
+        lender_pool.list_asset_with_value_and_limit(stable_id, value=1.0, window_len=10, cap_in=500.0)
+        current_voucher = lender_pool.vault.get(voucher_id)
+        if current_voucher > 0.0:
+            engine._vault_sub(lender_pool, voucher_id, current_voucher, "test_clear", "test")
+        current_stable = consumer_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(consumer_pool, stable_id, current_stable, "test_clear", "test")
+        engine._vault_add(lender_pool, voucher_id, 40.0, "test_seed", "test")
+        engine._vault_add(consumer_pool, stable_id, 10.0, "test_seed", "test")
+        consumer_pool.policy.min_stable_reserve = 10.0
+        engine.tick = 1
+
+        purchased = engine._attempt_lender_voucher_purchase("consumer")
+
+        self.assertFalse(purchased)
+        self.assertEqual(engine._consumer_voucher_purchase_attempts_tick, 1)
+        self.assertEqual(engine._consumer_voucher_purchase_success_tick, 0)
+        self.assertEqual(engine._consumer_voucher_purchase_reserve_protected_tick, 1)
 
     def test_snapshot_reports_lender_stable_available_above_reserve(self):
         engine = SimulationEngine(small_config())
@@ -413,6 +574,10 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(cfg.producer_loan_failure_backfill_max_attempts, 1)
         self.assertFalse(cfg.producer_voucher_loan_fallback_enabled)
         self.assertFalse(cfg.producer_voucher_loan_activity_boost_enabled)
+        self.assertFalse(cfg.producer_primary_voucher_borrowing_enabled)
+        self.assertAlmostEqual(cfg.producer_primary_voucher_borrowing_attempt_share, 0.0)
+        self.assertFalse(cfg.lender_voucher_purchase_demand_enabled)
+        self.assertEqual(cfg.lender_voucher_purchase_attempts_per_tick, 0)
         self.assertEqual(cfg.liquidity_mandate_mode, "community_deficit_then_lender")
         self.assertEqual(cfg.max_pools, 9)
 
@@ -430,6 +595,20 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(len(lenders), 4)
         self.assertEqual(len(liquidity_providers), 0)
         self.assertAlmostEqual(sum(pool.vault.get(stable_id) for pool in lenders), 1000.0)
+
+    def test_frontier_probe_flags_are_preserved_in_shard_payloads(self):
+        for key in (
+            "enable_producer_voucher_loan_fallback",
+            "enable_producer_voucher_loan_activity_boost",
+            "enable_producer_primary_voucher_borrowing",
+            "producer_primary_voucher_borrowing_attempt_share",
+            "producer_voucher_loan_max_target_candidates",
+            "enable_lender_voucher_purchase_demand",
+            "lender_voucher_purchase_attempts_per_tick",
+            "lender_voucher_purchase_consumer_share",
+            "lender_voucher_purchase_inventory_share",
+        ):
+            self.assertIn(key, SHARD_CONFIG_KEYS)
 
     def test_voucher_unit_value_prices_one_ksh_voucher_against_usd_stable(self):
         engine = SimulationEngine(small_config(kes_per_usd=128.0, voucher_unit_value_usd=1.0 / 128.0))

@@ -156,10 +156,44 @@ run_frontier() {
       frontier_extra_args+=(--enable-producer-voucher-loan-activity-boost)
       ;;
   esac
+  case "${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-0}" in
+    1|true|TRUE|yes|YES)
+      frontier_extra_args+=(--enable-producer-primary-voucher-borrowing)
+      ;;
+  esac
+  if [[ -n "${PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE:-}" ]]; then
+    frontier_extra_args+=(
+      --producer-primary-voucher-borrowing-attempt-share
+      "$PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE"
+    )
+  fi
   if [[ -n "${PRODUCER_VOUCHER_LOAN_MAX_TARGET_CANDIDATES:-}" ]]; then
     frontier_extra_args+=(
       --producer-voucher-loan-max-target-candidates
       "$PRODUCER_VOUCHER_LOAN_MAX_TARGET_CANDIDATES"
+    )
+  fi
+  case "${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-0}" in
+    1|true|TRUE|yes|YES)
+      frontier_extra_args+=(--enable-lender-voucher-purchase-demand)
+      ;;
+  esac
+  if [[ -n "${LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK:-}" ]]; then
+    frontier_extra_args+=(
+      --lender-voucher-purchase-attempts-per-tick
+      "$LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK"
+    )
+  fi
+  if [[ -n "${LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE:-}" ]]; then
+    frontier_extra_args+=(
+      --lender-voucher-purchase-consumer-share
+      "$LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE"
+    )
+  fi
+  if [[ -n "${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-}" ]]; then
+    frontier_extra_args+=(
+      --lender-voucher-purchase-inventory-share
+      "$LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE"
     )
   fi
   echo "[batch] writing frontier artifacts to $output_dir"
@@ -167,6 +201,8 @@ run_frontier() {
   echo "[batch] producer debt contract service margin: ${PRODUCER_DEBT_CONTRACT_SERVICE_MARGIN_RATE:-0.50}"
   echo "[batch] ablation flags: voucher_boost=${DISABLE_PRODUCTIVE_CREDIT_VOUCHER_ACTIVITY_BOOST:-0} stable_protection=${DISABLE_ORDINARY_STABLE_SPEND_PROTECTION:-0} loan_backfill=${DISABLE_PRODUCER_LOAN_FAILURE_BACKFILL:-0}"
   echo "[batch] voucher-loan fallback: enabled=${ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK:-0} activity_boost=${ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST:-0} max_targets=${PRODUCER_VOUCHER_LOAN_MAX_TARGET_CANDIDATES:-3}"
+  echo "[batch] primary voucher borrowing: enabled=${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-0} attempt_share=${PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE:-0.50}"
+  echo "[batch] lender voucher purchase demand: enabled=${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-0} attempts_per_tick=${LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK:-5} consumer_share=${LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE:-0.75} inventory_share=${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05}"
   run_monte_carlo "${PYTHON_BIN}" scripts/run_regenbond_monte_carlo.py \
     --scenario bond_issuer_frontier \
     --network-scales "${NETWORK_SCALES:-$default_scales}" \
@@ -233,6 +269,12 @@ case "$JOB" in
     FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}" \
       ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK="${ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK:-1}" \
       ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST="${ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST:-1}" \
+      ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING="${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-1}" \
+      PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE="${PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE:-0.50}" \
+      ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND="${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-1}" \
+      LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK="${LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK:-5}" \
+      LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE="${LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE:-0.75}" \
+      LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE="${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05}" \
       OUTPUT="${OUTPUT:-$OUTPUT_ROOT/bond_issuer_frontier_rola_regeneration_probe}" \
       run_frontier 5 260 bond_issuer_frontier_rola_regeneration_probe current 0,0.005,0.01,0.02,0.03,0.04,0.05 0 0.50
     ;;

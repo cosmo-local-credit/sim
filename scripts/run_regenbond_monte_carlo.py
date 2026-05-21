@@ -313,10 +313,50 @@ def parse_args() -> argparse.Namespace:
         help="Experimental frontier probe: boost ordinary source selection for vouchers used in voucher loans.",
     )
     parser.add_argument(
+        "--enable-producer-primary-voucher-borrowing",
+        action="store_true",
+        help=(
+            "Experimental frontier probe: allow producer voucher-to-voucher borrowing "
+            "as a primary credit channel alongside stable borrowing."
+        ),
+    )
+    parser.add_argument(
+        "--producer-primary-voucher-borrowing-attempt-share",
+        type=float,
+        default=0.50,
+        help="Share of eligible producer credit attempts that try primary voucher borrowing first.",
+    )
+    parser.add_argument(
         "--producer-voucher-loan-max-target-candidates",
         type=int,
         default=3,
         help="Maximum voucher target assets to try for experimental producer voucher-loan fallback.",
+    )
+    parser.add_argument(
+        "--enable-lender-voucher-purchase-demand",
+        action="store_true",
+        help=(
+            "Experimental frontier probe: let lender-held producer voucher inventory "
+            "trigger calibrated consumer/third-party stable purchases."
+        ),
+    )
+    parser.add_argument(
+        "--lender-voucher-purchase-attempts-per-tick",
+        type=int,
+        default=5,
+        help="Experimental stable-to-voucher purchase attempts per tick when purchase demand is enabled.",
+    )
+    parser.add_argument(
+        "--lender-voucher-purchase-consumer-share",
+        type=float,
+        default=0.75,
+        help="Share of purchase-demand attempts assigned to consumer stable buyers.",
+    )
+    parser.add_argument(
+        "--lender-voucher-purchase-inventory-share",
+        type=float,
+        default=0.05,
+        help="Maximum share of a target lender-held voucher inventory considered in one purchase attempt.",
     )
     parser.add_argument(
         "--frontier-mode",
@@ -539,6 +579,15 @@ SHARD_CONFIG_KEYS = (
     "disable_productive_credit_voucher_activity_boost",
     "disable_ordinary_stable_spend_protection",
     "disable_producer_loan_failure_backfill",
+    "enable_producer_voucher_loan_fallback",
+    "enable_producer_voucher_loan_activity_boost",
+    "enable_producer_primary_voucher_borrowing",
+    "producer_primary_voucher_borrowing_attempt_share",
+    "producer_voucher_loan_max_target_candidates",
+    "enable_lender_voucher_purchase_demand",
+    "lender_voucher_purchase_attempts_per_tick",
+    "lender_voucher_purchase_consumer_share",
+    "lender_voucher_purchase_inventory_share",
     "frontier_mode",
     "frontier_refinement_rounds",
     "route_success_floor",
@@ -1471,8 +1520,51 @@ def scenario_config(
         cfg.producer_voucher_loan_activity_boost_enabled = bool(
             getattr(args, "enable_producer_voucher_loan_activity_boost", False)
         )
+        cfg.producer_primary_voucher_borrowing_enabled = bool(
+            getattr(args, "enable_producer_primary_voucher_borrowing", False)
+        )
+        if cfg.producer_primary_voucher_borrowing_enabled:
+            cfg.producer_primary_voucher_borrowing_attempt_share = max(
+                0.0,
+                min(
+                    1.0,
+                    float(
+                        getattr(
+                            args,
+                            "producer_primary_voucher_borrowing_attempt_share",
+                            0.50,
+                        )
+                        or 0.0
+                    ),
+                ),
+            )
+        else:
+            cfg.producer_primary_voucher_borrowing_attempt_share = 0.0
         cfg.producer_voucher_loan_max_target_candidates = max(
             1, int(getattr(args, "producer_voucher_loan_max_target_candidates", 3) or 3)
+        )
+        cfg.lender_voucher_purchase_demand_enabled = bool(
+            getattr(args, "enable_lender_voucher_purchase_demand", False)
+        )
+        if cfg.lender_voucher_purchase_demand_enabled:
+            cfg.lender_voucher_purchase_attempts_per_tick = max(
+                0,
+                int(
+                    math.ceil(
+                        int(getattr(args, "lender_voucher_purchase_attempts_per_tick", 5) or 0)
+                        * factor
+                    )
+                ),
+            )
+        else:
+            cfg.lender_voucher_purchase_attempts_per_tick = 0
+        cfg.lender_voucher_purchase_consumer_share = max(
+            0.0,
+            min(1.0, float(getattr(args, "lender_voucher_purchase_consumer_share", 0.75) or 0.0)),
+        )
+        cfg.lender_voucher_purchase_inventory_share = max(
+            0.0,
+            float(getattr(args, "lender_voucher_purchase_inventory_share", 0.05) or 0.0),
         )
         cfg.liquidity_mandate_mode = "community_deficit_then_lender"
         cfg.route_substitution_enabled = True
@@ -2191,6 +2283,25 @@ def run_one(
             "producer_voucher_loan_executed_usd_tick",
             "producer_voucher_loan_clipped_lender_cap_usd_tick",
             "producer_voucher_loan_clipped_lender_remaining_usd_tick",
+            "producer_primary_voucher_loan_attempts_tick",
+            "producer_primary_voucher_loan_executed_tick",
+            "voucher_purchase_attempts_tick",
+            "consumer_voucher_purchase_attempts_tick",
+            "consumer_voucher_purchase_success_tick",
+            "consumer_voucher_purchase_no_stable_tick",
+            "consumer_voucher_purchase_reserve_protected_tick",
+            "consumer_voucher_purchase_no_route_tick",
+            "consumer_voucher_purchase_no_target_tick",
+            "consumer_voucher_purchase_stable_spent_usd_tick",
+            "consumer_voucher_purchase_voucher_value_acquired_usd_tick",
+            "third_party_voucher_purchase_attempts_tick",
+            "third_party_voucher_purchase_success_tick",
+            "third_party_voucher_purchase_no_stable_tick",
+            "third_party_voucher_purchase_reserve_protected_tick",
+            "third_party_voucher_purchase_no_route_tick",
+            "third_party_voucher_purchase_no_target_tick",
+            "third_party_voucher_purchase_stable_spent_usd_tick",
+            "third_party_voucher_purchase_voucher_value_acquired_usd_tick",
             "fee_conversion_attempted_usd_tick",
             "fee_conversion_success_usd_tick",
             "fee_conversion_failed_usd_tick",
@@ -2322,6 +2433,24 @@ def run_one(
                     f"_{control_prefix}_productive_credit_voucher_deposit_cap_rate_per_month",
                     0.0,
                 )
+            ),
+            "configured_producer_primary_voucher_borrowing_enabled": int(
+                bool(getattr(cfg, "producer_primary_voucher_borrowing_enabled", False))
+            ),
+            "configured_producer_primary_voucher_borrowing_attempt_share": safe_float(
+                getattr(cfg, "producer_primary_voucher_borrowing_attempt_share", 0.0)
+            ),
+            "configured_lender_voucher_purchase_demand_enabled": int(
+                bool(getattr(cfg, "lender_voucher_purchase_demand_enabled", False))
+            ),
+            "configured_lender_voucher_purchase_attempts_per_tick": int(
+                getattr(cfg, "lender_voucher_purchase_attempts_per_tick", 0) or 0
+            ),
+            "configured_lender_voucher_purchase_consumer_share": safe_float(
+                getattr(cfg, "lender_voucher_purchase_consumer_share", 0.0)
+            ),
+            "configured_lender_voucher_purchase_inventory_share": safe_float(
+                getattr(cfg, "lender_voucher_purchase_inventory_share", 0.0)
             ),
             "stable_symbol": unit_diagnostics.get("stable_symbol", ""),
             "stable_unit_value_usd": unit_diagnostics.get("stable_unit_value_usd", 1.0),
@@ -2670,10 +2799,147 @@ def run_one(
             "producer_voucher_loan_clipped_lender_remaining_usd_total": cumulative_float[
                 "producer_voucher_loan_clipped_lender_remaining_usd_tick"
             ],
+            "producer_primary_voucher_loan_attempts": latest.get(
+                "producer_primary_voucher_loan_attempts_tick", 0
+            ),
+            "producer_primary_voucher_loan_attempts_total": latest.get(
+                "producer_primary_voucher_loan_attempts_total",
+                cumulative_float["producer_primary_voucher_loan_attempts_tick"],
+            ),
+            "producer_primary_voucher_loan_executed": latest.get(
+                "producer_primary_voucher_loan_executed_tick", 0
+            ),
+            "producer_primary_voucher_loan_executed_total": latest.get(
+                "producer_primary_voucher_loan_executed_total",
+                cumulative_float["producer_primary_voucher_loan_executed_tick"],
+            ),
             "lender_stable_total_usd": latest.get("lender_stable_total_usd", 0.0),
             "lender_stable_reserve_usd": latest.get("lender_stable_reserve_usd", 0.0),
             "lender_stable_available_above_reserve_usd": latest.get(
                 "lender_stable_available_above_reserve_usd", 0.0
+            ),
+            "lender_held_producer_voucher_inventory_usd": latest.get(
+                "lender_held_producer_voucher_inventory_usd", 0.0
+            ),
+            "consumer_stable_available_above_reserve_usd": latest.get(
+                "consumer_stable_available_above_reserve_usd", 0.0
+            ),
+            "voucher_purchase_attempts": latest.get("voucher_purchase_attempts_tick", 0),
+            "voucher_purchase_attempts_total": latest.get(
+                "voucher_purchase_attempts_total",
+                cumulative_float["voucher_purchase_attempts_tick"],
+            ),
+            "consumer_voucher_purchase_attempts": latest.get(
+                "consumer_voucher_purchase_attempts_tick", 0
+            ),
+            "consumer_voucher_purchase_attempts_total": latest.get(
+                "consumer_voucher_purchase_attempts_total",
+                cumulative_float["consumer_voucher_purchase_attempts_tick"],
+            ),
+            "consumer_voucher_purchase_success": latest.get(
+                "consumer_voucher_purchase_success_tick", 0
+            ),
+            "consumer_voucher_purchase_success_total": latest.get(
+                "consumer_voucher_purchase_success_total",
+                cumulative_float["consumer_voucher_purchase_success_tick"],
+            ),
+            "consumer_voucher_purchase_no_stable": latest.get(
+                "consumer_voucher_purchase_no_stable_tick", 0
+            ),
+            "consumer_voucher_purchase_no_stable_total": latest.get(
+                "consumer_voucher_purchase_no_stable_total",
+                cumulative_float["consumer_voucher_purchase_no_stable_tick"],
+            ),
+            "consumer_voucher_purchase_reserve_protected": latest.get(
+                "consumer_voucher_purchase_reserve_protected_tick", 0
+            ),
+            "consumer_voucher_purchase_reserve_protected_total": latest.get(
+                "consumer_voucher_purchase_reserve_protected_total",
+                cumulative_float["consumer_voucher_purchase_reserve_protected_tick"],
+            ),
+            "consumer_voucher_purchase_no_route": latest.get(
+                "consumer_voucher_purchase_no_route_tick", 0
+            ),
+            "consumer_voucher_purchase_no_route_total": latest.get(
+                "consumer_voucher_purchase_no_route_total",
+                cumulative_float["consumer_voucher_purchase_no_route_tick"],
+            ),
+            "consumer_voucher_purchase_no_target": latest.get(
+                "consumer_voucher_purchase_no_target_tick", 0
+            ),
+            "consumer_voucher_purchase_no_target_total": latest.get(
+                "consumer_voucher_purchase_no_target_total",
+                cumulative_float["consumer_voucher_purchase_no_target_tick"],
+            ),
+            "consumer_voucher_purchase_stable_spent_usd": latest.get(
+                "consumer_voucher_purchase_stable_spent_usd_tick", 0.0
+            ),
+            "consumer_voucher_purchase_stable_spent_usd_total": latest.get(
+                "consumer_voucher_purchase_stable_spent_usd_total",
+                cumulative_float["consumer_voucher_purchase_stable_spent_usd_tick"],
+            ),
+            "consumer_voucher_purchase_voucher_value_acquired_usd": latest.get(
+                "consumer_voucher_purchase_voucher_value_acquired_usd_tick", 0.0
+            ),
+            "consumer_voucher_purchase_voucher_value_acquired_usd_total": latest.get(
+                "consumer_voucher_purchase_voucher_value_acquired_usd_total",
+                cumulative_float["consumer_voucher_purchase_voucher_value_acquired_usd_tick"],
+            ),
+            "third_party_voucher_purchase_attempts": latest.get(
+                "third_party_voucher_purchase_attempts_tick", 0
+            ),
+            "third_party_voucher_purchase_attempts_total": latest.get(
+                "third_party_voucher_purchase_attempts_total",
+                cumulative_float["third_party_voucher_purchase_attempts_tick"],
+            ),
+            "third_party_voucher_purchase_success": latest.get(
+                "third_party_voucher_purchase_success_tick", 0
+            ),
+            "third_party_voucher_purchase_success_total": latest.get(
+                "third_party_voucher_purchase_success_total",
+                cumulative_float["third_party_voucher_purchase_success_tick"],
+            ),
+            "third_party_voucher_purchase_no_stable": latest.get(
+                "third_party_voucher_purchase_no_stable_tick", 0
+            ),
+            "third_party_voucher_purchase_no_stable_total": latest.get(
+                "third_party_voucher_purchase_no_stable_total",
+                cumulative_float["third_party_voucher_purchase_no_stable_tick"],
+            ),
+            "third_party_voucher_purchase_reserve_protected": latest.get(
+                "third_party_voucher_purchase_reserve_protected_tick", 0
+            ),
+            "third_party_voucher_purchase_reserve_protected_total": latest.get(
+                "third_party_voucher_purchase_reserve_protected_total",
+                cumulative_float["third_party_voucher_purchase_reserve_protected_tick"],
+            ),
+            "third_party_voucher_purchase_no_route": latest.get(
+                "third_party_voucher_purchase_no_route_tick", 0
+            ),
+            "third_party_voucher_purchase_no_route_total": latest.get(
+                "third_party_voucher_purchase_no_route_total",
+                cumulative_float["third_party_voucher_purchase_no_route_tick"],
+            ),
+            "third_party_voucher_purchase_no_target": latest.get(
+                "third_party_voucher_purchase_no_target_tick", 0
+            ),
+            "third_party_voucher_purchase_no_target_total": latest.get(
+                "third_party_voucher_purchase_no_target_total",
+                cumulative_float["third_party_voucher_purchase_no_target_tick"],
+            ),
+            "third_party_voucher_purchase_stable_spent_usd": latest.get(
+                "third_party_voucher_purchase_stable_spent_usd_tick", 0.0
+            ),
+            "third_party_voucher_purchase_stable_spent_usd_total": latest.get(
+                "third_party_voucher_purchase_stable_spent_usd_total",
+                cumulative_float["third_party_voucher_purchase_stable_spent_usd_tick"],
+            ),
+            "third_party_voucher_purchase_voucher_value_acquired_usd": latest.get(
+                "third_party_voucher_purchase_voucher_value_acquired_usd_tick", 0.0
+            ),
+            "third_party_voucher_purchase_voucher_value_acquired_usd_total": latest.get(
+                "third_party_voucher_purchase_voucher_value_acquired_usd_total",
+                cumulative_float["third_party_voucher_purchase_voucher_value_acquired_usd_tick"],
             ),
             "lender_recovered_stable_usd": latest.get("lender_recovered_stable_usd_tick", 0.0),
             "lender_recovered_stable_usd_total": cumulative_float[
@@ -4898,6 +5164,12 @@ def summarize_frontier_cell(
     producer_voucher_loan_executed_usd_values = [
         safe_float(row.get("producer_voucher_loan_executed_usd_total")) for row in rows
     ]
+    producer_primary_voucher_loan_attempt_values = [
+        safe_float(row.get("producer_primary_voucher_loan_attempts_total")) for row in rows
+    ]
+    producer_primary_voucher_loan_executed_values = [
+        safe_float(row.get("producer_primary_voucher_loan_executed_total")) for row in rows
+    ]
     producer_loan_attempted_usd_values = [
         safe_float(row.get("producer_loan_attempted_usd_total")) for row in rows
     ]
@@ -4918,6 +5190,65 @@ def summarize_frontier_cell(
     ]
     producer_loan_lender_available_stable_values = [
         safe_float(row.get("lender_stable_available_above_reserve_usd")) for row in rows
+    ]
+    lender_held_producer_voucher_inventory_values = [
+        safe_float(row.get("lender_held_producer_voucher_inventory_usd")) for row in rows
+    ]
+    consumer_stable_available_above_reserve_values = [
+        safe_float(row.get("consumer_stable_available_above_reserve_usd")) for row in rows
+    ]
+    voucher_purchase_attempt_values = [
+        safe_float(row.get("voucher_purchase_attempts_total")) for row in rows
+    ]
+    consumer_voucher_purchase_attempt_values = [
+        safe_float(row.get("consumer_voucher_purchase_attempts_total")) for row in rows
+    ]
+    consumer_voucher_purchase_success_values = [
+        safe_float(row.get("consumer_voucher_purchase_success_total")) for row in rows
+    ]
+    consumer_voucher_purchase_no_stable_values = [
+        safe_float(row.get("consumer_voucher_purchase_no_stable_total")) for row in rows
+    ]
+    consumer_voucher_purchase_reserve_protected_values = [
+        safe_float(row.get("consumer_voucher_purchase_reserve_protected_total")) for row in rows
+    ]
+    consumer_voucher_purchase_no_route_values = [
+        safe_float(row.get("consumer_voucher_purchase_no_route_total")) for row in rows
+    ]
+    consumer_voucher_purchase_no_target_values = [
+        safe_float(row.get("consumer_voucher_purchase_no_target_total")) for row in rows
+    ]
+    consumer_voucher_purchase_stable_spent_values = [
+        safe_float(row.get("consumer_voucher_purchase_stable_spent_usd_total")) for row in rows
+    ]
+    consumer_voucher_purchase_voucher_acquired_values = [
+        safe_float(row.get("consumer_voucher_purchase_voucher_value_acquired_usd_total"))
+        for row in rows
+    ]
+    third_party_voucher_purchase_attempt_values = [
+        safe_float(row.get("third_party_voucher_purchase_attempts_total")) for row in rows
+    ]
+    third_party_voucher_purchase_success_values = [
+        safe_float(row.get("third_party_voucher_purchase_success_total")) for row in rows
+    ]
+    third_party_voucher_purchase_no_stable_values = [
+        safe_float(row.get("third_party_voucher_purchase_no_stable_total")) for row in rows
+    ]
+    third_party_voucher_purchase_reserve_protected_values = [
+        safe_float(row.get("third_party_voucher_purchase_reserve_protected_total")) for row in rows
+    ]
+    third_party_voucher_purchase_no_route_values = [
+        safe_float(row.get("third_party_voucher_purchase_no_route_total")) for row in rows
+    ]
+    third_party_voucher_purchase_no_target_values = [
+        safe_float(row.get("third_party_voucher_purchase_no_target_total")) for row in rows
+    ]
+    third_party_voucher_purchase_stable_spent_values = [
+        safe_float(row.get("third_party_voucher_purchase_stable_spent_usd_total")) for row in rows
+    ]
+    third_party_voucher_purchase_voucher_acquired_values = [
+        safe_float(row.get("third_party_voucher_purchase_voucher_value_acquired_usd_total"))
+        for row in rows
     ]
     lender_recovered_stable_values = [
         safe_float(row.get("lender_recovered_stable_usd_total")) for row in rows
@@ -5329,6 +5660,12 @@ def summarize_frontier_cell(
         "producer_voucher_loan_executed_usd_total_p50": percentile(
             producer_voucher_loan_executed_usd_values, 0.50
         ),
+        "producer_primary_voucher_loan_attempts_total_p50": percentile(
+            producer_primary_voucher_loan_attempt_values, 0.50
+        ),
+        "producer_primary_voucher_loan_executed_total_p50": percentile(
+            producer_primary_voucher_loan_executed_values, 0.50
+        ),
         "producer_loan_attempted_usd_total_p50": percentile(producer_loan_attempted_usd_values, 0.50),
         "producer_loan_executed_usd_total_p50": percentile(producer_loan_executed_usd_values, 0.50),
         "producer_loan_clipped_lender_cap_usd_total_p50": percentile(
@@ -5345,6 +5682,61 @@ def summarize_frontier_cell(
         ),
         "lender_stable_available_above_reserve_usd_p50": percentile(
             producer_loan_lender_available_stable_values, 0.50
+        ),
+        "lender_held_producer_voucher_inventory_usd_p50": percentile(
+            lender_held_producer_voucher_inventory_values, 0.50
+        ),
+        "consumer_stable_available_above_reserve_usd_p50": percentile(
+            consumer_stable_available_above_reserve_values, 0.50
+        ),
+        "voucher_purchase_attempts_total_p50": percentile(voucher_purchase_attempt_values, 0.50),
+        "consumer_voucher_purchase_attempts_total_p50": percentile(
+            consumer_voucher_purchase_attempt_values, 0.50
+        ),
+        "consumer_voucher_purchase_success_total_p50": percentile(
+            consumer_voucher_purchase_success_values, 0.50
+        ),
+        "consumer_voucher_purchase_no_stable_total_p50": percentile(
+            consumer_voucher_purchase_no_stable_values, 0.50
+        ),
+        "consumer_voucher_purchase_reserve_protected_total_p50": percentile(
+            consumer_voucher_purchase_reserve_protected_values, 0.50
+        ),
+        "consumer_voucher_purchase_no_route_total_p50": percentile(
+            consumer_voucher_purchase_no_route_values, 0.50
+        ),
+        "consumer_voucher_purchase_no_target_total_p50": percentile(
+            consumer_voucher_purchase_no_target_values, 0.50
+        ),
+        "consumer_voucher_purchase_stable_spent_usd_total_p50": percentile(
+            consumer_voucher_purchase_stable_spent_values, 0.50
+        ),
+        "consumer_voucher_purchase_voucher_value_acquired_usd_total_p50": percentile(
+            consumer_voucher_purchase_voucher_acquired_values, 0.50
+        ),
+        "third_party_voucher_purchase_attempts_total_p50": percentile(
+            third_party_voucher_purchase_attempt_values, 0.50
+        ),
+        "third_party_voucher_purchase_success_total_p50": percentile(
+            third_party_voucher_purchase_success_values, 0.50
+        ),
+        "third_party_voucher_purchase_no_stable_total_p50": percentile(
+            third_party_voucher_purchase_no_stable_values, 0.50
+        ),
+        "third_party_voucher_purchase_reserve_protected_total_p50": percentile(
+            third_party_voucher_purchase_reserve_protected_values, 0.50
+        ),
+        "third_party_voucher_purchase_no_route_total_p50": percentile(
+            third_party_voucher_purchase_no_route_values, 0.50
+        ),
+        "third_party_voucher_purchase_no_target_total_p50": percentile(
+            third_party_voucher_purchase_no_target_values, 0.50
+        ),
+        "third_party_voucher_purchase_stable_spent_usd_total_p50": percentile(
+            third_party_voucher_purchase_stable_spent_values, 0.50
+        ),
+        "third_party_voucher_purchase_voucher_value_acquired_usd_total_p50": percentile(
+            third_party_voucher_purchase_voucher_acquired_values, 0.50
         ),
         "lender_recovered_stable_usd_total_p50": percentile(lender_recovered_stable_values, 0.50),
         "lender_recovered_stable_borrower_regular_usd_total_p50": percentile(

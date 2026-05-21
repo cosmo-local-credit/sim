@@ -240,6 +240,44 @@ class SimulationEngine:
         self._producer_voucher_loan_executed_usd_tick: float = 0.0
         self._producer_voucher_loan_clipped_lender_cap_usd_tick: float = 0.0
         self._producer_voucher_loan_clipped_lender_remaining_usd_tick: float = 0.0
+        self._producer_primary_voucher_loan_attempts_tick: int = 0
+        self._producer_primary_voucher_loan_attempts_total: int = 0
+        self._producer_primary_voucher_loan_executed_tick: int = 0
+        self._producer_primary_voucher_loan_executed_total: int = 0
+        self._voucher_purchase_attempts_tick: int = 0
+        self._voucher_purchase_attempts_total: int = 0
+        self._consumer_voucher_purchase_attempts_tick: int = 0
+        self._consumer_voucher_purchase_attempts_total: int = 0
+        self._consumer_voucher_purchase_success_tick: int = 0
+        self._consumer_voucher_purchase_success_total: int = 0
+        self._consumer_voucher_purchase_no_stable_tick: int = 0
+        self._consumer_voucher_purchase_no_stable_total: int = 0
+        self._consumer_voucher_purchase_reserve_protected_tick: int = 0
+        self._consumer_voucher_purchase_reserve_protected_total: int = 0
+        self._consumer_voucher_purchase_no_route_tick: int = 0
+        self._consumer_voucher_purchase_no_route_total: int = 0
+        self._consumer_voucher_purchase_no_target_tick: int = 0
+        self._consumer_voucher_purchase_no_target_total: int = 0
+        self._consumer_voucher_purchase_stable_spent_usd_tick: float = 0.0
+        self._consumer_voucher_purchase_stable_spent_usd_total: float = 0.0
+        self._consumer_voucher_purchase_voucher_value_acquired_usd_tick: float = 0.0
+        self._consumer_voucher_purchase_voucher_value_acquired_usd_total: float = 0.0
+        self._third_party_voucher_purchase_attempts_tick: int = 0
+        self._third_party_voucher_purchase_attempts_total: int = 0
+        self._third_party_voucher_purchase_success_tick: int = 0
+        self._third_party_voucher_purchase_success_total: int = 0
+        self._third_party_voucher_purchase_no_stable_tick: int = 0
+        self._third_party_voucher_purchase_no_stable_total: int = 0
+        self._third_party_voucher_purchase_reserve_protected_tick: int = 0
+        self._third_party_voucher_purchase_reserve_protected_total: int = 0
+        self._third_party_voucher_purchase_no_route_tick: int = 0
+        self._third_party_voucher_purchase_no_route_total: int = 0
+        self._third_party_voucher_purchase_no_target_tick: int = 0
+        self._third_party_voucher_purchase_no_target_total: int = 0
+        self._third_party_voucher_purchase_stable_spent_usd_tick: float = 0.0
+        self._third_party_voucher_purchase_stable_spent_usd_total: float = 0.0
+        self._third_party_voucher_purchase_voucher_value_acquired_usd_tick: float = 0.0
+        self._third_party_voucher_purchase_voucher_value_acquired_usd_total: float = 0.0
         self._route_context_count_tick: Dict[str, int] = {}
         self._route_context_count_total: Dict[str, int] = {}
         self._route_context_volume_usd_tick: Dict[str, float] = {}
@@ -3102,6 +3140,7 @@ class SimulationEngine:
         voucher_id: str,
         voucher_units: float,
         borrowed_usd: float,
+        contract_cash_service: bool = True,
     ) -> None:
         if not bool(self.cfg.producer_debt_maturity_enabled):
             return
@@ -3117,11 +3156,9 @@ class SimulationEngine:
         if spec is None or spec.issuer_id != producer_pool.steward_id:
             return
         maturity = max(1, int(self.cfg.producer_debt_maturity_ticks or 1))
-        cash_service_due = (
-            float(borrowed_usd) * self._producer_debt_contract_service_multiplier()
-            if self._producer_debt_contract_repayment_enabled()
-            else 0.0
-        )
+        cash_service_due = 0.0
+        if contract_cash_service and self._producer_debt_contract_repayment_enabled():
+            cash_service_due = float(borrowed_usd) * self._producer_debt_contract_service_multiplier()
         obligation = ProducerDebtObligation(
             obligation_id=self._next_producer_debt_obligation_id,
             producer_pool_id=producer_pool_id,
@@ -3153,6 +3190,7 @@ class SimulationEngine:
                 "voucher_units": float(voucher_units),
                 "due_tick": obligation.due_tick,
                 "cash_service_due_usd": cash_service_due,
+                "contract_cash_service": bool(contract_cash_service),
             },
         ))
 
@@ -5771,6 +5809,25 @@ class SimulationEngine:
             self._producer_voucher_loan_executed_usd_tick = 0.0
             self._producer_voucher_loan_clipped_lender_cap_usd_tick = 0.0
             self._producer_voucher_loan_clipped_lender_remaining_usd_tick = 0.0
+            self._producer_primary_voucher_loan_attempts_tick = 0
+            self._producer_primary_voucher_loan_executed_tick = 0
+            self._voucher_purchase_attempts_tick = 0
+            self._consumer_voucher_purchase_attempts_tick = 0
+            self._consumer_voucher_purchase_success_tick = 0
+            self._consumer_voucher_purchase_no_stable_tick = 0
+            self._consumer_voucher_purchase_reserve_protected_tick = 0
+            self._consumer_voucher_purchase_no_route_tick = 0
+            self._consumer_voucher_purchase_no_target_tick = 0
+            self._consumer_voucher_purchase_stable_spent_usd_tick = 0.0
+            self._consumer_voucher_purchase_voucher_value_acquired_usd_tick = 0.0
+            self._third_party_voucher_purchase_attempts_tick = 0
+            self._third_party_voucher_purchase_success_tick = 0
+            self._third_party_voucher_purchase_no_stable_tick = 0
+            self._third_party_voucher_purchase_reserve_protected_tick = 0
+            self._third_party_voucher_purchase_no_route_tick = 0
+            self._third_party_voucher_purchase_no_target_tick = 0
+            self._third_party_voucher_purchase_stable_spent_usd_tick = 0.0
+            self._third_party_voucher_purchase_voucher_value_acquired_usd_tick = 0.0
             self._route_context_count_tick = {}
             self._route_context_volume_usd_tick = {}
             self._route_context_source_stable_count_tick = {}
@@ -5889,6 +5946,7 @@ class SimulationEngine:
                     if remaining_requests is not None:
                         remaining_requests = max(0, remaining_requests - attempted)
 
+            self._apply_lender_voucher_purchase_demand()
             self._run_noam_clearing()
             self._sustain_swap_activity()
 
@@ -6143,6 +6201,248 @@ class SimulationEngine:
             if attempted > 0:
                 break
 
+    def _lender_held_producer_voucher_inventory_usd(self) -> float:
+        total = 0.0
+        for pool in self.pools.values():
+            if pool.policy.role != "lender":
+                continue
+            for asset_id, amount in pool.vault.inventory.items():
+                if amount <= 1e-9 or not self._is_producer_voucher(asset_id):
+                    continue
+                total += amount * self._asset_value(pool, asset_id)
+        return total
+
+    def _consumer_stable_available_above_reserve_usd(self) -> float:
+        stable_id = self.cfg.stable_symbol
+        total = 0.0
+        for pool in self.pools.values():
+            if pool.policy.role != "consumer" or pool.policy.system_pool:
+                continue
+            spendable = self._ordinary_source_spendable_amount(pool, stable_id)
+            if spendable > 1e-9:
+                total += spendable * self._asset_value(pool, stable_id)
+        return total
+
+    def _lender_producer_voucher_purchase_targets(self) -> list[tuple[float, str, str, float, float]]:
+        stable_id = self.cfg.stable_symbol
+        targets: list[tuple[float, str, str, float, float]] = []
+        for pool in self.pools.values():
+            if pool.policy.role != "lender" or pool.policy.paused:
+                continue
+            if not pool.registry.is_listed(stable_id):
+                continue
+            for voucher_id, amount in pool.vault.inventory.items():
+                if amount <= 1e-9 or not self._is_producer_voucher(voucher_id):
+                    continue
+                if not pool.registry.is_listed(voucher_id):
+                    continue
+                value = self._asset_value(pool, voucher_id)
+                score = amount * value
+                if score > 1e-9:
+                    targets.append((score, pool.pool_id, voucher_id, amount, value))
+        targets.sort(key=lambda item: item[0], reverse=True)
+        limit = max(
+            1,
+            int(getattr(self.cfg, "lender_voucher_purchase_max_target_candidates", 5) or 5),
+        )
+        return targets[:limit]
+
+    def _voucher_purchase_source_candidates(
+        self,
+        buyer_kind: str,
+        voucher_id: str,
+    ) -> tuple[list["Pool"], bool, bool]:
+        stable_id = self.cfg.stable_symbol
+        spec = self.factory.voucher_specs.get(voucher_id)
+        sources: list["Pool"] = []
+        saw_stable = False
+        saw_reserve_blocked = False
+        for pool in self.pools.values():
+            if pool.policy.system_pool or pool.policy.paused:
+                continue
+            if buyer_kind == "consumer":
+                if pool.policy.role != "consumer":
+                    continue
+            else:
+                if pool.policy.role != "producer":
+                    continue
+                if spec is not None and pool.steward_id == spec.issuer_id:
+                    continue
+                if self._producer_debt_outstanding(pool) > 1e-9:
+                    continue
+            stable_have = pool.vault.get(stable_id)
+            if stable_have > 1e-9:
+                saw_stable = True
+            spendable = self._ordinary_source_spendable_amount(pool, stable_id)
+            if spendable > 1e-9:
+                sources.append(pool)
+            elif stable_have > 1e-9:
+                saw_reserve_blocked = True
+        return sources, saw_stable, saw_reserve_blocked
+
+    def _record_voucher_purchase_failure(self, buyer_kind: str, reason: str) -> None:
+        if buyer_kind == "consumer":
+            if reason == "no_target":
+                self._consumer_voucher_purchase_no_target_tick += 1
+                self._consumer_voucher_purchase_no_target_total += 1
+            elif reason == "reserve_protected":
+                self._consumer_voucher_purchase_reserve_protected_tick += 1
+                self._consumer_voucher_purchase_reserve_protected_total += 1
+            elif reason == "no_route":
+                self._consumer_voucher_purchase_no_route_tick += 1
+                self._consumer_voucher_purchase_no_route_total += 1
+            else:
+                self._consumer_voucher_purchase_no_stable_tick += 1
+                self._consumer_voucher_purchase_no_stable_total += 1
+            return
+        if reason == "no_target":
+            self._third_party_voucher_purchase_no_target_tick += 1
+            self._third_party_voucher_purchase_no_target_total += 1
+        elif reason == "reserve_protected":
+            self._third_party_voucher_purchase_reserve_protected_tick += 1
+            self._third_party_voucher_purchase_reserve_protected_total += 1
+        elif reason == "no_route":
+            self._third_party_voucher_purchase_no_route_tick += 1
+            self._third_party_voucher_purchase_no_route_total += 1
+        else:
+            self._third_party_voucher_purchase_no_stable_tick += 1
+            self._third_party_voucher_purchase_no_stable_total += 1
+
+    def _record_voucher_purchase_success(
+        self,
+        buyer_kind: str,
+        stable_spent_usd: float,
+        voucher_value_acquired_usd: float,
+    ) -> None:
+        if buyer_kind == "consumer":
+            self._consumer_voucher_purchase_success_tick += 1
+            self._consumer_voucher_purchase_success_total += 1
+            self._consumer_voucher_purchase_stable_spent_usd_tick += stable_spent_usd
+            self._consumer_voucher_purchase_stable_spent_usd_total += stable_spent_usd
+            self._consumer_voucher_purchase_voucher_value_acquired_usd_tick += voucher_value_acquired_usd
+            self._consumer_voucher_purchase_voucher_value_acquired_usd_total += (
+                voucher_value_acquired_usd
+            )
+            return
+        self._third_party_voucher_purchase_success_tick += 1
+        self._third_party_voucher_purchase_success_total += 1
+        self._third_party_voucher_purchase_stable_spent_usd_tick += stable_spent_usd
+        self._third_party_voucher_purchase_stable_spent_usd_total += stable_spent_usd
+        self._third_party_voucher_purchase_voucher_value_acquired_usd_tick += voucher_value_acquired_usd
+        self._third_party_voucher_purchase_voucher_value_acquired_usd_total += (
+            voucher_value_acquired_usd
+        )
+
+    def _attempt_lender_voucher_purchase(self, buyer_kind: str) -> bool:
+        self._voucher_purchase_attempts_tick += 1
+        self._voucher_purchase_attempts_total += 1
+        if buyer_kind == "consumer":
+            self._consumer_voucher_purchase_attempts_tick += 1
+            self._consumer_voucher_purchase_attempts_total += 1
+        else:
+            self._third_party_voucher_purchase_attempts_tick += 1
+            self._third_party_voucher_purchase_attempts_total += 1
+
+        targets = self._lender_producer_voucher_purchase_targets()
+        if not targets:
+            self._record_voucher_purchase_failure(buyer_kind, "no_target")
+            return False
+        weights = np.array([score for score, *_ in targets], dtype=float)
+        total = float(weights.sum())
+        target_index = int(np.random.choice(len(targets), p=weights / total)) if total > 0.0 else 0
+        target_score, lender_pool_id, voucher_id, _voucher_units, voucher_value = targets[target_index]
+
+        sources, saw_stable, saw_reserve_blocked = self._voucher_purchase_source_candidates(
+            buyer_kind,
+            voucher_id,
+        )
+        if not sources:
+            reason = "reserve_protected" if saw_stable and saw_reserve_blocked else "no_stable"
+            self._record_voucher_purchase_failure(buyer_kind, reason)
+            return False
+        source_pool = self.rng.choice(sources)
+        stable_id = self.cfg.stable_symbol
+        stable_value = self._asset_value(source_pool, stable_id)
+        if stable_value <= 1e-12:
+            stable_value = 1.0
+        spendable_usd = self._ordinary_source_spendable_amount(source_pool, stable_id) * stable_value
+        inventory_share = max(
+            0.0,
+            float(getattr(self.cfg, "lender_voucher_purchase_inventory_share", 0.05) or 0.0),
+        )
+        ratio = max(
+            0.0,
+            float(getattr(self.cfg, "lender_voucher_purchase_stable_to_voucher_value_ratio", 0.563188) or 0.0),
+        )
+        stable_spend_usd = min(spendable_usd, target_score * inventory_share * ratio)
+        max_usd = getattr(self.cfg, "lender_voucher_purchase_max_usd", None)
+        if max_usd is not None:
+            stable_spend_usd = min(stable_spend_usd, max(0.0, float(max_usd)))
+        min_usd = max(0.0, float(getattr(self.cfg, "lender_voucher_purchase_min_usd", 1.0) or 0.0))
+        if stable_spend_usd < min_usd or stable_spend_usd <= 1e-9:
+            reason = "reserve_protected" if spendable_usd <= 1e-9 and saw_reserve_blocked else "no_stable"
+            self._record_voucher_purchase_failure(buyer_kind, reason)
+            return False
+        amount_in = stable_spend_usd / stable_value
+        plan, amount_used, used_fallback, _asset_out = self._find_buddy_direct_plan(
+            source_pool=source_pool,
+            asset_in=stable_id,
+            amount_in=amount_in,
+            buddy_pools={lender_pool_id},
+            target_asset=voucher_id,
+        )
+        if not plan.ok:
+            self._record_voucher_purchase_failure(buyer_kind, "no_route")
+            self._record_swap_attempt(source_pool.pool_id, success=False)
+            return False
+        lender_pool = self.pools[lender_pool_id]
+        okq, _reason, amount_out_net, _fee = lender_pool.quote_swap(stable_id, amount_used, voucher_id)
+        voucher_value_acquired_usd = amount_out_net * voucher_value if okq else 0.0
+        ok = self.execute_route_from_pool(
+            source_pool.pool_id,
+            plan,
+            amount_used,
+            route_context=f"{buyer_kind}_purchase",
+        )
+        self._record_swap_attempt(source_pool.pool_id, success=ok)
+        if not ok:
+            self._record_voucher_purchase_failure(buyer_kind, "no_route")
+            return False
+        self._record_voucher_purchase_success(
+            buyer_kind,
+            amount_used * stable_value,
+            voucher_value_acquired_usd,
+        )
+        self.log.add(Event(
+            self.tick,
+            "LENDER_VOUCHER_PURCHASE_EXECUTED",
+            pool_id=source_pool.pool_id,
+            asset_id=stable_id,
+            amount=amount_used * stable_value,
+            meta={
+                "buyer_kind": buyer_kind,
+                "target_voucher": voucher_id,
+                "lender_pool_id": lender_pool_id,
+                "voucher_value_acquired_usd": voucher_value_acquired_usd,
+                "fallback": bool(used_fallback),
+            },
+        ))
+        return True
+
+    def _apply_lender_voucher_purchase_demand(self) -> None:
+        if not bool(getattr(self.cfg, "lender_voucher_purchase_demand_enabled", False)):
+            return
+        attempts = max(0, int(getattr(self.cfg, "lender_voucher_purchase_attempts_per_tick", 0) or 0))
+        if attempts <= 0:
+            return
+        consumer_share = max(
+            0.0,
+            min(1.0, float(getattr(self.cfg, "lender_voucher_purchase_consumer_share", 0.75) or 0.0)),
+        )
+        for _ in range(attempts):
+            buyer_kind = "consumer" if self.rng.random() < consumer_share else "third_party"
+            self._attempt_lender_voucher_purchase(buyer_kind)
+
     def _producer_debt_contract_cash_due_usd(self, producer_pool_id: str, voucher_id: str) -> float:
         if not self._producer_debt_contract_repayment_enabled():
             return 0.0
@@ -6236,6 +6536,33 @@ class SimulationEngine:
         if debt <= 1e-9:
             if not in_phase and source_pool.vault.get(self.cfg.stable_symbol) > 1e-9:
                 return False
+            if bool(getattr(self.cfg, "producer_primary_voucher_borrowing_enabled", False)):
+                share = max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(
+                            getattr(
+                                self.cfg,
+                                "producer_primary_voucher_borrowing_attempt_share",
+                                0.0,
+                            )
+                            or 0.0
+                        ),
+                    ),
+                )
+                if share > 0.0 and self.rng.random() < share:
+                    self._producer_primary_voucher_loan_attempts_tick += 1
+                    self._producer_primary_voucher_loan_attempts_total += 1
+                    attempted = self._attempt_voucher_loan_fallback(
+                        source_pool,
+                        voucher_id,
+                        require_fallback_enabled=False,
+                    )
+                    if attempted:
+                        self._producer_primary_voucher_loan_executed_tick += 1
+                        self._producer_primary_voucher_loan_executed_total += 1
+                        return True
             return self._attempt_new_loan(source_pool, voucher_id)
         if not in_phase:
             return False
@@ -6406,8 +6733,11 @@ class SimulationEngine:
         *,
         sampled_amount_in: float | None = None,
         value: float | None = None,
+        require_fallback_enabled: bool = True,
     ) -> bool:
-        if not bool(getattr(self.cfg, "producer_voucher_loan_fallback_enabled", False)):
+        if require_fallback_enabled and not bool(
+            getattr(self.cfg, "producer_voucher_loan_fallback_enabled", False)
+        ):
             return False
         self._producer_voucher_loan_attempts_tick += 1
         value = float(value if value is not None else self._asset_value(source_pool, voucher_id))
@@ -6535,7 +6865,7 @@ class SimulationEngine:
         if not attempted_any:
             self._producer_voucher_loan_zero_amount_tick += 1
             return False
-        return True
+        return False
 
     def _attempt_new_loan(self, source_pool: "Pool", voucher_id: str) -> bool:
         self._producer_loan_attempts_tick += 1
@@ -6833,6 +7163,23 @@ class SimulationEngine:
                     float(receipt.amount_in),
                     float(receipt.amount_in) * self._asset_value(pool, receipt.asset_in),
                 )
+            elif (
+                str(route_context or "") == "voucher_loan"
+                and pool.policy.role == "lender"
+                and source_pool.policy.role == "producer"
+                and self._is_producer_voucher(receipt.asset_in)
+                and receipt.asset_out != self.cfg.stable_symbol
+            ):
+                spec = self.factory.voucher_specs.get(receipt.asset_in)
+                if spec is not None and spec.issuer_id == source_pool.steward_id:
+                    self._register_producer_debt_obligation(
+                        source_pool.pool_id,
+                        pool.pool_id,
+                        receipt.asset_in,
+                        float(receipt.amount_in),
+                        float(receipt.amount_in) * self._asset_value(pool, receipt.asset_in),
+                        contract_cash_service=False,
+                    )
             elif (
                 pool.policy.role == "lender"
                 and receipt.asset_in != self.cfg.stable_symbol
@@ -7376,6 +7723,12 @@ class SimulationEngine:
                 "lender_stable_available_above_reserve_usd": float(
                     lender_stable_available_above_reserve_usd
                 ),
+                "lender_held_producer_voucher_inventory_usd": float(
+                    self._lender_held_producer_voucher_inventory_usd()
+                ),
+                "consumer_stable_available_above_reserve_usd": float(
+                    self._consumer_stable_available_above_reserve_usd()
+                ),
                 "lender_recovered_stable_pending_usd_total": float(
                     self._lender_recovered_stable_pending_usd_total()
                 ),
@@ -7496,6 +7849,116 @@ class SimulationEngine:
                 ),
                 "producer_voucher_loan_clipped_lender_remaining_usd_tick": float(
                     self._producer_voucher_loan_clipped_lender_remaining_usd_tick
+                ),
+                "producer_primary_voucher_loan_attempts_tick": int(
+                    self._producer_primary_voucher_loan_attempts_tick
+                ),
+                "producer_primary_voucher_loan_attempts_total": int(
+                    self._producer_primary_voucher_loan_attempts_total
+                ),
+                "producer_primary_voucher_loan_executed_tick": int(
+                    self._producer_primary_voucher_loan_executed_tick
+                ),
+                "producer_primary_voucher_loan_executed_total": int(
+                    self._producer_primary_voucher_loan_executed_total
+                ),
+                "voucher_purchase_attempts_tick": int(self._voucher_purchase_attempts_tick),
+                "voucher_purchase_attempts_total": int(self._voucher_purchase_attempts_total),
+                "consumer_voucher_purchase_attempts_tick": int(
+                    self._consumer_voucher_purchase_attempts_tick
+                ),
+                "consumer_voucher_purchase_attempts_total": int(
+                    self._consumer_voucher_purchase_attempts_total
+                ),
+                "consumer_voucher_purchase_success_tick": int(
+                    self._consumer_voucher_purchase_success_tick
+                ),
+                "consumer_voucher_purchase_success_total": int(
+                    self._consumer_voucher_purchase_success_total
+                ),
+                "consumer_voucher_purchase_no_stable_tick": int(
+                    self._consumer_voucher_purchase_no_stable_tick
+                ),
+                "consumer_voucher_purchase_no_stable_total": int(
+                    self._consumer_voucher_purchase_no_stable_total
+                ),
+                "consumer_voucher_purchase_reserve_protected_tick": int(
+                    self._consumer_voucher_purchase_reserve_protected_tick
+                ),
+                "consumer_voucher_purchase_reserve_protected_total": int(
+                    self._consumer_voucher_purchase_reserve_protected_total
+                ),
+                "consumer_voucher_purchase_no_route_tick": int(
+                    self._consumer_voucher_purchase_no_route_tick
+                ),
+                "consumer_voucher_purchase_no_route_total": int(
+                    self._consumer_voucher_purchase_no_route_total
+                ),
+                "consumer_voucher_purchase_no_target_tick": int(
+                    self._consumer_voucher_purchase_no_target_tick
+                ),
+                "consumer_voucher_purchase_no_target_total": int(
+                    self._consumer_voucher_purchase_no_target_total
+                ),
+                "consumer_voucher_purchase_stable_spent_usd_tick": float(
+                    self._consumer_voucher_purchase_stable_spent_usd_tick
+                ),
+                "consumer_voucher_purchase_stable_spent_usd_total": float(
+                    self._consumer_voucher_purchase_stable_spent_usd_total
+                ),
+                "consumer_voucher_purchase_voucher_value_acquired_usd_tick": float(
+                    self._consumer_voucher_purchase_voucher_value_acquired_usd_tick
+                ),
+                "consumer_voucher_purchase_voucher_value_acquired_usd_total": float(
+                    self._consumer_voucher_purchase_voucher_value_acquired_usd_total
+                ),
+                "third_party_voucher_purchase_attempts_tick": int(
+                    self._third_party_voucher_purchase_attempts_tick
+                ),
+                "third_party_voucher_purchase_attempts_total": int(
+                    self._third_party_voucher_purchase_attempts_total
+                ),
+                "third_party_voucher_purchase_success_tick": int(
+                    self._third_party_voucher_purchase_success_tick
+                ),
+                "third_party_voucher_purchase_success_total": int(
+                    self._third_party_voucher_purchase_success_total
+                ),
+                "third_party_voucher_purchase_no_stable_tick": int(
+                    self._third_party_voucher_purchase_no_stable_tick
+                ),
+                "third_party_voucher_purchase_no_stable_total": int(
+                    self._third_party_voucher_purchase_no_stable_total
+                ),
+                "third_party_voucher_purchase_reserve_protected_tick": int(
+                    self._third_party_voucher_purchase_reserve_protected_tick
+                ),
+                "third_party_voucher_purchase_reserve_protected_total": int(
+                    self._third_party_voucher_purchase_reserve_protected_total
+                ),
+                "third_party_voucher_purchase_no_route_tick": int(
+                    self._third_party_voucher_purchase_no_route_tick
+                ),
+                "third_party_voucher_purchase_no_route_total": int(
+                    self._third_party_voucher_purchase_no_route_total
+                ),
+                "third_party_voucher_purchase_no_target_tick": int(
+                    self._third_party_voucher_purchase_no_target_tick
+                ),
+                "third_party_voucher_purchase_no_target_total": int(
+                    self._third_party_voucher_purchase_no_target_total
+                ),
+                "third_party_voucher_purchase_stable_spent_usd_tick": float(
+                    self._third_party_voucher_purchase_stable_spent_usd_tick
+                ),
+                "third_party_voucher_purchase_stable_spent_usd_total": float(
+                    self._third_party_voucher_purchase_stable_spent_usd_total
+                ),
+                "third_party_voucher_purchase_voucher_value_acquired_usd_tick": float(
+                    self._third_party_voucher_purchase_voucher_value_acquired_usd_tick
+                ),
+                "third_party_voucher_purchase_voucher_value_acquired_usd_total": float(
+                    self._third_party_voucher_purchase_voucher_value_acquired_usd_total
                 ),
                 "producer_debt_matured_usd_tick": float(self._producer_debt_matured_usd_tick),
                 "producer_debt_matured_usd_total": float(self._producer_debt_matured_usd_total),
