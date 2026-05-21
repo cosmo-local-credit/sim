@@ -300,6 +300,25 @@ def parse_args() -> argparse.Namespace:
         help="Frontier ablation: do not backfill failed loan route attempts with ordinary community swaps.",
     )
     parser.add_argument(
+        "--enable-producer-voucher-loan-fallback",
+        action="store_true",
+        help=(
+            "Experimental frontier probe: when stable loan capacity is unavailable, "
+            "try voucher-to-voucher producer borrowing instead."
+        ),
+    )
+    parser.add_argument(
+        "--enable-producer-voucher-loan-activity-boost",
+        action="store_true",
+        help="Experimental frontier probe: boost ordinary source selection for vouchers used in voucher loans.",
+    )
+    parser.add_argument(
+        "--producer-voucher-loan-max-target-candidates",
+        type=int,
+        default=3,
+        help="Maximum voucher target assets to try for experimental producer voucher-loan fallback.",
+    )
+    parser.add_argument(
         "--frontier-mode",
         default="adaptive",
         choices=("adaptive", "grid"),
@@ -1446,6 +1465,15 @@ def scenario_config(
             getattr(args, "disable_producer_loan_failure_backfill", False)
         )
         cfg.producer_loan_failure_backfill_max_attempts = 1
+        cfg.producer_voucher_loan_fallback_enabled = bool(
+            getattr(args, "enable_producer_voucher_loan_fallback", False)
+        )
+        cfg.producer_voucher_loan_activity_boost_enabled = bool(
+            getattr(args, "enable_producer_voucher_loan_activity_boost", False)
+        )
+        cfg.producer_voucher_loan_max_target_candidates = max(
+            1, int(getattr(args, "producer_voucher_loan_max_target_candidates", 3) or 3)
+        )
         cfg.liquidity_mandate_mode = "community_deficit_then_lender"
         cfg.route_substitution_enabled = True
         cfg.route_substitution_max_alternatives = 3
@@ -2088,12 +2116,16 @@ def run_one(
             "ordinary_voucher_source_swap_volume_usd_tick",
             "loan_route_swap_count_tick",
             "loan_route_swap_volume_usd_tick",
+            "voucher_loan_route_swap_count_tick",
+            "voucher_loan_route_swap_volume_usd_tick",
             "repayment_route_swap_count_tick",
             "repayment_route_swap_volume_usd_tick",
             "loan_backfill_swap_count_tick",
             "loan_backfill_swap_volume_usd_tick",
             "productive_boosted_voucher_swap_count_tick",
             "productive_boosted_voucher_swap_volume_usd_tick",
+            "voucher_loan_boosted_voucher_swap_count_tick",
+            "voucher_loan_boosted_voucher_swap_volume_usd_tick",
             "ordinary_stable_spend_protected_skip_count_tick",
             "ordinary_stable_spend_protected_skip_value_usd_tick",
             "repayment_volume_usd",
@@ -2147,6 +2179,18 @@ def run_one(
             "producer_loan_lender_collateral_cap_usd_tick",
             "producer_loan_lender_remaining_cap_usd_tick",
             "producer_loan_lender_stable_available_usd_tick",
+            "producer_voucher_loan_attempts_tick",
+            "producer_voucher_loan_no_target_tick",
+            "producer_voucher_loan_no_inventory_tick",
+            "producer_voucher_loan_zero_amount_tick",
+            "producer_voucher_loan_route_found_tick",
+            "producer_voucher_loan_route_failed_tick",
+            "producer_voucher_loan_executed_tick",
+            "producer_voucher_loan_execution_failed_tick",
+            "producer_voucher_loan_attempted_usd_tick",
+            "producer_voucher_loan_executed_usd_tick",
+            "producer_voucher_loan_clipped_lender_cap_usd_tick",
+            "producer_voucher_loan_clipped_lender_remaining_usd_tick",
             "fee_conversion_attempted_usd_tick",
             "fee_conversion_success_usd_tick",
             "fee_conversion_failed_usd_tick",
@@ -2396,6 +2440,16 @@ def run_one(
             "loan_route_swap_count_total": cumulative_float["loan_route_swap_count_tick"],
             "loan_route_swap_volume_usd_tick": latest.get("loan_route_swap_volume_usd_tick", 0.0),
             "loan_route_swap_volume_usd_total": cumulative_float["loan_route_swap_volume_usd_tick"],
+            "voucher_loan_route_swap_count_tick": latest.get("voucher_loan_route_swap_count_tick", 0),
+            "voucher_loan_route_swap_count_total": cumulative_float[
+                "voucher_loan_route_swap_count_tick"
+            ],
+            "voucher_loan_route_swap_volume_usd_tick": latest.get(
+                "voucher_loan_route_swap_volume_usd_tick", 0.0
+            ),
+            "voucher_loan_route_swap_volume_usd_total": cumulative_float[
+                "voucher_loan_route_swap_volume_usd_tick"
+            ],
             "repayment_route_swap_count_tick": latest.get("repayment_route_swap_count_tick", 0),
             "repayment_route_swap_count_total": cumulative_float["repayment_route_swap_count_tick"],
             "repayment_route_swap_volume_usd_tick": latest.get(
@@ -2423,6 +2477,18 @@ def run_one(
             ),
             "productive_boosted_voucher_swap_volume_usd_total": cumulative_float[
                 "productive_boosted_voucher_swap_volume_usd_tick"
+            ],
+            "voucher_loan_boosted_voucher_swap_count_tick": latest.get(
+                "voucher_loan_boosted_voucher_swap_count_tick", 0
+            ),
+            "voucher_loan_boosted_voucher_swap_count_total": cumulative_float[
+                "voucher_loan_boosted_voucher_swap_count_tick"
+            ],
+            "voucher_loan_boosted_voucher_swap_volume_usd_tick": latest.get(
+                "voucher_loan_boosted_voucher_swap_volume_usd_tick", 0.0
+            ),
+            "voucher_loan_boosted_voucher_swap_volume_usd_total": cumulative_float[
+                "voucher_loan_boosted_voucher_swap_volume_usd_tick"
             ],
             "ordinary_stable_spend_protected_skip_count_tick": latest.get(
                 "ordinary_stable_spend_protected_skip_count_tick", 0
@@ -2537,6 +2603,72 @@ def run_one(
             ),
             "producer_loan_lender_stable_available_usd_total": cumulative_float[
                 "producer_loan_lender_stable_available_usd_tick"
+            ],
+            "producer_voucher_loan_attempts": latest.get("producer_voucher_loan_attempts_tick", 0),
+            "producer_voucher_loan_attempts_total": cumulative_float[
+                "producer_voucher_loan_attempts_tick"
+            ],
+            "producer_voucher_loan_no_target": latest.get("producer_voucher_loan_no_target_tick", 0),
+            "producer_voucher_loan_no_target_total": cumulative_float[
+                "producer_voucher_loan_no_target_tick"
+            ],
+            "producer_voucher_loan_no_inventory": latest.get(
+                "producer_voucher_loan_no_inventory_tick", 0
+            ),
+            "producer_voucher_loan_no_inventory_total": cumulative_float[
+                "producer_voucher_loan_no_inventory_tick"
+            ],
+            "producer_voucher_loan_zero_amount": latest.get(
+                "producer_voucher_loan_zero_amount_tick", 0
+            ),
+            "producer_voucher_loan_zero_amount_total": cumulative_float[
+                "producer_voucher_loan_zero_amount_tick"
+            ],
+            "producer_voucher_loan_route_found": latest.get(
+                "producer_voucher_loan_route_found_tick", 0
+            ),
+            "producer_voucher_loan_route_found_total": cumulative_float[
+                "producer_voucher_loan_route_found_tick"
+            ],
+            "producer_voucher_loan_route_failed": latest.get(
+                "producer_voucher_loan_route_failed_tick", 0
+            ),
+            "producer_voucher_loan_route_failed_total": cumulative_float[
+                "producer_voucher_loan_route_failed_tick"
+            ],
+            "producer_voucher_loan_executed": latest.get("producer_voucher_loan_executed_tick", 0),
+            "producer_voucher_loan_executed_total": cumulative_float[
+                "producer_voucher_loan_executed_tick"
+            ],
+            "producer_voucher_loan_execution_failed": latest.get(
+                "producer_voucher_loan_execution_failed_tick", 0
+            ),
+            "producer_voucher_loan_execution_failed_total": cumulative_float[
+                "producer_voucher_loan_execution_failed_tick"
+            ],
+            "producer_voucher_loan_attempted_usd": latest.get(
+                "producer_voucher_loan_attempted_usd_tick", 0.0
+            ),
+            "producer_voucher_loan_attempted_usd_total": cumulative_float[
+                "producer_voucher_loan_attempted_usd_tick"
+            ],
+            "producer_voucher_loan_executed_usd": latest.get(
+                "producer_voucher_loan_executed_usd_tick", 0.0
+            ),
+            "producer_voucher_loan_executed_usd_total": cumulative_float[
+                "producer_voucher_loan_executed_usd_tick"
+            ],
+            "producer_voucher_loan_clipped_lender_cap_usd": latest.get(
+                "producer_voucher_loan_clipped_lender_cap_usd_tick", 0.0
+            ),
+            "producer_voucher_loan_clipped_lender_cap_usd_total": cumulative_float[
+                "producer_voucher_loan_clipped_lender_cap_usd_tick"
+            ],
+            "producer_voucher_loan_clipped_lender_remaining_usd": latest.get(
+                "producer_voucher_loan_clipped_lender_remaining_usd_tick", 0.0
+            ),
+            "producer_voucher_loan_clipped_lender_remaining_usd_total": cumulative_float[
+                "producer_voucher_loan_clipped_lender_remaining_usd_tick"
             ],
             "lender_stable_total_usd": latest.get("lender_stable_total_usd", 0.0),
             "lender_stable_reserve_usd": latest.get("lender_stable_reserve_usd", 0.0),
@@ -4616,6 +4748,12 @@ def summarize_frontier_cell(
     loan_route_swap_volume_values = [
         safe_float(row.get("loan_route_swap_volume_usd_total")) for row in rows
     ]
+    voucher_loan_route_swap_count_values = [
+        safe_float(row.get("voucher_loan_route_swap_count_total")) for row in rows
+    ]
+    voucher_loan_route_swap_volume_values = [
+        safe_float(row.get("voucher_loan_route_swap_volume_usd_total")) for row in rows
+    ]
     repayment_route_swap_count_values = [
         safe_float(row.get("repayment_route_swap_count_total")) for row in rows
     ]
@@ -4633,6 +4771,12 @@ def summarize_frontier_cell(
     ]
     productive_boosted_voucher_swap_volume_values = [
         safe_float(row.get("productive_boosted_voucher_swap_volume_usd_total")) for row in rows
+    ]
+    voucher_loan_boosted_voucher_swap_count_values = [
+        safe_float(row.get("voucher_loan_boosted_voucher_swap_count_total")) for row in rows
+    ]
+    voucher_loan_boosted_voucher_swap_volume_values = [
+        safe_float(row.get("voucher_loan_boosted_voucher_swap_volume_usd_total")) for row in rows
     ]
     stable_spend_protection_skip_count_values = [
         safe_float(row.get("ordinary_stable_spend_protected_skip_count_total")) for row in rows
@@ -4735,6 +4879,24 @@ def summarize_frontier_cell(
     ]
     producer_loan_backfill_executed_values = [
         safe_float(row.get("producer_loan_backfill_executed_total")) for row in rows
+    ]
+    producer_voucher_loan_attempt_values = [
+        safe_float(row.get("producer_voucher_loan_attempts_total")) for row in rows
+    ]
+    producer_voucher_loan_executed_values = [
+        safe_float(row.get("producer_voucher_loan_executed_total")) for row in rows
+    ]
+    producer_voucher_loan_route_failed_values = [
+        safe_float(row.get("producer_voucher_loan_route_failed_total")) for row in rows
+    ]
+    producer_voucher_loan_no_target_values = [
+        safe_float(row.get("producer_voucher_loan_no_target_total")) for row in rows
+    ]
+    producer_voucher_loan_attempted_usd_values = [
+        safe_float(row.get("producer_voucher_loan_attempted_usd_total")) for row in rows
+    ]
+    producer_voucher_loan_executed_usd_values = [
+        safe_float(row.get("producer_voucher_loan_executed_usd_total")) for row in rows
     ]
     producer_loan_attempted_usd_values = [
         safe_float(row.get("producer_loan_attempted_usd_total")) for row in rows
@@ -5035,6 +5197,12 @@ def summarize_frontier_cell(
         ),
         "loan_route_swap_count_total_p50": percentile(loan_route_swap_count_values, 0.50),
         "loan_route_swap_volume_usd_total_p50": percentile(loan_route_swap_volume_values, 0.50),
+        "voucher_loan_route_swap_count_total_p50": percentile(
+            voucher_loan_route_swap_count_values, 0.50
+        ),
+        "voucher_loan_route_swap_volume_usd_total_p50": percentile(
+            voucher_loan_route_swap_volume_values, 0.50
+        ),
         "repayment_route_swap_count_total_p50": percentile(repayment_route_swap_count_values, 0.50),
         "repayment_route_swap_volume_usd_total_p50": percentile(
             repayment_route_swap_volume_values, 0.50
@@ -5048,6 +5216,12 @@ def summarize_frontier_cell(
         ),
         "productive_boosted_voucher_swap_volume_usd_total_p50": percentile(
             productive_boosted_voucher_swap_volume_values, 0.50
+        ),
+        "voucher_loan_boosted_voucher_swap_count_total_p50": percentile(
+            voucher_loan_boosted_voucher_swap_count_values, 0.50
+        ),
+        "voucher_loan_boosted_voucher_swap_volume_usd_total_p50": percentile(
+            voucher_loan_boosted_voucher_swap_volume_values, 0.50
         ),
         "ordinary_stable_spend_protected_skip_count_total_p50": percentile(
             stable_spend_protection_skip_count_values, 0.50
@@ -5136,6 +5310,24 @@ def summarize_frontier_cell(
         ),
         "producer_loan_backfill_executed_total_p50": percentile(
             producer_loan_backfill_executed_values, 0.50
+        ),
+        "producer_voucher_loan_attempts_total_p50": percentile(
+            producer_voucher_loan_attempt_values, 0.50
+        ),
+        "producer_voucher_loan_executed_total_p50": percentile(
+            producer_voucher_loan_executed_values, 0.50
+        ),
+        "producer_voucher_loan_route_failed_total_p50": percentile(
+            producer_voucher_loan_route_failed_values, 0.50
+        ),
+        "producer_voucher_loan_no_target_total_p50": percentile(
+            producer_voucher_loan_no_target_values, 0.50
+        ),
+        "producer_voucher_loan_attempted_usd_total_p50": percentile(
+            producer_voucher_loan_attempted_usd_values, 0.50
+        ),
+        "producer_voucher_loan_executed_usd_total_p50": percentile(
+            producer_voucher_loan_executed_usd_values, 0.50
         ),
         "producer_loan_attempted_usd_total_p50": percentile(producer_loan_attempted_usd_values, 0.50),
         "producer_loan_executed_usd_total_p50": percentile(producer_loan_executed_usd_values, 0.50),

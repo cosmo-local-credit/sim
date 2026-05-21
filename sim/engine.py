@@ -175,6 +175,7 @@ class SimulationEngine:
         self._productive_credit_voucher_deposit_usd_by_pool: Dict[str, float] = {}
         self._productive_credit_voucher_deposit_usd_by_pool_tick: Dict[str, float] = {}
         self._productive_credit_voucher_activity_until: Dict[Tuple[str, str], int] = {}
+        self._producer_voucher_loan_activity_until: Dict[Tuple[str, str], int] = {}
         self._productive_credit_queue: Dict[int, list[Tuple[str, float, str]]] = {}
         self._producer_debt_obligations: list[ProducerDebtObligation] = []
         self._next_producer_debt_obligation_id: int = 1
@@ -227,6 +228,18 @@ class SimulationEngine:
         self._producer_loan_lender_collateral_cap_usd_tick: float = 0.0
         self._producer_loan_lender_remaining_cap_usd_tick: float = 0.0
         self._producer_loan_lender_stable_available_usd_tick: float = 0.0
+        self._producer_voucher_loan_attempts_tick: int = 0
+        self._producer_voucher_loan_no_target_tick: int = 0
+        self._producer_voucher_loan_no_inventory_tick: int = 0
+        self._producer_voucher_loan_zero_amount_tick: int = 0
+        self._producer_voucher_loan_route_found_tick: int = 0
+        self._producer_voucher_loan_route_failed_tick: int = 0
+        self._producer_voucher_loan_executed_tick: int = 0
+        self._producer_voucher_loan_execution_failed_tick: int = 0
+        self._producer_voucher_loan_attempted_usd_tick: float = 0.0
+        self._producer_voucher_loan_executed_usd_tick: float = 0.0
+        self._producer_voucher_loan_clipped_lender_cap_usd_tick: float = 0.0
+        self._producer_voucher_loan_clipped_lender_remaining_usd_tick: float = 0.0
         self._route_context_count_tick: Dict[str, int] = {}
         self._route_context_count_total: Dict[str, int] = {}
         self._route_context_volume_usd_tick: Dict[str, float] = {}
@@ -243,6 +256,10 @@ class SimulationEngine:
         self._productive_boosted_voucher_swap_count_total: int = 0
         self._productive_boosted_voucher_swap_volume_usd_tick: float = 0.0
         self._productive_boosted_voucher_swap_volume_usd_total: float = 0.0
+        self._voucher_loan_boosted_voucher_swap_count_tick: int = 0
+        self._voucher_loan_boosted_voucher_swap_count_total: int = 0
+        self._voucher_loan_boosted_voucher_swap_volume_usd_tick: float = 0.0
+        self._voucher_loan_boosted_voucher_swap_volume_usd_total: float = 0.0
         self._ordinary_stable_spend_protected_skip_count_tick: int = 0
         self._ordinary_stable_spend_protected_skip_count_total: int = 0
         self._ordinary_stable_spend_protected_skip_value_usd_tick: float = 0.0
@@ -1727,7 +1744,7 @@ class SimulationEngine:
             boost = max(0.0, float(self.cfg.productive_credit_voucher_source_weight_boost or 0.0))
             if boost > 0.0:
                 for idx, asset in enumerate(assets):
-                    if asset.startswith("VCHR:") and self._productive_credit_voucher_activity_active(pool, asset):
+                    if asset.startswith("VCHR:") and self._voucher_source_activity_active(pool, asset):
                         weights[idx] *= 1.0 + boost
         return weights
 
@@ -1794,6 +1811,13 @@ class SimulationEngine:
                 self._productive_boosted_voucher_swap_count_total += 1
                 self._productive_boosted_voucher_swap_volume_usd_tick += swap_usd
                 self._productive_boosted_voucher_swap_volume_usd_total += swap_usd
+            if context == "ordinary" and self._producer_voucher_loan_activity_active(
+                source_pool, source_asset
+            ):
+                self._voucher_loan_boosted_voucher_swap_count_tick += 1
+                self._voucher_loan_boosted_voucher_swap_count_total += 1
+                self._voucher_loan_boosted_voucher_swap_volume_usd_tick += swap_usd
+                self._voucher_loan_boosted_voucher_swap_volume_usd_total += swap_usd
 
     def _productive_credit_voucher_activity_active(self, pool: "Pool", voucher_id: str) -> bool:
         if not bool(self.cfg.productive_credit_voucher_activity_boost_enabled):
@@ -1803,8 +1827,22 @@ class SimulationEngine:
         until = self._productive_credit_voucher_activity_until.get((pool.pool_id, voucher_id), -1)
         return until >= self.tick
 
+    def _producer_voucher_loan_activity_active(self, pool: "Pool", voucher_id: str) -> bool:
+        if not bool(getattr(self.cfg, "producer_voucher_loan_activity_boost_enabled", False)):
+            return False
+        if pool.policy.role != "producer":
+            return False
+        until = self._producer_voucher_loan_activity_until.get((pool.pool_id, voucher_id), -1)
+        return until >= self.tick
+
+    def _voucher_source_activity_active(self, pool: "Pool", voucher_id: str) -> bool:
+        return (
+            self._productive_credit_voucher_activity_active(pool, voucher_id)
+            or self._producer_voucher_loan_activity_active(pool, voucher_id)
+        )
+
     def _productive_credit_voucher_source_size_boost(self, pool: "Pool", voucher_id: str) -> float:
-        if not self._productive_credit_voucher_activity_active(pool, voucher_id):
+        if not self._voucher_source_activity_active(pool, voucher_id):
             return 1.0
         multiplier = float(self.cfg.productive_credit_voucher_source_size_multiplier or 1.0)
         return max(0.0, multiplier)
@@ -3284,6 +3322,16 @@ class SimulationEngine:
         key = (pool_id, voucher_id)
         self._productive_credit_voucher_activity_until[key] = max(
             self._productive_credit_voucher_activity_until.get(key, 0),
+            self.tick + window,
+        )
+
+    def _mark_producer_voucher_loan_activity(self, pool_id: str, voucher_id: str) -> None:
+        if not bool(getattr(self.cfg, "producer_voucher_loan_activity_boost_enabled", False)):
+            return
+        window = max(1, int(getattr(self.cfg, "productive_credit_voucher_activity_boost_window_ticks", 1) or 1))
+        key = (pool_id, voucher_id)
+        self._producer_voucher_loan_activity_until[key] = max(
+            self._producer_voucher_loan_activity_until.get(key, 0),
             self.tick + window,
         )
 
@@ -5711,6 +5759,18 @@ class SimulationEngine:
             self._producer_loan_lender_collateral_cap_usd_tick = 0.0
             self._producer_loan_lender_remaining_cap_usd_tick = 0.0
             self._producer_loan_lender_stable_available_usd_tick = 0.0
+            self._producer_voucher_loan_attempts_tick = 0
+            self._producer_voucher_loan_no_target_tick = 0
+            self._producer_voucher_loan_no_inventory_tick = 0
+            self._producer_voucher_loan_zero_amount_tick = 0
+            self._producer_voucher_loan_route_found_tick = 0
+            self._producer_voucher_loan_route_failed_tick = 0
+            self._producer_voucher_loan_executed_tick = 0
+            self._producer_voucher_loan_execution_failed_tick = 0
+            self._producer_voucher_loan_attempted_usd_tick = 0.0
+            self._producer_voucher_loan_executed_usd_tick = 0.0
+            self._producer_voucher_loan_clipped_lender_cap_usd_tick = 0.0
+            self._producer_voucher_loan_clipped_lender_remaining_usd_tick = 0.0
             self._route_context_count_tick = {}
             self._route_context_volume_usd_tick = {}
             self._route_context_source_stable_count_tick = {}
@@ -5719,6 +5779,8 @@ class SimulationEngine:
             self._route_context_source_voucher_volume_usd_tick = {}
             self._productive_boosted_voucher_swap_count_tick = 0
             self._productive_boosted_voucher_swap_volume_usd_tick = 0.0
+            self._voucher_loan_boosted_voucher_swap_count_tick = 0
+            self._voucher_loan_boosted_voucher_swap_volume_usd_tick = 0.0
             self._ordinary_stable_spend_protected_skip_count_tick = 0
             self._ordinary_stable_spend_protected_skip_value_usd_tick = 0.0
             self._fee_conversion_attempted_usd_tick = 0.0
@@ -6297,6 +6359,184 @@ class SimulationEngine:
             debt += p.vault.get(voucher_id)
         return debt
 
+    def _voucher_loan_target_candidates(
+        self,
+        voucher_id: str,
+    ) -> list[tuple[float, str, Set[str], float, float]]:
+        candidates_by_asset: Dict[str, tuple[float, Set[str], float, float]] = {}
+        for pool in self.pools.values():
+            if pool.policy.role != "lender" or not pool.registry.is_listed(voucher_id):
+                continue
+            cap = self._lender_voucher_cap(voucher_id, lender_pool=pool)
+            if pool.policy.limits_enabled:
+                remaining = pool.limiter.remaining(self.tick, voucher_id)
+            else:
+                remaining = math.inf
+            finite_remaining = remaining if math.isfinite(remaining) else cap
+            borrowable = min(max(0.0, cap), max(0.0, finite_remaining))
+            if borrowable <= 1e-9:
+                continue
+            for asset_id, amount in pool.vault.inventory.items():
+                if asset_id == voucher_id or not asset_id.startswith("VCHR:") or amount <= 1e-9:
+                    continue
+                if not pool.registry.is_listed(asset_id):
+                    continue
+                score, pools, max_cap, max_remaining = candidates_by_asset.get(
+                    asset_id, (0.0, set(), 0.0, 0.0)
+                )
+                value = self._asset_value(pool, asset_id)
+                score += max(0.0, amount * value)
+                pools.add(pool.pool_id)
+                max_cap = max(max_cap, cap)
+                max_remaining = max(max_remaining, finite_remaining)
+                candidates_by_asset[asset_id] = (score, pools, max_cap, max_remaining)
+        candidates = [
+            (score, asset_id, pools, max_cap, max_remaining)
+            for asset_id, (score, pools, max_cap, max_remaining) in candidates_by_asset.items()
+            if score > 0.0 and pools
+        ]
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        limit = max(1, int(getattr(self.cfg, "producer_voucher_loan_max_target_candidates", 3) or 3))
+        return candidates[:limit]
+
+    def _attempt_voucher_loan_fallback(
+        self,
+        source_pool: "Pool",
+        voucher_id: str,
+        *,
+        sampled_amount_in: float | None = None,
+        value: float | None = None,
+    ) -> bool:
+        if not bool(getattr(self.cfg, "producer_voucher_loan_fallback_enabled", False)):
+            return False
+        self._producer_voucher_loan_attempts_tick += 1
+        value = float(value if value is not None else self._asset_value(source_pool, voucher_id))
+        amount_in = (
+            float(sampled_amount_in)
+            if sampled_amount_in is not None
+            else self._sample_amount_in(source_pool, voucher_id)
+        )
+        have = source_pool.vault.get(voucher_id)
+        if have <= 1e-9:
+            self._producer_voucher_loan_no_inventory_tick += 1
+            return False
+        if amount_in <= 1e-9 or value <= 1e-12:
+            self._producer_voucher_loan_zero_amount_tick += 1
+            return False
+        if amount_in > have:
+            amount_in = have
+        candidates = self._voucher_loan_target_candidates(voucher_id)
+        if not candidates:
+            self._producer_voucher_loan_no_target_tick += 1
+            return False
+
+        attempted_any = False
+        for _score, target_asset, target_pools, max_cap, max_remaining in candidates:
+            candidate_amount = amount_in
+            if max_cap > 1e-9 and candidate_amount > max_cap:
+                self._producer_voucher_loan_clipped_lender_cap_usd_tick += (
+                    candidate_amount - max_cap
+                ) * value
+                candidate_amount = max_cap
+            if max_remaining > 1e-9 and candidate_amount > max_remaining:
+                self._producer_voucher_loan_clipped_lender_remaining_usd_tick += (
+                    candidate_amount - max_remaining
+                ) * value
+                candidate_amount = max_remaining
+            if candidate_amount <= 1e-9:
+                continue
+            attempted_any = True
+            self._producer_voucher_loan_attempted_usd_tick += candidate_amount * value
+            self.log.add(Event(
+                self.tick,
+                "ROUTE_REQUESTED",
+                pool_id=source_pool.pool_id,
+                asset_id=voucher_id,
+                amount=candidate_amount,
+                meta={"target_asset": target_asset, "borrow_voucher": True},
+            ))
+            plan, amount_used, used_fallback, _direct_asset = self._find_buddy_direct_plan(
+                source_pool=source_pool,
+                asset_in=voucher_id,
+                amount_in=candidate_amount,
+                buddy_pools=target_pools,
+                target_asset=target_asset,
+            )
+            if not plan.ok:
+                plan, amount_used, used_fallback = self._find_route_with_fallback(
+                    tick=self.tick,
+                    start_asset=voucher_id,
+                    target_asset=target_asset,
+                    amount_in=candidate_amount,
+                    source_pool=source_pool,
+                    target_pools=target_pools,
+                )
+            if used_fallback:
+                self.log.add(Event(
+                    self.tick,
+                    "ROUTE_REQUESTED",
+                    pool_id=source_pool.pool_id,
+                    asset_id=voucher_id,
+                    amount=amount_used,
+                    meta={"target_asset": target_asset, "borrow_voucher": True, "fallback": True},
+                ))
+            if not plan.ok:
+                self._producer_voucher_loan_route_failed_tick += 1
+                self.log.add(Event(
+                    self.tick,
+                    "ROUTE_FAILED",
+                    pool_id=source_pool.pool_id,
+                    asset_id=voucher_id,
+                    amount=amount_used,
+                    meta={
+                        "reason": plan.reason,
+                        "target": target_asset,
+                        "borrow_voucher": True,
+                    },
+                ))
+                self._record_swap_attempt(source_pool.pool_id, success=False)
+                continue
+
+            self._producer_voucher_loan_route_found_tick += 1
+            self.log.add(Event(
+                self.tick,
+                "ROUTE_FOUND",
+                pool_id=source_pool.pool_id,
+                meta={
+                    "hops": [h.__dict__ for h in plan.hops],
+                    "target": target_asset,
+                    "borrow_voucher": True,
+                },
+            ))
+            ok = self.execute_route_from_pool(
+                source_pool.pool_id,
+                plan,
+                amount_used,
+                route_context="voucher_loan",
+            )
+            self._record_swap_attempt(source_pool.pool_id, success=ok)
+            if not ok:
+                self._producer_voucher_loan_execution_failed_tick += 1
+                continue
+            amount_usd = amount_used * value
+            self._producer_voucher_loan_executed_tick += 1
+            self._producer_voucher_loan_executed_usd_tick += amount_usd
+            self._mark_producer_voucher_loan_activity(source_pool.pool_id, voucher_id)
+            self.log.add(Event(
+                self.tick,
+                "VOUCHER_LOAN_ISSUED",
+                pool_id=source_pool.pool_id,
+                asset_id=target_asset,
+                amount=amount_usd,
+                meta={"asset_in": voucher_id, "amount_in": amount_used},
+            ))
+            return True
+
+        if not attempted_any:
+            self._producer_voucher_loan_zero_amount_tick += 1
+            return False
+        return True
+
     def _attempt_new_loan(self, source_pool: "Pool", voucher_id: str) -> bool:
         self._producer_loan_attempts_tick += 1
         lenders = {
@@ -6307,7 +6547,7 @@ class SimulationEngine:
         }
         if not lenders:
             self._producer_loan_no_lender_tick += 1
-            return False
+            return self._attempt_voucher_loan_fallback(source_pool, voucher_id)
 
         value = self._asset_value(source_pool, voucher_id)
         amount_in = self._sample_amount_in(source_pool, voucher_id)
@@ -6370,7 +6610,12 @@ class SimulationEngine:
         if max_borrowable <= 1e-9:
             self._producer_loan_clipped_combined_lender_usd_tick += amount_in * value
             self._producer_loan_zero_amount_tick += 1
-            return False
+            return self._attempt_voucher_loan_fallback(
+                source_pool,
+                voucher_id,
+                sampled_amount_in=amount_in,
+                value=value,
+            )
         if amount_in > max_borrowable:
             self._producer_loan_clipped_combined_lender_usd_tick += (amount_in - max_borrowable) * value
             amount_in = max_borrowable
@@ -7220,6 +7465,38 @@ class SimulationEngine:
                 "producer_loan_lender_stable_available_usd_tick": float(
                     self._producer_loan_lender_stable_available_usd_tick
                 ),
+                "producer_voucher_loan_attempts_tick": int(self._producer_voucher_loan_attempts_tick),
+                "producer_voucher_loan_no_target_tick": int(self._producer_voucher_loan_no_target_tick),
+                "producer_voucher_loan_no_inventory_tick": int(
+                    self._producer_voucher_loan_no_inventory_tick
+                ),
+                "producer_voucher_loan_zero_amount_tick": int(
+                    self._producer_voucher_loan_zero_amount_tick
+                ),
+                "producer_voucher_loan_route_found_tick": int(
+                    self._producer_voucher_loan_route_found_tick
+                ),
+                "producer_voucher_loan_route_failed_tick": int(
+                    self._producer_voucher_loan_route_failed_tick
+                ),
+                "producer_voucher_loan_executed_tick": int(
+                    self._producer_voucher_loan_executed_tick
+                ),
+                "producer_voucher_loan_execution_failed_tick": int(
+                    self._producer_voucher_loan_execution_failed_tick
+                ),
+                "producer_voucher_loan_attempted_usd_tick": float(
+                    self._producer_voucher_loan_attempted_usd_tick
+                ),
+                "producer_voucher_loan_executed_usd_tick": float(
+                    self._producer_voucher_loan_executed_usd_tick
+                ),
+                "producer_voucher_loan_clipped_lender_cap_usd_tick": float(
+                    self._producer_voucher_loan_clipped_lender_cap_usd_tick
+                ),
+                "producer_voucher_loan_clipped_lender_remaining_usd_tick": float(
+                    self._producer_voucher_loan_clipped_lender_remaining_usd_tick
+                ),
                 "producer_debt_matured_usd_tick": float(self._producer_debt_matured_usd_tick),
                 "producer_debt_matured_usd_total": float(self._producer_debt_matured_usd_total),
                 "producer_debt_repaid_usd_tick": float(self._producer_debt_repaid_usd_tick),
@@ -7340,6 +7617,10 @@ class SimulationEngine:
                 "loan_route_swap_count_total": context_count("loan", total=True),
                 "loan_route_swap_volume_usd_tick": context_volume("loan"),
                 "loan_route_swap_volume_usd_total": context_volume("loan", total=True),
+                "voucher_loan_route_swap_count_tick": context_count("voucher_loan"),
+                "voucher_loan_route_swap_count_total": context_count("voucher_loan", total=True),
+                "voucher_loan_route_swap_volume_usd_tick": context_volume("voucher_loan"),
+                "voucher_loan_route_swap_volume_usd_total": context_volume("voucher_loan", total=True),
                 "repayment_route_swap_count_tick": context_count("repayment"),
                 "repayment_route_swap_count_total": context_count("repayment", total=True),
                 "repayment_route_swap_volume_usd_tick": context_volume("repayment"),
@@ -7359,6 +7640,18 @@ class SimulationEngine:
                 ),
                 "productive_boosted_voucher_swap_volume_usd_total": float(
                     self._productive_boosted_voucher_swap_volume_usd_total
+                ),
+                "voucher_loan_boosted_voucher_swap_count_tick": int(
+                    self._voucher_loan_boosted_voucher_swap_count_tick
+                ),
+                "voucher_loan_boosted_voucher_swap_count_total": int(
+                    self._voucher_loan_boosted_voucher_swap_count_total
+                ),
+                "voucher_loan_boosted_voucher_swap_volume_usd_tick": float(
+                    self._voucher_loan_boosted_voucher_swap_volume_usd_tick
+                ),
+                "voucher_loan_boosted_voucher_swap_volume_usd_total": float(
+                    self._voucher_loan_boosted_voucher_swap_volume_usd_total
                 ),
                 "ordinary_stable_spend_protected_skip_count_tick": int(
                     self._ordinary_stable_spend_protected_skip_count_tick

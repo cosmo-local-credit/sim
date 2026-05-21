@@ -177,6 +177,9 @@ class ScenarioConfig:
     ordinary_stable_spend_buffer_voucher_share: float = 0.0
     producer_loan_failure_backfill_enabled: bool = False
     producer_loan_failure_backfill_max_attempts: int = 1
+    producer_voucher_loan_fallback_enabled: bool = False
+    producer_voucher_loan_activity_boost_enabled: bool = False
+    producer_voucher_loan_max_target_candidates: int = 3
     waterfall_alpha_ops_share: float = 0.20
     waterfall_beta_liquidity_share: float = 0.40
     waterfall_gamma_insurance_share: float = 0.40

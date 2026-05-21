@@ -83,9 +83,101 @@ class RegenBondRevisionTests(unittest.TestCase):
 
         self.assertTrue(attempted)
         self.assertEqual(engine._producer_loan_attempts_tick, 1)
+        self.assertEqual(engine._producer_voucher_loan_attempts_tick, 0)
         self.assertAlmostEqual(engine._producer_loan_lender_remaining_cap_usd_tick, 5.0)
         self.assertGreater(engine._producer_loan_clipped_lender_remaining_usd_tick, 0.0)
         self.assertLessEqual(engine._producer_loan_attempted_usd_tick, 5.0 + 1e-9)
+
+    def test_voucher_loan_fallback_runs_only_when_stable_unavailable(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_producers=2,
+                max_pools=4,
+                producer_deposits_enabled=True,
+                producer_voucher_loan_fallback_enabled=True,
+                producer_voucher_loan_activity_boost_enabled=True,
+                productive_credit_voucher_activity_boost_window_ticks=4,
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+                swap_size_min_usd=10.0,
+                random_request_amount_mean=10.0,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        producers = [agent for agent in engine.agents.values() if agent.role == "producer"]
+        borrower, voucher_issuer = producers[0], producers[1]
+        borrower_pool = engine.pools[borrower.pool_id]
+        issuer_pool = engine.pools[voucher_issuer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        borrower_voucher = borrower.voucher_spec.voucher_id
+        target_voucher = voucher_issuer.voucher_spec.voucher_id
+        for pool in (borrower_pool, issuer_pool, lender_pool):
+            pool.values.set_value(borrower_voucher, 1.0)
+            pool.values.set_value(target_voucher, 1.0)
+        lender_pool.list_asset_with_value_and_limit(borrower_voucher, value=1.0, window_len=10, cap_in=500.0)
+        lender_pool.list_asset_with_value_and_limit(target_voucher, value=1.0, window_len=10, cap_in=500.0)
+        engine.accept_index.setdefault(borrower_voucher, set()).add(lender_pool.pool_id)
+        engine.accept_index.setdefault(target_voucher, set()).add(lender_pool.pool_id)
+        for pool, asset in (
+            (borrower_pool, borrower_voucher),
+            (lender_pool, target_voucher),
+            (lender_pool, stable_id),
+        ):
+            current = pool.vault.get(asset)
+            if current > 0.0:
+                engine._vault_sub(pool, asset, current, "test_clear", "test")
+        engine._vault_add(borrower_pool, borrower_voucher, 50.0, "test_seed", "test")
+        engine._vault_add(lender_pool, target_voucher, 100.0, "test_seed", "test")
+        lender_pool.policy.min_stable_reserve = 0.0
+        engine._producer_deposit_value_by_voucher[borrower_voucher] = 100.0
+        engine.tick = 1
+        engine._noam_last_refresh_tick = -1
+
+        attempted = engine._attempt_new_loan(borrower_pool, borrower_voucher)
+
+        self.assertTrue(attempted)
+        self.assertEqual(engine._producer_loan_no_lender_tick, 1)
+        self.assertEqual(engine._producer_voucher_loan_attempts_tick, 1)
+        self.assertEqual(engine._producer_voucher_loan_executed_tick, 1)
+        self.assertEqual(engine._producer_loan_executed_tick, 0)
+        self.assertGreater(engine._route_context_count_tick.get("voucher_loan", 0), 0)
+        self.assertGreater(engine._route_context_source_voucher_volume_usd_tick.get("voucher_loan", 0.0), 0.0)
+        self.assertGreater(lender_pool.vault.get(borrower_voucher), 0.0)
+        self.assertAlmostEqual(engine._productive_credit_inflow_usd_tick, 0.0)
+        self.assertEqual(engine._productive_credit_queue, {})
+        self.assertAlmostEqual(engine._producer_debt_stable_recovered_usd_tick, 0.0)
+        self.assertAlmostEqual(engine._bond_service_reserved_usd_tick, 0.0)
+        self.assertTrue(engine._producer_voucher_loan_activity_active(borrower_pool, borrower_voucher))
+
+    def test_voucher_loan_fallback_is_disabled_by_default(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_producers=2,
+                max_pools=4,
+                producer_deposits_enabled=True,
+                swap_size_min_usd=10.0,
+                random_request_amount_mean=10.0,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        borrower = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        borrower_pool = engine.pools[borrower.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = borrower.voucher_spec.voucher_id
+        current_stable = lender_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(lender_pool, stable_id, current_stable, "test_clear", "test")
+        current_voucher = borrower_pool.vault.get(voucher_id)
+        if current_voucher > 0.0:
+            engine._vault_sub(borrower_pool, voucher_id, current_voucher, "test_clear", "test")
+        engine._vault_add(borrower_pool, voucher_id, 50.0, "test_seed", "test")
+        engine._producer_deposit_value_by_voucher[voucher_id] = 100.0
+        engine.tick = 1
+
+        attempted = engine._attempt_new_loan(borrower_pool, voucher_id)
+
+        self.assertFalse(attempted)
+        self.assertEqual(engine._producer_voucher_loan_attempts_tick, 0)
 
     def test_snapshot_reports_lender_stable_available_above_reserve(self):
         engine = SimulationEngine(small_config())
@@ -319,6 +411,8 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.ordinary_stable_spend_buffer_voucher_share, 0.05)
         self.assertTrue(cfg.producer_loan_failure_backfill_enabled)
         self.assertEqual(cfg.producer_loan_failure_backfill_max_attempts, 1)
+        self.assertFalse(cfg.producer_voucher_loan_fallback_enabled)
+        self.assertFalse(cfg.producer_voucher_loan_activity_boost_enabled)
         self.assertEqual(cfg.liquidity_mandate_mode, "community_deficit_then_lender")
         self.assertEqual(cfg.max_pools, 9)
 
