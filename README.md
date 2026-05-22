@@ -96,7 +96,7 @@ For SSH/server batch verification, use:
 ./scripts/start_regenbond_batch_tmux.sh validation-full
 tail -f analysis/monte_carlo/validation-full.log
 ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
-./scripts/run_regenbond_remote_batch.sh frontier-feedback-probe
+./scripts/run_regenbond_remote_batch.sh frontier-rola-regeneration-probe
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 ```
 
@@ -137,6 +137,13 @@ shared margin by default; channel-specific margin flags are available only for
 explicit sensitivity/ablation runs. Issuer sustainability is reported
 separately through fee service, excess recovered stable, lockbox surplus, and
 available operating-surplus diagnostics.
+
+The current `frontier-pilot` batch target also enables the ROLA mechanism that
+passed the 20-run low-principal probe: primary producer voucher borrowing,
+voucher-loan fallback, voucher-loan activity boost, and bounded consumer or
+third-party stable purchases of visible lender-held producer vouchers. This is
+the current frontier configuration; disable those flags only for explicit
+control or ablation runs.
 
 The Streamlit app includes a **RegenBond MC** tab that runs this same script as
 a subprocess and displays the exact CLI-equivalent command. For identical
@@ -301,8 +308,10 @@ terminal and Streamlit outputs match when the displayed command is identical.
 - If a route fails at the chosen amount, the engine retries once with a smaller **fallback amount** before giving up.
 
 ### Loan mechanics (producer ↔ lender)
-- **Issuance**: producers **do not mint**; they route **existing** vouchers to lenders to receive USD stable.
-- **Repayment**: producers route **stable only** to acquire their voucher from lenders.
+- **Issuance**: producers **do not mint** as part of a swap; they route
+  existing own vouchers to lenders to receive USD stable or, in current
+  frontier-pilot ROLA settings, other useful producer vouchers.
+- **Repayment**: producers route **stable** to acquire their voucher from lenders.
   The repayment amount amortizes `loan_term_weeks` and is spread by `loan_activity_period_ticks`.
 - **Bond-frontier producer debt**: producer own-voucher-in/stable-out creates a
   dated lender-pool exposure plus a contract cash-service obligation. Ordinary

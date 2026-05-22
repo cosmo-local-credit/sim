@@ -31,15 +31,26 @@ deposit proxies, productive-credit timing, debt-removal purchases, voucher-fee
 conversion, quarterly clearing, and route substitution diagnostics. These are
 empirical settlement motifs and scenario anchors, not direct pool inventory
 snapshots or a failed-route denominator.
-
-The current productive-credit calibration is aggregate rather than
-tier-specific. It uses borrow-proxy events with later issuer returns as a
-bounded proxy for productive follow-through, then splits loan-enabled
-productive inflow into stable retained and voucher-deposit feedback. The
-current public calibration uses `0.615843` as the stable retained share,
-`0.384157` as the voucher-deposit share, and caps loan-induced voucher-deposit
-growth at `0.143206` per month. These values constrain the frontier mechanism;
-they do not prove that every real loan creates additional production.
+Voucher-pool overlap calibration is also exported as aggregate topology only:
+it reports how many KSh/KES voucher tokens appear in one or more pools, a
+bucketed degree distribution, and shared-voucher pool-pool edge counts. It does
+not include raw token or pool addresses and should be read as route potential,
+not participant intent.
+The current ROLA/frontier-pilot purchase-demand setting uses a network-level
+weekly stable budget, not a per-consumer allowance. In the research workspace,
+the aggregate stable-to-voucher purchase value is also exported as a weekly
+distribution and figure so the flat budget can be replaced by a dynamic
+purchase-timing model once buyer-income moments are added. The current flat
+purchase budget is a conservative 260-week spreading of the aggregate purchase
+value, not a dynamic buyer-income process.
+The public bundle also exports a standalone stable/cash deposit weekly series.
+That series counts ordinary successful pool-era stable/cash deposit logs and
+excludes swap-associated deposit logs, while reporting the inclusive
+deposit-log total separately. It is intended to distinguish ordinary stable
+backing/deposit timing from stable used directly in swaps.
+An all-pool weekly swap series is exported as well, with successful pool-swap
+log counts and one-sided normalized input value by week. Output value and
+stable/voucher source-pair counts are included for audit.
 
 The bond-frontier safety tests use these files in three ways:
 
@@ -51,10 +62,6 @@ The bond-frontier safety tests use these files in three ways:
 - frontier cells are rejected when stable/bond liquidity materially increases
   active-pool stable inventory dependency or reduces active-pool voucher
   inventory value share versus the matched no-bond baseline.
-- frontier diagnostics report baseline and incremental productive-credit
-  inflow, loan-induced voucher deposits, stable retained, and credit-cap
-  expansion so bond cells cannot hide activity changes behind the matched
-  no-bond baseline.
 
 Regenerate from the research workspace with:
 

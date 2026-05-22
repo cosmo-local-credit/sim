@@ -167,6 +167,9 @@ run_frontier() {
       "$PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE"
     )
   fi
+  if [[ -n "${PRODUCER_VOUCHER_OVERLAP_MODE:-}" ]]; then
+    frontier_extra_args+=(--producer-voucher-overlap-mode "$PRODUCER_VOUCHER_OVERLAP_MODE")
+  fi
   if [[ -n "${PRODUCER_VOUCHER_LOAN_MAX_TARGET_CANDIDATES:-}" ]]; then
     frontier_extra_args+=(
       --producer-voucher-loan-max-target-candidates
@@ -216,6 +219,7 @@ run_frontier() {
   echo "[batch] ablation flags: voucher_boost=${DISABLE_PRODUCTIVE_CREDIT_VOUCHER_ACTIVITY_BOOST:-0} stable_protection=${DISABLE_ORDINARY_STABLE_SPEND_PROTECTION:-0} loan_backfill=${DISABLE_PRODUCER_LOAN_FAILURE_BACKFILL:-0}"
   echo "[batch] voucher-loan fallback: enabled=${ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK:-0} activity_boost=${ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST:-0} max_targets=${PRODUCER_VOUCHER_LOAN_MAX_TARGET_CANDIDATES:-3}"
   echo "[batch] primary voucher borrowing: enabled=${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-0} attempt_share=${PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE:-0.50}"
+  echo "[batch] producer voucher overlap mode: ${PRODUCER_VOUCHER_OVERLAP_MODE:-single_lender}"
   echo "[batch] lender voucher purchase demand: enabled=${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-0} attempts_per_tick=${LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK:-5} consumer_share=${LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE:-0.75} inventory_share=${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05} stable_budget_usd_per_tick=${LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK:-0.0}"
   run_monte_carlo "${PYTHON_BIN}" scripts/run_regenbond_monte_carlo.py \
     --scenario bond_issuer_frontier \
@@ -260,10 +264,12 @@ case "$JOB" in
     run_engine_validation 100 260 1 engine_validation
     ;;
   frontier-smoke)
-    run_frontier 5 52 bond_issuer_frontier_smoke current 0.05,0.10 0,0.06 0.50
+    PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
+      run_frontier 5 52 bond_issuer_frontier_smoke current 0.05,0.10 0,0.06 1.0
     ;;
   frontier-maturity-smoke)
-    run_frontier 2 260 bond_issuer_frontier_maturity_smoke current 0.05 0 0.50
+    PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
+      run_frontier 2 260 bond_issuer_frontier_maturity_smoke current 0.05 0 1.0
     ;;
   frontier-feedback-probe)
     FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}" \
@@ -292,6 +298,7 @@ case "$JOB" in
       LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE="${LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE:-0.75}" \
       LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE="${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05}" \
       LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK="${LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK:-77.164163}" \
+      PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
       OUTPUT="${OUTPUT:-$OUTPUT_ROOT/bond_issuer_frontier_rola_regeneration_probe}" \
       run_frontier 5 260 bond_issuer_frontier_rola_regeneration_probe current 0,0.005,0.01,0.02,0.03,0.04,0.05 0 0.50
     ;;
@@ -305,10 +312,12 @@ case "$JOB" in
       LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE="${LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE:-0.75}" \
       LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE="${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05}" \
       LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK="${LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK:-77.164163}" \
-      run_frontier 20 260 bond_issuer_frontier_pilot current,connected_2x,connected_5x 0.05,0.10,0.20,0.40,0.80,1.50 0,0.06,0.12 0.25,0.50,0.75
+      PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
+      run_frontier 20 260 bond_issuer_frontier_pilot current,connected_2x 0.02,0.04,0.06,0.08,0.10,0.12,0.15 0,0.03,0.06,0.09,0.12 1.0
     ;;
   frontier-publication)
-    run_frontier 100 260 bond_issuer_frontier current,connected_2x,connected_5x 0.05,0.10,0.20,0.40,0.60,0.80,1.00,1.50 0,0.03,0.06,0.09,0.12 0.25,0.50,0.75
+    PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
+      run_frontier 100 260 bond_issuer_frontier current,connected_2x 0.02,0.04,0.06,0.08,0.10,0.12,0.15 0,0.03,0.06,0.09,0.12 1.0
     ;;
   *)
     echo "Unknown job: $JOB" >&2

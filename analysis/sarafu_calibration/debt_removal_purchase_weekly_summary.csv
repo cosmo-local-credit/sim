@@ -1,0 +1,16 @@
+metric,value
+weeks,109
+active_purchase_weeks,75
+zero_purchase_weeks,34
+stable_to_voucher_purchase_events,518
+stable_input_value_usd,20062.682278
+flat_budget_if_spread_over_260_weeks,77.164163
+mean_per_pool_era_week,184.061305
+mean_per_active_purchase_week,267.50243
+weekly_stable_p50_all_weeks,18.79
+weekly_stable_p75_all_weeks,174.117057
+weekly_stable_p90_all_weeks,424.020443
+weekly_stable_max,4952.86
+active_weekly_stable_p50,92.0
+active_weekly_stable_p90,699.744
+active_weekly_stable_max,4952.86

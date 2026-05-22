@@ -88,6 +88,9 @@ class ScenarioConfig:
     affinity_buddy_count: int = 6  # producer sticks to top N affinity buddies once reached
     affinity_buddy_direct_only: bool = True  # once buddies reached, skip routing and trade directly
     producer_voucher_single_lender: bool = True
+    producer_voucher_overlap_mode: str = "single_lender"  # "single_lender" or "empirical_overlap"
+    producer_voucher_overlap_bucket_weights: dict[str, float] = field(default_factory=dict)
+    producer_voucher_overlap_max_lender_acceptors: int | None = None
     route_substitution_enabled: bool = False
     route_substitution_max_alternatives: int = 3
     noam_topk_pools_per_asset: int = 16

@@ -45,6 +45,14 @@ frontier runs also include bounded productive-credit feedback: loan-enabled
 productive inflow can increase stable retained and producer voucher deposits
 within aggregate calibration shares and growth caps.
 
+The current ROLA/frontier-pilot configuration also enables producer primary
+voucher borrowing, voucher-loan fallback, voucher-loan activity boost, and
+bounded consumer/third-party stable purchases of lender-held producer vouchers.
+The 20-run `frontier-rola-regeneration-probe` passed all tested current-scale
+low-principal cells from `0` to `0.05` principal ratio with scheduled bond
+service paid and voucher-to-voucher circulation preserved. The normal
+`frontier-pilot` target is now wired to use the same mechanism.
+
 For later runs:
 
 ```bash
@@ -97,12 +105,12 @@ WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh validation-pilot
 WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh validation-full
 WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-smoke
 WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-maturity-smoke
-WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-feedback-probe
+WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-rola-regeneration-probe
 WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-pilot
 ```
 
 Run `frontier-pilot` only after `frontier-maturity-smoke` and
-`frontier-feedback-probe` pass. Run `frontier-publication` only after the
+`frontier-rola-regeneration-probe` pass. Run `frontier-publication` only after the
 revised pilot is reviewed.
 
 Run batches from the repo root. The wrapper defaults to parallel, resumable
@@ -131,7 +139,7 @@ Use this order for paper-facing work:
 ./scripts/run_regenbond_remote_batch.sh validation-full
 ./scripts/run_regenbond_remote_batch.sh frontier-smoke
 ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
-./scripts/run_regenbond_remote_batch.sh frontier-feedback-probe
+./scripts/run_regenbond_remote_batch.sh frontier-rola-regeneration-probe
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 ./scripts/run_regenbond_remote_batch.sh frontier-publication
 ```
@@ -145,9 +153,12 @@ Recommended gate:
    reports `status=pass`.
 4. Run `frontier-smoke` and inspect frontier output structure.
 5. Run `frontier-maturity-smoke` and confirm the full-term lockbox guard passes.
-6. Run `frontier-feedback-probe` and inspect productive-credit feedback,
-   matched-baseline swap-volume ratios, and voucher-to-voucher share changes.
-7. Run `frontier-pilot`.
+6. Run `frontier-rola-regeneration-probe` and inspect productive-credit
+   feedback, primary voucher borrowing, stable purchase demand,
+   matched-baseline voucher-to-voucher circulation, and consumer/community
+   stress deltas.
+7. Run `frontier-pilot`; this target now enables the same ROLA/purchase
+   mechanism by default.
 8. Run `frontier-publication` only after validation and pilot outputs look
    correct.
 
@@ -170,6 +181,7 @@ is set.
 | `frontier-smoke` | Small bond-frontier structure check | 5 runs, 52 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_smoke/` | `analysis/monte_carlo/frontier-smoke.log` |
 | `frontier-maturity-smoke` | Fast full-maturity lockbox check | 2 runs, 260 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/` | `analysis/monte_carlo/frontier-maturity-smoke.log` |
 | `frontier-feedback-probe` | Focused capacity-feedback principal probe | 2 runs, 260 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_feedback_probe/` | `analysis/monte_carlo/frontier-feedback-probe.log` |
+| `frontier-rola-regeneration-probe` | Current-scale low-principal ROLA/voucher-purchase probe | 5 runs by default, 260 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/` | `analysis/monte_carlo/frontier-rola-regeneration-probe.log` |
 | `frontier-pilot` | Full-horizon frontier pilot | 20 runs, 260 ticks, 3 scales | `analysis/monte_carlo/bond_issuer_frontier_pilot/` | `analysis/monte_carlo/frontier-pilot.log` |
 | `frontier-publication` | Paper-facing frontier grid | 100 runs, 260 ticks, 3 scales | `analysis/monte_carlo/bond_issuer_frontier/` | `analysis/monte_carlo/frontier-publication.log` |
 
@@ -198,6 +210,25 @@ default. Channel-specific overrides remain available only for explicit
 sensitivity/ablation runs. Issuer sustainability is measured separately from
 borrower service margins through fee service, excess recovered stable, lockbox
 surplus, and operating-surplus diagnostics.
+
+The current `frontier-pilot` defaults also enable the ROLA mechanism that
+passed the low-principal probe:
+
+```text
+ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK=1
+ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST=1
+ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING=1
+PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE=0.50
+ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND=1
+LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK=5
+LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE=0.75
+LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE=0.05
+LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK=77.164163
+```
+
+These remain ordinary environment overrides. Set them explicitly only for
+control/ablation runs or if you intentionally want to disable the current
+frontier-pilot mechanism.
 
 ## Calibration Bundle
 
@@ -626,9 +657,9 @@ head analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/bond_issuer_fronti
 
 ### `frontier-feedback-probe`
 
-Focused full-horizon current-scale probe for the capacity-feedback mechanism.
-This job is cheaper than the full pilot and should be used after validation and
-maturity smoke, before spending time on the three-scale pilot.
+Historical focused full-horizon current-scale probe for the capacity-feedback
+mechanism. This job remains available as an ablation/control target, but the
+current pre-pilot gate is `frontier-rola-regeneration-probe`.
 
 ```bash
 ./scripts/run_regenbond_remote_batch.sh frontier-feedback-probe
@@ -652,6 +683,37 @@ The key columns to inspect are the scheduled-payment coverage fields, unpaid
 claims, swap-volume ratio versus baseline, voucher-to-voucher share change,
 baseline productive-credit inflow/deposits, and incremental productive-credit
 inflow/deposits.
+
+### `frontier-rola-regeneration-probe`
+
+Current full-horizon low-principal probe for the ROLA/voucher-purchase
+mechanism. This is the preferred current-scale gate before the three-scale
+pilot.
+
+```bash
+./scripts/run_regenbond_remote_batch.sh frontier-rola-regeneration-probe
+```
+
+Detached:
+
+```bash
+./scripts/start_regenbond_batch_tmux.sh frontier-rola-regeneration-probe
+tail -f analysis/monte_carlo/frontier-rola-regeneration-probe.log
+```
+
+Inspect:
+
+```bash
+head analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/bond_issuer_frontier_safety.csv
+head analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/safe_injection_frontier.csv
+cat analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/paper_integration_notes.md
+```
+
+The key columns to inspect are scheduled-payment coverage, available
+service-cash headroom, unpaid claims, voucher-to-voucher volume ratio,
+ordinary voucher-source volume ratio, consumer/community stress deltas,
+producer voucher-loan execution, consumer/third-party purchase successes, and
+realized productive-credit voucher-deposit share.
 
 ### `frontier-pilot`
 
@@ -799,6 +861,7 @@ Pull the output directory that matches the job you just ran:
 | `frontier-smoke` | `~/sim/analysis/monte_carlo/bond_issuer_frontier_smoke/` | `~/sim/analysis/monte_carlo/frontier-smoke.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier_smoke/` |
 | `frontier-maturity-smoke` | `~/sim/analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/` | `~/sim/analysis/monte_carlo/frontier-maturity-smoke.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/` |
 | `frontier-feedback-probe` | `~/sim/analysis/monte_carlo/bond_issuer_frontier_feedback_probe/` | `~/sim/analysis/monte_carlo/frontier-feedback-probe.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier_feedback_probe/` |
+| `frontier-rola-regeneration-probe` | `~/sim/analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/` | `~/sim/analysis/monte_carlo/frontier-rola-regeneration-probe.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/` |
 | `frontier-pilot` | `~/sim/analysis/monte_carlo/bond_issuer_frontier_pilot/` | `~/sim/analysis/monte_carlo/frontier-pilot.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/` |
 | `frontier-publication` | `~/sim/analysis/monte_carlo/bond_issuer_frontier/` | `~/sim/analysis/monte_carlo/frontier-publication.log` | `RegenBonds/analysis/monte_carlo/bond_issuer_frontier/` |
 
@@ -899,6 +962,19 @@ rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-feedback-probe.log \
   /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_feedback_probe/
+```
+
+Pull `frontier-rola-regeneration-probe`:
+
+```bash
+rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
+  -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/ \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/
+
+rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-rola-regeneration-probe.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/
 ```
 
 Pull `frontier-pilot`:

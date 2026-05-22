@@ -1,0 +1,14 @@
+metric,value,claim_boundary
+total_voucher_tokens,1308,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.
+single_pool_tokens,1115,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.
+multi_pool_tokens,193,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.
+multi_pool_share,0.14755351681957188,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.
+pool_degree_mean,1.2821100917431192,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.
+pool_degree_p50,1.0,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.
+pool_degree_p75,1.0,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.
+pool_degree_p90,2.0,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.
+pool_degree_p95,3.0,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.
+pool_degree_max,28,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.
+bridge_voucher_pool_degree_p50,2.0,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.
+bridge_voucher_pool_degree_p90,4.0,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.
+shared_pool_pool_edges,852,Counts privacy-safe voucher listing/activity overlap across pools; topology is not proof of participant intent or realized route execution.

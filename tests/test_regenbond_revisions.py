@@ -1,10 +1,15 @@
 import argparse
+import csv
+import tempfile
 import unittest
+from pathlib import Path
 
 from scripts.run_regenbond_monte_carlo import (
     SHARD_CONFIG_KEYS,
     bond_metrics,
     frontier_baseline_metrics,
+    issuer_headroom_frontier_rows,
+    load_calibration,
     scenario_config,
     summarize_frontier_cell,
 )
@@ -59,6 +64,37 @@ class RegenBondRevisionTests(unittest.TestCase):
         engine._producer_deposit_value_by_voucher[voucher_id] = 100.0
 
         self.assertAlmostEqual(engine._lender_voucher_cap(voucher_id, lender_pool), 500.0)
+
+    def test_empirical_overlap_lists_producer_voucher_on_sampled_lenders(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=3,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=4,
+                producer_voucher_single_lender=False,
+                producer_voucher_overlap_mode="empirical_overlap",
+                producer_voucher_overlap_bucket_weights={"3": 1.0},
+            ),
+            seed=11,
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        voucher_id = producer.voucher_spec.voucher_id
+        lender_ids = engine._producer_voucher_lender_assignments[voucher_id]
+        lender_pools = [
+            pool for pool in engine.pools.values()
+            if not pool.policy.system_pool and pool.policy.role == "lender"
+        ]
+
+        self.assertEqual(len(lender_ids), 3)
+        for pool in lender_pools:
+            self.assertTrue(pool.registry.is_listed(engine.cfg.stable_symbol))
+            self.assertTrue(pool.registry.is_listed(voucher_id))
+        engine.snapshot_metrics(force=True)
+        metrics = engine.metrics.network_rows[-1]
+        self.assertAlmostEqual(metrics["producer_voucher_multi_lender_share"], 1.0)
+        self.assertAlmostEqual(metrics["producer_voucher_lender_degree_p50"], 3.0)
 
     def test_producer_loan_diagnostics_capture_live_limit_clipping(self):
         engine = SimulationEngine(
@@ -676,6 +712,7 @@ class RegenBondRevisionTests(unittest.TestCase):
             "enable_producer_primary_voucher_borrowing",
             "producer_primary_voucher_borrowing_attempt_share",
             "producer_voucher_loan_max_target_candidates",
+            "producer_voucher_overlap_mode",
             "enable_lender_voucher_purchase_demand",
             "lender_voucher_purchase_attempts_per_tick",
             "lender_voucher_purchase_consumer_share",
@@ -683,6 +720,93 @@ class RegenBondRevisionTests(unittest.TestCase):
             "lender_voucher_purchase_stable_budget_usd_per_tick",
         ):
             self.assertIn(key, SHARD_CONFIG_KEYS)
+
+    def test_calibration_loader_reads_overlap_distribution(self):
+        def write_rows(path: Path, fieldnames: list[str], rows: list[dict[str, object]]) -> None:
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_rows(root / "monte_carlo_calibration_parameters.csv", ["parameter", "value"], [])
+            write_rows(
+                root / "repayment_calibration_by_tier_asset.csv",
+                ["tier", "asset_class", "same_token_return_coverage", "same_token_out_value"],
+                [{"tier": "strong", "asset_class": "redeemable_voucher", "same_token_return_coverage": 1, "same_token_out_value": 1}],
+            )
+            write_rows(
+                root / "pool_report_activity.csv",
+                [
+                    "tier",
+                    "score",
+                    "swap_events",
+                    "recent_swap_weeks_90d",
+                    "active_weeks",
+                    "swaps_per_active_week",
+                    "total_users",
+                    "backing_inflow",
+                    "backing_cash_inflow",
+                    "backing_voucher_inflow",
+                    "tagged_voucher_tokens",
+                    "verified_report_exposure",
+                    "same_token_return_rate",
+                    "same_token_out_value",
+                    "same_token_matched_later_in_value",
+                    "borrow_proxy_matured_events",
+                    "borrow_proxy_matured_return_rate",
+                    "rosca_proxy_value_return_rate",
+                ],
+                [{
+                    "tier": "strong",
+                    "score": 1,
+                    "swap_events": 1,
+                    "recent_swap_weeks_90d": 1,
+                    "active_weeks": 1,
+                    "swaps_per_active_week": 1,
+                    "total_users": 1,
+                    "backing_inflow": 1,
+                    "backing_cash_inflow": 1,
+                    "backing_voucher_inflow": 0,
+                    "tagged_voucher_tokens": 1,
+                    "verified_report_exposure": 1,
+                    "same_token_return_rate": 1,
+                    "same_token_out_value": 1,
+                    "same_token_matched_later_in_value": 1,
+                    "borrow_proxy_matured_events": 1,
+                    "borrow_proxy_matured_return_rate": 1,
+                    "rosca_proxy_value_return_rate": 1,
+                }],
+            )
+            write_rows(
+                root / "impact_projection_by_activity.csv",
+                ["activity", "log_intercept", "log_slope", "verified_exposure_share"],
+                [{"activity": "Test", "log_intercept": 0, "log_slope": 1, "verified_exposure_share": 1}],
+            )
+            write_rows(
+                root / "voucher_pool_overlap_calibration.csv",
+                ["metric", "value", "claim_boundary"],
+                [
+                    {"metric": "multi_pool_share", "value": "0.25", "claim_boundary": ""},
+                    {"metric": "pool_degree_p50", "value": "2", "claim_boundary": ""},
+                    {"metric": "pool_degree_p90", "value": "5", "claim_boundary": ""},
+                ],
+            )
+            write_rows(
+                root / "voucher_pool_overlap_distribution.csv",
+                ["pool_degree_bucket", "min_pool_degree", "max_pool_degree", "voucher_tokens", "share"],
+                [
+                    {"pool_degree_bucket": "1", "min_pool_degree": 1, "max_pool_degree": 1, "voucher_tokens": 3, "share": 0.75},
+                    {"pool_degree_bucket": "4-5", "min_pool_degree": 4, "max_pool_degree": 5, "voucher_tokens": 1, "share": 0.25},
+                ],
+            )
+
+            calibration = load_calibration(root)
+
+        self.assertAlmostEqual(calibration.voucher_pool_overlap_calibration["multi_pool_share"], 0.25)
+        self.assertAlmostEqual(calibration.voucher_pool_overlap_distribution["1"], 0.75)
+        self.assertAlmostEqual(calibration.voucher_pool_overlap_distribution["4-5"], 0.25)
 
     def test_voucher_unit_value_prices_one_ksh_voucher_against_usd_stable(self):
         engine = SimulationEngine(small_config(kes_per_usd=128.0, voucher_unit_value_usd=1.0 / 128.0))
@@ -1325,8 +1449,16 @@ class RegenBondRevisionTests(unittest.TestCase):
 
         summary = summarize_frontier_cell([row] * 5, {}, 0.85, "diagnostic")
 
-        self.assertEqual(summary["safe"], 0)
-        self.assertIn("p50_available_service_cash_headroom", summary["binding_constraint"])
+        self.assertEqual(summary["safe"], 1)
+        self.assertEqual(summary["issuer_operating_risk_headroom_ge_125"], 0)
+        self.assertNotIn("p50_available_service_cash_headroom", summary["binding_constraint"])
+
+        headroom_rows = issuer_headroom_frontier_rows([summary])
+        self.assertEqual(headroom_rows[0]["headroom_principal_ratio"], 0.0)
+        self.assertEqual(
+            headroom_rows[0]["binding_constraint_at_headroom_frontier"],
+            "issuer_operating_risk_headroom_lt_1p25",
+        )
 
     def test_frontier_safety_keeps_total_swap_volume_decline_diagnostic(self):
         row = {

@@ -24,9 +24,17 @@ COPY_FILES = (
     "producer_deposit_calibration.csv",
     "productive_credit_calibration.csv",
     "debt_removal_calibration.csv",
+    "debt_removal_purchase_weekly_distribution.csv",
+    "debt_removal_purchase_weekly_summary.csv",
+    "stable_deposit_weekly_distribution.csv",
+    "stable_deposit_weekly_summary.csv",
+    "pool_swap_weekly_distribution.csv",
+    "pool_swap_weekly_summary.csv",
     "fee_conversion_calibration.csv",
     "quarterly_clearing_calibration.csv",
     "route_substitution_diagnostics.csv",
+    "voucher_pool_overlap_calibration.csv",
+    "voucher_pool_overlap_distribution.csv",
     "impact_projection_by_activity.csv",
     "report_quality_counts.csv",
 )
@@ -121,6 +129,26 @@ deposit proxies, productive-credit timing, debt-removal purchases, voucher-fee
 conversion, quarterly clearing, and route substitution diagnostics. These are
 empirical settlement motifs and scenario anchors, not direct pool inventory
 snapshots or a failed-route denominator.
+Voucher-pool overlap calibration is also exported as aggregate topology only:
+it reports how many KSh/KES voucher tokens appear in one or more pools, a
+bucketed degree distribution, and shared-voucher pool-pool edge counts. It does
+not include raw token or pool addresses and should be read as route potential,
+not participant intent.
+The current ROLA/frontier-pilot purchase-demand setting uses a network-level
+weekly stable budget, not a per-consumer allowance. In the research workspace,
+the aggregate stable-to-voucher purchase value is also exported as a weekly
+distribution and figure so the flat budget can be replaced by a dynamic
+purchase-timing model once buyer-income moments are added. The current flat
+purchase budget is a conservative 260-week spreading of the aggregate purchase
+value, not a dynamic buyer-income process.
+The public bundle also exports a standalone stable/cash deposit weekly series.
+That series counts ordinary successful pool-era stable/cash deposit logs and
+excludes swap-associated deposit logs, while reporting the inclusive
+deposit-log total separately. It is intended to distinguish ordinary stable
+backing/deposit timing from stable used directly in swaps.
+An all-pool weekly swap series is exported as well, with successful pool-swap
+log counts and one-sided normalized input value by week. Output value and
+stable/voucher source-pair counts are included for audit.
 
 The bond-frontier safety tests use these files in three ways:
 

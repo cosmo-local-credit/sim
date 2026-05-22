@@ -171,6 +171,8 @@ class Calibration:
     quarterly_clearing_calibration: dict[str, float]
     settlement_reliability_anchors: dict[str, float]
     route_substitution_diagnostics: dict[str, float]
+    voucher_pool_overlap_calibration: dict[str, float]
+    voucher_pool_overlap_distribution: dict[str, float]
     unit_normalization: dict[str, float]
 
 
@@ -350,6 +352,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="Maximum voucher target assets to try for experimental producer voucher-loan fallback.",
+    )
+    parser.add_argument(
+        "--producer-voucher-overlap-mode",
+        default="single_lender",
+        choices=("single_lender", "empirical_overlap"),
+        help=(
+            "Producer-voucher lender listing topology. Frontier probes can use "
+            "empirical_overlap to sample lender acceptor counts from Sarafu "
+            "voucher-pool overlap calibration."
+        ),
     )
     parser.add_argument(
         "--enable-lender-voucher-purchase-demand",
@@ -614,6 +626,7 @@ SHARD_CONFIG_KEYS = (
     "enable_producer_primary_voucher_borrowing",
     "producer_primary_voucher_borrowing_attempt_share",
     "producer_voucher_loan_max_target_candidates",
+    "producer_voucher_overlap_mode",
     "enable_lender_voucher_purchase_demand",
     "lender_voucher_purchase_attempts_per_tick",
     "lender_voucher_purchase_consumer_share",
@@ -1030,11 +1043,28 @@ def load_calibration(calibration_dir: Path) -> Calibration:
             values[metric] = safe_float(row.get("value"))
         return values
 
+    def load_overlap_distribution() -> dict[str, float]:
+        path = calibration_dir / "voucher_pool_overlap_distribution.csv"
+        values: dict[str, float] = {}
+        if not path.exists():
+            return values
+        for row in read_csv(path):
+            bucket = str(row.get("pool_degree_bucket", "")).strip()
+            if not bucket:
+                continue
+            values[bucket] = max(0.0, safe_float(row.get("share")))
+        total = sum(values.values())
+        if total > 1e-9:
+            values = {bucket: share / total for bucket, share in values.items()}
+        return values
+
     debt_removal_calibration = load_metric_table("debt_removal_calibration.csv")
     fee_conversion_calibration = load_metric_table("fee_conversion_calibration.csv")
     quarterly_clearing_calibration = load_metric_table("quarterly_clearing_calibration.csv")
     settlement_reliability_anchors = load_metric_table("settlement_reliability_anchors.csv")
     route_substitution_diagnostics = load_metric_table("route_substitution_diagnostics.csv")
+    voucher_pool_overlap_calibration = load_metric_table("voucher_pool_overlap_calibration.csv")
+    voucher_pool_overlap_distribution = load_overlap_distribution()
     unit_normalization = load_metric_table("unit_normalization_calibration.csv")
 
     return Calibration(
@@ -1056,6 +1086,8 @@ def load_calibration(calibration_dir: Path) -> Calibration:
         quarterly_clearing_calibration=quarterly_clearing_calibration,
         settlement_reliability_anchors=settlement_reliability_anchors,
         route_substitution_diagnostics=route_substitution_diagnostics,
+        voucher_pool_overlap_calibration=voucher_pool_overlap_calibration,
+        voucher_pool_overlap_distribution=voucher_pool_overlap_distribution,
         unit_normalization=unit_normalization,
     )
 
@@ -1283,6 +1315,26 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
         f"_{prefix}_quarterly_clearing_surplus_share",
         calibration.quarterly_clearing_calibration.get("surplus_clearable_share", 1.0),
     )
+    setattr(
+        args,
+        f"_{prefix}_voucher_pool_overlap_distribution",
+        dict(calibration.voucher_pool_overlap_distribution),
+    )
+    setattr(
+        args,
+        f"_{prefix}_voucher_pool_overlap_multi_pool_share",
+        safe_float(calibration.voucher_pool_overlap_calibration.get("multi_pool_share")),
+    )
+    setattr(
+        args,
+        f"_{prefix}_voucher_pool_overlap_degree_p50",
+        safe_float(calibration.voucher_pool_overlap_calibration.get("pool_degree_p50")),
+    )
+    setattr(
+        args,
+        f"_{prefix}_voucher_pool_overlap_degree_p90",
+        safe_float(calibration.voucher_pool_overlap_calibration.get("pool_degree_p90")),
+    )
 
 
 def certified_pool_capacity(calibration: Calibration, network_scale: str, policy: str) -> dict[str, float]:
@@ -1472,6 +1524,14 @@ def scenario_config(
             0.0, float(getattr(args, "_frontier_producer_voucher_deposit_rate_per_month", 0.0))
         )
         cfg.lender_voucher_cap_deposit_multiple = 5.0
+        cfg.producer_voucher_overlap_mode = str(
+            getattr(args, "producer_voucher_overlap_mode", "single_lender") or "single_lender"
+        )
+        if cfg.producer_voucher_overlap_mode == "empirical_overlap":
+            cfg.producer_voucher_single_lender = False
+            cfg.producer_voucher_overlap_bucket_weights = dict(
+                getattr(args, "_frontier_voucher_pool_overlap_distribution", {}) or {}
+            )
         cfg.productive_credit_enabled = True
         cfg.productive_credit_return_rate = max(
             0.0, float(getattr(args, "_frontier_productive_credit_return_rate", 0.0))
@@ -2548,6 +2608,18 @@ def run_one(
             "configured_lender_voucher_purchase_stable_budget_usd_per_tick": safe_float(
                 getattr(cfg, "lender_voucher_purchase_stable_budget_usd_per_tick", 0.0)
             ),
+            "configured_producer_voucher_overlap_mode": getattr(
+                cfg, "producer_voucher_overlap_mode", "single_lender"
+            ),
+            "configured_empirical_voucher_pool_overlap_multi_pool_share": safe_float(
+                getattr(args, f"_{control_prefix}_voucher_pool_overlap_multi_pool_share", 0.0)
+            ),
+            "configured_empirical_voucher_pool_overlap_degree_p50": safe_float(
+                getattr(args, f"_{control_prefix}_voucher_pool_overlap_degree_p50", 0.0)
+            ),
+            "configured_empirical_voucher_pool_overlap_degree_p90": safe_float(
+                getattr(args, f"_{control_prefix}_voucher_pool_overlap_degree_p90", 0.0)
+            ),
             "stable_symbol": unit_diagnostics.get("stable_symbol", ""),
             "stable_unit_value_usd": unit_diagnostics.get("stable_unit_value_usd", 1.0),
             "sample_producer_voucher_id": unit_diagnostics.get("sample_producer_voucher_id", ""),
@@ -2916,6 +2988,31 @@ def run_one(
             ),
             "lender_held_producer_voucher_inventory_usd": latest.get(
                 "lender_held_producer_voucher_inventory_usd", 0.0
+            ),
+            "producer_voucher_overlap_mode_empirical": latest.get(
+                "producer_voucher_overlap_mode_empirical", 0
+            ),
+            "producer_voucher_overlap_tokens": latest.get("producer_voucher_overlap_tokens", 0),
+            "producer_voucher_multi_lender_tokens": latest.get(
+                "producer_voucher_multi_lender_tokens", 0
+            ),
+            "producer_voucher_multi_lender_share": latest.get(
+                "producer_voucher_multi_lender_share", 0.0
+            ),
+            "producer_voucher_lender_degree_mean": latest.get(
+                "producer_voucher_lender_degree_mean", 0.0
+            ),
+            "producer_voucher_lender_degree_p50": latest.get(
+                "producer_voucher_lender_degree_p50", 0.0
+            ),
+            "producer_voucher_lender_degree_p90": latest.get(
+                "producer_voucher_lender_degree_p90", 0.0
+            ),
+            "producer_voucher_lender_degree_max": latest.get(
+                "producer_voucher_lender_degree_max", 0
+            ),
+            "producer_voucher_shared_lender_edges": latest.get(
+                "producer_voucher_shared_lender_edges", 0
             ),
             "consumer_stable_available_above_reserve_usd": latest.get(
                 "consumer_stable_available_above_reserve_usd", 0.0
@@ -5349,6 +5446,21 @@ def summarize_frontier_cell(
     lender_held_producer_voucher_inventory_values = [
         safe_float(row.get("lender_held_producer_voucher_inventory_usd")) for row in rows
     ]
+    producer_voucher_multi_lender_share_values = [
+        safe_float(row.get("producer_voucher_multi_lender_share")) for row in rows
+    ]
+    producer_voucher_lender_degree_mean_values = [
+        safe_float(row.get("producer_voucher_lender_degree_mean")) for row in rows
+    ]
+    producer_voucher_lender_degree_p50_values = [
+        safe_float(row.get("producer_voucher_lender_degree_p50")) for row in rows
+    ]
+    producer_voucher_lender_degree_p90_values = [
+        safe_float(row.get("producer_voucher_lender_degree_p90")) for row in rows
+    ]
+    producer_voucher_shared_lender_edge_values = [
+        safe_float(row.get("producer_voucher_shared_lender_edges")) for row in rows
+    ]
     consumer_stable_available_above_reserve_values = [
         safe_float(row.get("consumer_stable_available_above_reserve_usd")) for row in rows
     ]
@@ -5632,8 +5744,6 @@ def summarize_frontier_cell(
         constraints.append("p50_scheduled_payment_coverage")
     if percentile(scheduled_payment_values, 0.05) < 1.00:
         constraints.append("p05_scheduled_payment_coverage")
-    if percentile(available_service_cash_headroom_values, 0.50) < 1.25:
-        constraints.append("p50_available_service_cash_headroom")
     route_success_floor = max(0.0, min(1.0, float(route_success_floor)))
     route_success_mode = str(route_success_mode or "diagnostic").strip().lower()
     if route_success_mode == "absolute" and percentile(route_values, 0.05) < route_success_floor:
@@ -5734,6 +5844,15 @@ def summarize_frontier_cell(
         ),
         "available_service_cash_headroom_p50": percentile(
             available_service_cash_headroom_values, 0.50
+        ),
+        "issuer_operating_risk_headroom_p05": percentile(
+            available_service_cash_headroom_values, 0.05
+        ),
+        "issuer_operating_risk_headroom_p50": percentile(
+            available_service_cash_headroom_values, 0.50
+        ),
+        "issuer_operating_risk_headroom_ge_125": int(
+            percentile(available_service_cash_headroom_values, 0.50) >= 1.25
         ),
         "issuer_lockbox_surplus_usd_p50": percentile(issuer_lockbox_surplus_values, 0.50),
         "issuer_excess_recovered_stable_usd_p50": percentile(
@@ -5960,6 +6079,30 @@ def summarize_frontier_cell(
         ),
         "lender_held_producer_voucher_inventory_usd_p50": percentile(
             lender_held_producer_voucher_inventory_values, 0.50
+        ),
+        "producer_voucher_multi_lender_share_p50": percentile(
+            producer_voucher_multi_lender_share_values, 0.50
+        ),
+        "producer_voucher_lender_degree_mean_p50": percentile(
+            producer_voucher_lender_degree_mean_values, 0.50
+        ),
+        "producer_voucher_lender_degree_p50_p50": percentile(
+            producer_voucher_lender_degree_p50_values, 0.50
+        ),
+        "producer_voucher_lender_degree_p90_p50": percentile(
+            producer_voucher_lender_degree_p90_values, 0.50
+        ),
+        "producer_voucher_shared_lender_edges_p50": percentile(
+            producer_voucher_shared_lender_edge_values, 0.50
+        ),
+        "empirical_voucher_pool_overlap_multi_pool_share": safe_float(
+            first.get("configured_empirical_voucher_pool_overlap_multi_pool_share")
+        ),
+        "empirical_voucher_pool_overlap_degree_p50": safe_float(
+            first.get("configured_empirical_voucher_pool_overlap_degree_p50")
+        ),
+        "empirical_voucher_pool_overlap_degree_p90": safe_float(
+            first.get("configured_empirical_voucher_pool_overlap_degree_p90")
         ),
         "consumer_stable_available_above_reserve_usd_p50": percentile(
             consumer_stable_available_above_reserve_values, 0.50
@@ -7141,6 +7284,24 @@ def frontier_summary_rows(
                 "available_service_cash_headroom_p50": safe_float(
                     best.get("available_service_cash_headroom_p50", best.get("service_cash_headroom_p50"))
                 ),
+                "issuer_operating_risk_headroom_p50": safe_float(
+                    best.get(
+                        "issuer_operating_risk_headroom_p50",
+                        best.get("available_service_cash_headroom_p50", best.get("service_cash_headroom_p50")),
+                    )
+                ),
+                "issuer_operating_risk_headroom_ge_125": int(
+                    safe_float(
+                        best.get(
+                            "issuer_operating_risk_headroom_p50",
+                            best.get(
+                                "available_service_cash_headroom_p50",
+                                best.get("service_cash_headroom_p50"),
+                            ),
+                        )
+                    )
+                    >= 1.25
+                ),
                 "bond_service_lockbox_target_usd_p50": safe_float(
                     best.get("bond_service_lockbox_target_usd_p50")
                 ),
@@ -7202,6 +7363,24 @@ def frontier_summary_rows(
                 "available_service_cash_headroom_p50": safe_float(
                     best.get("available_service_cash_headroom_p50", best.get("service_cash_headroom_p50"))
                 ),
+                "issuer_operating_risk_headroom_p50": safe_float(
+                    best.get(
+                        "issuer_operating_risk_headroom_p50",
+                        best.get("available_service_cash_headroom_p50", best.get("service_cash_headroom_p50")),
+                    )
+                ),
+                "issuer_operating_risk_headroom_ge_125": int(
+                    safe_float(
+                        best.get(
+                            "issuer_operating_risk_headroom_p50",
+                            best.get(
+                                "available_service_cash_headroom_p50",
+                                best.get("service_cash_headroom_p50"),
+                            ),
+                        )
+                    )
+                    >= 1.25
+                ),
                 "bond_service_lockbox_target_usd_p50": safe_float(
                     best.get("bond_service_lockbox_target_usd_p50")
                 ),
@@ -7232,6 +7411,51 @@ def frontier_summary_rows(
     return frontier_rows, headline_rows
 
 
+def issuer_headroom_frontier_rows(safety_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    rows_out: list[dict[str, object]] = []
+    grouped: dict[tuple[str, float, float], list[dict[str, object]]] = defaultdict(list)
+    for row in safety_rows:
+        grouped[
+            (
+                str(row.get("network_scale", "")),
+                safe_float(row.get("coupon_target_annual")),
+                safe_float(row.get("bond_fee_service_share")),
+            )
+        ].append(row)
+    for (scale, coupon, share), rows in sorted(grouped.items()):
+        eligible = [
+            row
+            for row in rows
+            if int(row.get("safe", 0)) == 1
+            and safe_float(row.get("issuer_operating_risk_headroom_p50", row.get("available_service_cash_headroom_p50"))) >= 1.25
+        ]
+        if eligible:
+            best = max(eligible, key=lambda row: safe_float(row.get("principal_usd_p50")))
+            binding = ""
+        else:
+            safe_rows = [row for row in rows if int(row.get("safe", 0)) == 1]
+            best = max(safe_rows, key=lambda row: safe_float(row.get("principal_usd_p50"))) if safe_rows else min(
+                rows, key=lambda row: safe_float(row.get("principal_ratio"))
+            )
+            binding = "issuer_operating_risk_headroom_lt_1p25"
+        rows_out.append(
+            {
+                "network_scale": scale,
+                "coupon_target_annual": coupon,
+                "bond_fee_service_share": share,
+                "headroom_principal_ratio": safe_float(best.get("principal_ratio")) if eligible else 0.0,
+                "headroom_principal_usd": safe_float(best.get("principal_usd_p50")) if eligible else 0.0,
+                "issuer_operating_risk_headroom_p50": safe_float(
+                    best.get("issuer_operating_risk_headroom_p50", best.get("available_service_cash_headroom_p50"))
+                ),
+                "scheduled_payment_coverage_p05": safe_float(best.get("scheduled_payment_coverage_p05")),
+                "issuer_unpaid_scheduled_claim_p95": safe_float(best.get("issuer_unpaid_scheduled_claim_p95")),
+                "binding_constraint_at_headroom_frontier": binding,
+            }
+        )
+    return rows_out
+
+
 def write_frontier_aggregate(
     args: argparse.Namespace,
     calibration: Calibration,
@@ -7245,11 +7469,13 @@ def write_frontier_aggregate(
     all_run_rows = sorted_run_rows(all_run_rows)
     safety_rows = sorted_frontier_safety_rows(safety_rows)
     frontier_rows, headline_rows = frontier_summary_rows(network_scales, safety_rows)
+    headroom_rows = issuer_headroom_frontier_rows(safety_rows)
     issuer_rows = issuer_cashflow_summary_rows(safety_rows)
     suffix = ".partial.csv" if partial else ".csv"
     write_csv(output_dir / f"bond_issuer_frontier_runs{suffix}", list(all_run_rows[0].keys()) if all_run_rows else [], all_run_rows)
     write_csv(output_dir / f"bond_issuer_frontier_safety{suffix}", list(safety_rows[0].keys()) if safety_rows else [], safety_rows)
     write_csv(output_dir / f"safe_injection_frontier{suffix}", list(frontier_rows[0].keys()) if frontier_rows else [], frontier_rows)
+    write_csv(output_dir / f"issuer_operating_headroom_frontier{suffix}", list(headroom_rows[0].keys()) if headroom_rows else [], headroom_rows)
     write_csv(output_dir / f"network_scaling_summary{suffix}", list(headline_rows[0].keys()) if headline_rows else [], headline_rows)
     write_csv(output_dir / f"issuer_cashflow_summary{suffix}", list(issuer_rows[0].keys()) if issuer_rows else [], issuer_rows)
     audit_rows = calibration_activity_audit_rows(

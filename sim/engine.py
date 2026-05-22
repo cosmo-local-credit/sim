@@ -106,6 +106,8 @@ class SimulationEngine:
         self._last_utilization_rate: float = 0.0
         self._loan_phase_by_agent: Dict[str, int] = {}
         self._producer_voucher_assignments: Dict[str, str] = {}
+        self._producer_voucher_lender_assignments: Dict[str, Set[str]] = {}
+        self._producer_voucher_target_lender_counts: Dict[str, int] = {}
         self._pending_producer_vouchers: list[str] = []
         self.system_pools: Set[str] = set()
         self.ops_pool_id: Optional[str] = None
@@ -632,6 +634,96 @@ class SimulationEngine:
         )
         return True
 
+    def _producer_voucher_overlap_enabled(self) -> bool:
+        mode = str(getattr(self.cfg, "producer_voucher_overlap_mode", "single_lender") or "single_lender")
+        return mode == "empirical_overlap"
+
+    def _bucketed_producer_voucher_lender_count(self, lender_count: int) -> int:
+        if lender_count <= 0:
+            return 0
+        if not self._producer_voucher_overlap_enabled():
+            return 1 if bool(self.cfg.producer_voucher_single_lender) else lender_count
+        weights = getattr(self.cfg, "producer_voucher_overlap_bucket_weights", {}) or {}
+        clean_weights = {
+            str(bucket): max(0.0, float(weight))
+            for bucket, weight in dict(weights).items()
+            if max(0.0, float(weight)) > 0.0
+        }
+        if not clean_weights:
+            return 1
+        total = sum(clean_weights.values())
+        draw = random.random() * total
+        running = 0.0
+        selected = "1"
+        for bucket, weight in sorted(clean_weights.items()):
+            running += weight
+            if draw <= running:
+                selected = bucket
+                break
+        if "-" in selected:
+            low_text, high_text = selected.split("-", 1)
+            low = max(1, int(float(low_text)))
+            high = max(low, int(float(high_text)))
+            target = random.randint(low, high)
+        elif selected.endswith("+"):
+            low = max(1, int(float(selected[:-1])))
+            high = max(low, lender_count)
+            target = random.randint(low, high)
+        else:
+            target = max(1, int(float(selected)))
+        max_acceptors = getattr(self.cfg, "producer_voucher_overlap_max_lender_acceptors", None)
+        if max_acceptors is not None:
+            target = min(target, max(1, int(max_acceptors)))
+        return max(1, min(int(target), lender_count))
+
+    def _producer_voucher_overlap_diagnostics(self) -> dict[str, float]:
+        counts = [
+            len(assignments)
+            for assignments in self._producer_voucher_lender_assignments.values()
+            if assignments
+        ]
+        if not counts:
+            return {
+                "producer_voucher_overlap_mode_empirical": int(self._producer_voucher_overlap_enabled()),
+                "producer_voucher_overlap_tokens": 0,
+                "producer_voucher_multi_lender_tokens": 0,
+                "producer_voucher_multi_lender_share": 0.0,
+                "producer_voucher_lender_degree_mean": 0.0,
+                "producer_voucher_lender_degree_p50": 0.0,
+                "producer_voucher_lender_degree_p90": 0.0,
+                "producer_voucher_lender_degree_max": 0,
+                "producer_voucher_shared_lender_edges": 0,
+            }
+        clean = sorted(float(count) for count in counts)
+
+        def q(prob: float) -> float:
+            if len(clean) == 1:
+                return clean[0]
+            pos = (len(clean) - 1) * max(0.0, min(1.0, prob))
+            lower = math.floor(pos)
+            upper = math.ceil(pos)
+            if lower == upper:
+                return clean[int(pos)]
+            return clean[lower] + (clean[upper] - clean[lower]) * (pos - lower)
+
+        edge_count = 0
+        for assignments in self._producer_voucher_lender_assignments.values():
+            n = len(assignments)
+            if n > 1:
+                edge_count += n * (n - 1) // 2
+        multi = sum(1 for count in counts if count > 1)
+        return {
+            "producer_voucher_overlap_mode_empirical": int(self._producer_voucher_overlap_enabled()),
+            "producer_voucher_overlap_tokens": len(counts),
+            "producer_voucher_multi_lender_tokens": multi,
+            "producer_voucher_multi_lender_share": multi / max(1, len(counts)),
+            "producer_voucher_lender_degree_mean": sum(counts) / max(1, len(counts)),
+            "producer_voucher_lender_degree_p50": q(0.50),
+            "producer_voucher_lender_degree_p90": q(0.90),
+            "producer_voucher_lender_degree_max": max(counts),
+            "producer_voucher_shared_lender_edges": edge_count,
+        }
+
     def _assign_producer_voucher_to_lender(self, voucher_id: str) -> None:
         lenders = [
             p for p in self.pools.values()
@@ -641,33 +733,54 @@ class SimulationEngine:
             if voucher_id not in self._pending_producer_vouchers:
                 self._pending_producer_vouchers.append(voucher_id)
             return
-        assigned_id = self._producer_voucher_assignments.get(voucher_id)
-        assigned_pool = self.pools.get(assigned_id) if assigned_id else None
-        if assigned_pool is None or assigned_pool.policy.role != "lender":
-            counts = {p.pool_id: self._lender_producer_voucher_count(p) for p in lenders}
-            min_count = min(counts.values()) if counts else 0
-            candidates = [p for p in lenders if counts.get(p.pool_id, 0) == min_count]
-            if candidates:
-                stable_id = self.cfg.stable_symbol
-                candidates.sort(
-                    key=lambda p: (p.vault.get(stable_id) - p.policy.min_stable_reserve),
-                    reverse=True,
+        current = {
+            lender_id
+            for lender_id in self._producer_voucher_lender_assignments.get(voucher_id, set())
+            if lender_id in self.pools and self.pools[lender_id].policy.role == "lender"
+        }
+        target_count = self._producer_voucher_target_lender_counts.get(voucher_id)
+        if target_count is None or target_count <= 0:
+            target_count = self._bucketed_producer_voucher_lender_count(len(lenders))
+            self._producer_voucher_target_lender_counts[voucher_id] = target_count
+        target_count = max(1, min(int(target_count), len(lenders)))
+        if len(current) < target_count:
+            stable_id = self.cfg.stable_symbol
+            available = [p for p in lenders if p.pool_id not in current]
+            load_counts = {p.pool_id: self._lender_producer_voucher_count(p) for p in lenders}
+            available.sort(
+                key=lambda p: (
+                    load_counts.get(p.pool_id, 0),
+                    -(p.vault.get(stable_id) - p.policy.min_stable_reserve),
+                    p.pool_id,
                 )
-                chosen = candidates[0]
-            else:
-                chosen = lenders[0]
-            self._producer_voucher_assignments[voucher_id] = chosen.pool_id
-            assigned_pool = chosen
-        if assigned_pool is None:
+            )
+            for pool in available[: max(0, target_count - len(current))]:
+                current.add(pool.pool_id)
+        if not current:
             return
-        listed = self._list_producer_voucher_on_lender(assigned_pool, voucher_id)
-        if listed:
+        self._producer_voucher_lender_assignments[voucher_id] = set(current)
+        primary_id = sorted(
+            current,
+            key=lambda pid: (
+                self._lender_producer_voucher_count(self.pools[pid]) if pid in self.pools else 0,
+                pid,
+            ),
+        )[0]
+        self._producer_voucher_assignments[voucher_id] = primary_id
+        listed_any = False
+        for lender_id in sorted(current):
+            assigned_pool = self.pools.get(lender_id)
+            if assigned_pool is None:
+                continue
+            listed = self._list_producer_voucher_on_lender(assigned_pool, voucher_id)
+            listed_any = listed_any or listed
             if self._is_routable_pool(assigned_pool):
                 self.accept_index.setdefault(voucher_id, set()).add(assigned_pool.pool_id)
+        if listed_any:
             self._refresh_lender_voucher_limits({voucher_id})
-        if bool(self.cfg.producer_voucher_single_lender):
+        if bool(self.cfg.producer_voucher_single_lender) and not self._producer_voucher_overlap_enabled():
             for lender in lenders:
-                if lender.pool_id == assigned_pool.pool_id:
+                if lender.pool_id in current:
                     continue
                 pol = lender.registry.listings.get(voucher_id)
                 if pol and pol.enabled:
@@ -994,26 +1107,25 @@ class SimulationEngine:
                     pools.append(self.clc_pool_id)
                     top_pools[asset_id] = pools
 
-        # Ensure assigned lender for each producer voucher is included in the NOAM working set.
-        for voucher_id, lender_id in self._producer_voucher_assignments.items():
-            lender_pool = self.pools.get(lender_id)
-            if lender_pool is None:
-                continue
-            if not lender_pool.registry.is_listed(voucher_id):
-                continue
-            pools = top_pools.get(voucher_id, [])
-            if lender_id in pools:
-                continue
-            if not pools:
-                top_pools[voucher_id] = [lender_id]
-                continue
-            if len(pools) >= top_k:
+        # Ensure assigned lenders for each producer voucher are included in the NOAM working set.
+        for voucher_id, lender_ids in self._producer_voucher_lender_assignments.items():
+            for lender_id in sorted(lender_ids):
+                lender_pool = self.pools.get(lender_id)
+                if lender_pool is None:
+                    continue
+                if not lender_pool.registry.is_listed(voucher_id):
+                    continue
+                pools = top_pools.get(voucher_id, [])
+                if lender_id in pools:
+                    continue
+                if not pools:
+                    top_pools[voucher_id] = [lender_id]
+                    continue
                 pools = list(pools)
-                pools[-1] = lender_id
-                top_pools[voucher_id] = pools
-            else:
-                pools = list(pools)
-                pools.append(lender_id)
+                if len(pools) >= top_k:
+                    pools[-1] = lender_id
+                else:
+                    pools.append(lender_id)
                 top_pools[voucher_id] = pools
 
         # Always include lenders in routing/clearing for assets they list.
@@ -2844,8 +2956,8 @@ class SimulationEngine:
                     supply_updates.add(a)
             self._assign_pending_producer_vouchers()
             producer_listed: Set[str] = set()
-            for voucher_id, lender_id in self._producer_voucher_assignments.items():
-                if lender_id != pool.pool_id:
+            for voucher_id, lender_ids in self._producer_voucher_lender_assignments.items():
+                if pool.pool_id not in lender_ids:
                     continue
                 if self._list_producer_voucher_on_lender(pool, voucher_id):
                     producer_listed.add(voucher_id)
@@ -7726,6 +7838,7 @@ class SimulationEngine:
                 )
             )
             producer_debt_active_usd = self._producer_debt_active_usd()
+            producer_voucher_overlap = self._producer_voucher_overlap_diagnostics()
             lender_stable_total_usd = 0.0
             lender_stable_reserve_usd = 0.0
             lender_stable_available_above_reserve_usd = 0.0
@@ -7833,6 +7946,7 @@ class SimulationEngine:
                 "lender_held_producer_voucher_inventory_usd": float(
                     self._lender_held_producer_voucher_inventory_usd()
                 ),
+                **producer_voucher_overlap,
                 "consumer_stable_available_above_reserve_usd": float(
                     self._consumer_stable_available_above_reserve_usd()
                 ),

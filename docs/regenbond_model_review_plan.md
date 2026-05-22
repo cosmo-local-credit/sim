@@ -21,6 +21,10 @@ latest validation and frontier artifacts.
   producer borrowing can create additional voucher deposits and voucher-source
   activity, but only through aggregate calibration shares and growth caps, and
   always against a matched no-bond baseline.
+- The 20-run `frontier-rola-regeneration-probe` now passes all tested
+  current-scale low-principal cells from `0` to `0.05` principal ratio. The
+  current `frontier-pilot` target has been wired to enable the same primary
+  producer voucher borrowing and bounded lender-held-voucher purchase demand.
 - Earlier pilot results that rejected all cells under `p50_service_coverage`
   and reserve-constrained fee-service mechanics are superseded historical
   evidence for model debugging, not current frontier evidence.
@@ -39,7 +43,22 @@ Implemented changes:
   `0.384157` to voucher deposits, and caps loan-induced voucher-deposit growth
   at `0.143206` per month.
 - Added dated producer-debt obligations for frontier runs: producer voucher borrowing creates a maturity record and a contract cash-service obligation. Lender-held vouchers can close through normal circulation, but circulation alone only closes the pool-level voucher exposure; stable bond-service recovery requires borrower repayment, consumer or third-party stable purchase, or contract cash-service payment. Any remaining cash service at the 13-tick maturity is attempted from producer stable and then written off under the configured recovery/default rate.
-- Added a producer debt contract service margin for frontier runs. The current default is `50%` over borrowed principal, modeling required cash recovery for bond service plus issuer operating/risk headroom as a scenario assumption rather than as a claimed deployed interest rate.
+- Added producer debt contract cash-service accounting for frontier runs. The
+  current default is principal-only cash service with a shared `0%` margin over
+  borrowed principal until an empirical debt-service margin is calibrated.
+  Margins such as `2%`, `5%`, `10%`, `15%`, or `50%` are sensitivity/stress
+  parameters, not deployed lending-price claims. Issuer operating and risk
+  sustainability are measured separately through fee service, excess recovered
+  stable, lockbox surplus, and operating-surplus diagnostics.
+- Added primary producer voucher borrowing and voucher-loan diagnostics.
+  Producer voucher-to-voucher borrowing is treated as a ROLA/marketplace
+  circulation channel; it can shift lender-pool exposure and still carries
+  cash-service accounting, but it is not counted as bond-service cash until
+  stable is recovered.
+- Added bounded lender-held-voucher purchase demand. Consumers and third-party
+  buyers can use calibrated stable purchase budgets to buy visible producer
+  vouchers from lender pools, subject to route success, target inventory, and
+  reserve protection.
 - Added routed conversion attempts for voucher-denominated fees. Successful stable conversion can reserve the configured fee-service share into the bond lockbox before excess fee cash enters the CLC waterfall; failures are retained as voucher fee inventory.
 - Added quarterly clearing of eligible recovered stable from lender pools, capped by scheduled issuer need and lender surplus.
 - Added a configurable bond-service lockbox. Frontier jobs reserve recovered lender stable and eligible fee-service cash against `1.25x` remaining scheduled principal plus coupon before cash can recirculate; `next_due` remains available as a control mode.
@@ -55,13 +74,14 @@ Validation and frontier checks required before using revised frontier results:
 ./scripts/run_regenbond_remote_batch.sh validation-full
 ./scripts/run_regenbond_remote_batch.sh frontier-smoke
 ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
-./scripts/run_regenbond_remote_batch.sh frontier-feedback-probe
+./scripts/run_regenbond_remote_batch.sh frontier-rola-regeneration-probe
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 ```
 
 Run `frontier-pilot` only after `frontier-maturity-smoke` and
-`frontier-feedback-probe` pass basic repayment and interpretability checks, and
-run `frontier-publication` only after the revised pilot is reviewed.
+`frontier-rola-regeneration-probe` pass repayment, voucher-circulation, and
+stress checks. Run `frontier-publication` only after the revised pilot is
+reviewed.
 
 ## Empirical Grounding Discipline
 
@@ -105,6 +125,11 @@ Mechanism grounding:
   topology, not an observed denominator of failed searches.
 
 ## First Frontier Review
+
+This section is historical. It refers to the earlier frontier pilot before
+primary voucher borrowing and bounded lender-held-voucher purchase demand were
+enabled. The current paper-facing pilot should be judged against the
+ROLA-enabled frontier configuration.
 
 The first pilot review inspected these files:
 
