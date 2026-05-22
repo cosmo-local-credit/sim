@@ -646,7 +646,7 @@ class RegenBondRevisionTests(unittest.TestCase):
             _frontier_productive_credit_lag_ticks=2,
             _frontier_productive_credit_voucher_deposit_share=0.384157,
             _frontier_productive_credit_voucher_deposit_cap_rate_per_month=0.143206,
-            _frontier_producer_debt_maturity_recovery_rate=0.0,
+            _frontier_producer_debt_maturity_recovery_rate=0.673,
             _frontier_quarterly_clearing_surplus_share=1.0,
             _frontier_route_requests_per_tick=1,
             _frontier_swap_floor_per_tick=0,
@@ -662,7 +662,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.bond_gross_principal_usd, 1000.0)
         self.assertAlmostEqual(cfg.bond_deployed_principal_usd, 1000.0)
         self.assertAlmostEqual(cfg.issuer_reserve_share, 0.0)
-        self.assertAlmostEqual(cfg.producer_debt_maturity_recovery_rate, 1.0)
+        self.assertAlmostEqual(cfg.producer_debt_maturity_recovery_rate, 0.673)
         self.assertTrue(cfg.bond_service_reserve_enabled)
         self.assertEqual(cfg.bond_service_lockbox_mode, "remaining_schedule")
         self.assertAlmostEqual(cfg.bond_service_lockbox_coverage_ratio, 1.25)

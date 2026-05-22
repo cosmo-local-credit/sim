@@ -344,8 +344,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--producer-primary-voucher-borrowing-attempt-share",
         type=float,
-        default=0.50,
-        help="Share of eligible producer credit attempts that try primary voucher borrowing first.",
+        default=None,
+        help=(
+            "Share of eligible producer credit attempts that try primary voucher borrowing "
+            "first. Defaults to the calibrated voucher-to-voucher share among recent "
+            "voucher-source borrowing motifs."
+        ),
     )
     parser.add_argument(
         "--producer-voucher-loan-max-target-candidates",
@@ -1310,6 +1314,27 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
         f"_{prefix}_producer_debt_maturity_recovery_rate",
         max(0.0, min(1.0, debt_maturity_recovery_rate)),
     )
+    current_circulation = (
+        calibration.voucher_circulation_baselines.get("trailing_90d")
+        or calibration.voucher_circulation_baselines.get("trailing_52w")
+        or calibration.voucher_circulation_baselines.get("pool_era")
+        or {}
+    )
+    voucher_to_voucher_count = safe_float(current_circulation.get("voucher_to_voucher_count"))
+    voucher_to_stable_count = safe_float(current_circulation.get("voucher_to_stable_count"))
+    voucher_source_borrowing_count = voucher_to_voucher_count + voucher_to_stable_count
+    if voucher_source_borrowing_count > 1e-9:
+        primary_voucher_borrowing_attempt_share = voucher_to_voucher_count / voucher_source_borrowing_count
+    else:
+        primary_voucher_borrowing_attempt_share = safe_float(
+            current_circulation.get("voucher_to_voucher_share"),
+            0.50,
+        )
+    setattr(
+        args,
+        f"_{prefix}_producer_primary_voucher_borrowing_attempt_share",
+        max(0.0, min(1.0, primary_voucher_borrowing_attempt_share)),
+    )
     setattr(
         args,
         f"_{prefix}_quarterly_clearing_surplus_share",
@@ -1569,7 +1594,13 @@ def scenario_config(
         cfg.productive_credit_voucher_source_size_multiplier = 1.25
         cfg.producer_debt_maturity_enabled = True
         cfg.producer_debt_maturity_ticks = max(1, int(getattr(args, "issuer_payment_stride", 13)))
-        cfg.producer_debt_maturity_recovery_rate = 1.0
+        cfg.producer_debt_maturity_recovery_rate = max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "_frontier_producer_debt_maturity_recovery_rate", 1.0)),
+            ),
+        )
         cfg.producer_debt_maturity_preserve_reserve = True
         cfg.loan_term_weeks = cfg.producer_debt_maturity_ticks
         cfg.voucher_fee_conversion_enabled = True
@@ -1644,6 +1675,13 @@ def scenario_config(
                         getattr(
                             args,
                             "producer_primary_voucher_borrowing_attempt_share",
+                            None,
+                        )
+                        if getattr(args, "producer_primary_voucher_borrowing_attempt_share", None)
+                        is not None
+                        else getattr(
+                            args,
+                            "_frontier_producer_primary_voucher_borrowing_attempt_share",
                             0.50,
                         )
                         or 0.0
