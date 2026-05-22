@@ -99,6 +99,17 @@ class SimulationEngine:
         self._swap_volume_usd_by_pool: Dict[str, float] = {}
         self._noam_routing_swaps_tick: int = 0
         self._noam_clearing_swaps_tick: int = 0
+        self._noam_routing_volume_usd_tick: float = 0.0
+        self._noam_clearing_volume_usd_tick: float = 0.0
+        self._noam_routing_fee_usd_tick: float = 0.0
+        self._noam_clearing_fee_usd_tick: float = 0.0
+        self._noam_routing_stable_fee_usd_tick: float = 0.0
+        self._noam_routing_voucher_fee_usd_tick: float = 0.0
+        self._noam_clearing_stable_fee_usd_tick: float = 0.0
+        self._noam_clearing_voucher_fee_usd_tick: float = 0.0
+        self._noam_clearing_cycles_attempted_tick: int = 0
+        self._noam_clearing_cycles_executed_tick: int = 0
+        self._noam_clearing_cycle_value_usd_tick: float = 0.0
         self._liquidity_tick: int = -1
         self._liquidity_by_asset: Dict[str, float] = {}
         self._liquidity_initialized: bool = False
@@ -1594,6 +1605,12 @@ class SimulationEngine:
             self._swap_volume_usd_by_pool[pool.pool_id] = (
                 self._swap_volume_usd_by_pool.get(pool.pool_id, 0.0) + swap_usd
             )
+            self._record_noam_fee_diagnostics(
+                pool,
+                receipt,
+                kind="clearing",
+                swap_usd=swap_usd,
+            )
 
         if budget_remaining is not None:
             budget_remaining = max(0.0, budget_remaining - cost)
@@ -1631,6 +1648,9 @@ class SimulationEngine:
                 break
 
         if attempted > 0:
+            self._noam_clearing_cycles_attempted_tick += int(attempted)
+            self._noam_clearing_cycles_executed_tick += int(executed)
+            self._noam_clearing_cycle_value_usd_tick += float(total_value)
             self.log.add(Event(
                 self.tick,
                 "NOAM_CLEARING_RUN",
@@ -2059,6 +2079,37 @@ class SimulationEngine:
         elif asset_out.startswith("VCHR:"):
             self._fee_pool_cumulative_voucher += pool_fee
             self._fee_clc_cumulative_voucher += clc_fee
+
+    def _record_noam_fee_diagnostics(
+        self,
+        pool: "Pool",
+        receipt: SwapReceipt,
+        *,
+        kind: str,
+        swap_usd: float,
+    ) -> None:
+        if receipt.status != "executed":
+            return
+        fee_units = float(receipt.fees.total_fee)
+        asset_out = receipt.asset_out
+        value_out = pool.values.get_value(asset_out)
+        if value_out <= 0.0:
+            value_out = self._default_asset_value(asset_out)
+        fee_usd = max(0.0, fee_units * value_out)
+        if kind == "clearing":
+            self._noam_clearing_volume_usd_tick += max(0.0, float(swap_usd))
+            self._noam_clearing_fee_usd_tick += fee_usd
+            if asset_out == self.cfg.stable_symbol:
+                self._noam_clearing_stable_fee_usd_tick += fee_usd
+            elif asset_out.startswith("VCHR:"):
+                self._noam_clearing_voucher_fee_usd_tick += fee_usd
+        else:
+            self._noam_routing_volume_usd_tick += max(0.0, float(swap_usd))
+            self._noam_routing_fee_usd_tick += fee_usd
+            if asset_out == self.cfg.stable_symbol:
+                self._noam_routing_stable_fee_usd_tick += fee_usd
+            elif asset_out.startswith("VCHR:"):
+                self._noam_routing_voucher_fee_usd_tick += fee_usd
 
     def _record_clc_swap_cumulative(self, receipt: SwapReceipt) -> None:
         if receipt.status != "executed":
@@ -3931,6 +3982,12 @@ class SimulationEngine:
         self._swap_volume_usd_tick += swap_usd
         self._swap_volume_usd_by_pool[lender_pool.pool_id] = (
             self._swap_volume_usd_by_pool.get(lender_pool.pool_id, 0.0) + swap_usd
+        )
+        self._record_noam_fee_diagnostics(
+            lender_pool,
+            receipt,
+            kind="routing",
+            swap_usd=swap_usd,
         )
         self._record_lender_recovered_stable(lender_pool.pool_id, swap_usd, "producer_debt_maturity_repayment")
 
@@ -5892,6 +5949,17 @@ class SimulationEngine:
             self._swap_volume_usd_by_pool = {}
             self._noam_routing_swaps_tick = 0
             self._noam_clearing_swaps_tick = 0
+            self._noam_routing_volume_usd_tick = 0.0
+            self._noam_clearing_volume_usd_tick = 0.0
+            self._noam_routing_fee_usd_tick = 0.0
+            self._noam_clearing_fee_usd_tick = 0.0
+            self._noam_routing_stable_fee_usd_tick = 0.0
+            self._noam_routing_voucher_fee_usd_tick = 0.0
+            self._noam_clearing_stable_fee_usd_tick = 0.0
+            self._noam_clearing_voucher_fee_usd_tick = 0.0
+            self._noam_clearing_cycles_attempted_tick = 0
+            self._noam_clearing_cycles_executed_tick = 0
+            self._noam_clearing_cycle_value_usd_tick = 0.0
             self._claims_paid_usd_tick = 0.0
             self._claims_unpaid_usd_tick = 0.0
             self._incidents_tick = 0
@@ -7425,6 +7493,12 @@ class SimulationEngine:
             self._swap_volume_usd_by_pool[pool.pool_id] = (
                 self._swap_volume_usd_by_pool.get(pool.pool_id, 0.0) + swap_usd
             )
+            self._record_noam_fee_diagnostics(
+                pool,
+                receipt,
+                kind="routing",
+                swap_usd=swap_usd,
+            )
             self._record_route_context_swap(route_context, source_pool, asset_in, swap_usd)
             self._update_affinity(source_pool_id, pool.pool_id, swap_usd)
 
@@ -8294,6 +8368,23 @@ class SimulationEngine:
                 "route_substitution_failed_tick": int(route_substitution_failed),
                 "noam_routing_swaps_tick": int(self._noam_routing_swaps_tick),
                 "noam_clearing_swaps_tick": int(self._noam_clearing_swaps_tick),
+                "noam_routing_volume_usd_tick": float(self._noam_routing_volume_usd_tick),
+                "noam_clearing_volume_usd_tick": float(self._noam_clearing_volume_usd_tick),
+                "noam_routing_fee_usd_tick": float(self._noam_routing_fee_usd_tick),
+                "noam_clearing_fee_usd_tick": float(self._noam_clearing_fee_usd_tick),
+                "noam_routing_stable_fee_usd_tick": float(self._noam_routing_stable_fee_usd_tick),
+                "noam_routing_voucher_fee_usd_tick": float(self._noam_routing_voucher_fee_usd_tick),
+                "noam_clearing_stable_fee_usd_tick": float(self._noam_clearing_stable_fee_usd_tick),
+                "noam_clearing_voucher_fee_usd_tick": float(self._noam_clearing_voucher_fee_usd_tick),
+                "noam_clearing_cycles_attempted_tick": int(self._noam_clearing_cycles_attempted_tick),
+                "noam_clearing_cycles_executed_tick": int(self._noam_clearing_cycles_executed_tick),
+                "noam_clearing_cycle_success_rate_tick": (
+                    float(self._noam_clearing_cycles_executed_tick)
+                    / max(1.0, float(self._noam_clearing_cycles_attempted_tick))
+                ),
+                "noam_clearing_cycle_value_usd_tick": float(
+                    self._noam_clearing_cycle_value_usd_tick
+                ),
                 "ordinary_swap_count_tick": context_count("ordinary"),
                 "ordinary_swap_count_total": context_count("ordinary", total=True),
                 "ordinary_swap_volume_usd_tick": context_volume("ordinary"),

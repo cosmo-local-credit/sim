@@ -2341,6 +2341,19 @@ def run_one(
             "swap_count_usd_to_vchr_tick",
             "swap_count_vchr_to_usd_tick",
             "swap_count_vchr_to_vchr_tick",
+            "noam_routing_swaps_tick",
+            "noam_clearing_swaps_tick",
+            "noam_routing_volume_usd_tick",
+            "noam_clearing_volume_usd_tick",
+            "noam_routing_fee_usd_tick",
+            "noam_clearing_fee_usd_tick",
+            "noam_routing_stable_fee_usd_tick",
+            "noam_routing_voucher_fee_usd_tick",
+            "noam_clearing_stable_fee_usd_tick",
+            "noam_clearing_voucher_fee_usd_tick",
+            "noam_clearing_cycles_attempted_tick",
+            "noam_clearing_cycles_executed_tick",
+            "noam_clearing_cycle_value_usd_tick",
             "ordinary_swap_count_tick",
             "ordinary_swap_volume_usd_tick",
             "ordinary_stable_source_swap_count_tick",
@@ -2811,6 +2824,73 @@ def run_one(
             "route_substitution_failed_total": cumulative["route_substitution_failed"],
             "noam_routing_swaps_tick": latest.get("noam_routing_swaps_tick", 0),
             "noam_clearing_swaps_tick": latest.get("noam_clearing_swaps_tick", 0),
+            "noam_routing_swaps_total": cumulative_float["noam_routing_swaps_tick"],
+            "noam_clearing_swaps_total": cumulative_float["noam_clearing_swaps_tick"],
+            "noam_total_swaps_total": (
+                cumulative_float["noam_routing_swaps_tick"]
+                + cumulative_float["noam_clearing_swaps_tick"]
+            ),
+            "noam_routing_volume_usd_tick": latest.get("noam_routing_volume_usd_tick", 0.0),
+            "noam_clearing_volume_usd_tick": latest.get("noam_clearing_volume_usd_tick", 0.0),
+            "noam_routing_volume_usd_total": cumulative_float["noam_routing_volume_usd_tick"],
+            "noam_clearing_volume_usd_total": cumulative_float["noam_clearing_volume_usd_tick"],
+            "noam_total_volume_usd_total": (
+                cumulative_float["noam_routing_volume_usd_tick"]
+                + cumulative_float["noam_clearing_volume_usd_tick"]
+            ),
+            "noam_clearing_volume_share_total": (
+                cumulative_float["noam_clearing_volume_usd_tick"]
+                / max(
+                    1e-9,
+                    cumulative_float["noam_routing_volume_usd_tick"]
+                    + cumulative_float["noam_clearing_volume_usd_tick"],
+                )
+            ),
+            "noam_routing_fee_usd_tick": latest.get("noam_routing_fee_usd_tick", 0.0),
+            "noam_clearing_fee_usd_tick": latest.get("noam_clearing_fee_usd_tick", 0.0),
+            "noam_routing_fee_usd_total": cumulative_float["noam_routing_fee_usd_tick"],
+            "noam_clearing_fee_usd_total": cumulative_float["noam_clearing_fee_usd_tick"],
+            "noam_total_fee_usd_total": (
+                cumulative_float["noam_routing_fee_usd_tick"]
+                + cumulative_float["noam_clearing_fee_usd_tick"]
+            ),
+            "noam_routing_stable_fee_usd_total": cumulative_float[
+                "noam_routing_stable_fee_usd_tick"
+            ],
+            "noam_routing_voucher_fee_usd_total": cumulative_float[
+                "noam_routing_voucher_fee_usd_tick"
+            ],
+            "noam_clearing_stable_fee_usd_total": cumulative_float[
+                "noam_clearing_stable_fee_usd_tick"
+            ],
+            "noam_clearing_voucher_fee_usd_total": cumulative_float[
+                "noam_clearing_voucher_fee_usd_tick"
+            ],
+            "noam_clearing_cycles_attempted_tick": latest.get(
+                "noam_clearing_cycles_attempted_tick", 0
+            ),
+            "noam_clearing_cycles_executed_tick": latest.get(
+                "noam_clearing_cycles_executed_tick", 0
+            ),
+            "noam_clearing_cycles_attempted_total": cumulative_float[
+                "noam_clearing_cycles_attempted_tick"
+            ],
+            "noam_clearing_cycles_executed_total": cumulative_float[
+                "noam_clearing_cycles_executed_tick"
+            ],
+            "noam_clearing_cycle_success_rate_tick": latest.get(
+                "noam_clearing_cycle_success_rate_tick", 0.0
+            ),
+            "noam_clearing_cycle_success_rate_cumulative": (
+                cumulative_float["noam_clearing_cycles_executed_tick"]
+                / max(1e-9, cumulative_float["noam_clearing_cycles_attempted_tick"])
+            ),
+            "noam_clearing_cycle_value_usd_tick": latest.get(
+                "noam_clearing_cycle_value_usd_tick", 0.0
+            ),
+            "noam_clearing_cycle_value_usd_total": cumulative_float[
+                "noam_clearing_cycle_value_usd_tick"
+            ],
             "repayment_volume_usd": latest.get("repayment_volume_usd", 0.0),
             "repayment_volume_usd_total": cumulative_float["repayment_volume_usd"],
             "loan_issuance_volume_usd": latest.get("loan_issuance_volume_usd", 0.0),
@@ -5221,6 +5301,24 @@ def summarize_frontier_cell(
     substitution_route_values = [
         safe_float(row.get("route_substitution_success_rate_cumulative")) for row in rows
     ]
+    noam_routing_swaps_values = [safe_float(row.get("noam_routing_swaps_total")) for row in rows]
+    noam_clearing_swaps_values = [safe_float(row.get("noam_clearing_swaps_total")) for row in rows]
+    noam_routing_volume_values = [
+        safe_float(row.get("noam_routing_volume_usd_total")) for row in rows
+    ]
+    noam_clearing_volume_values = [
+        safe_float(row.get("noam_clearing_volume_usd_total")) for row in rows
+    ]
+    noam_routing_fee_values = [safe_float(row.get("noam_routing_fee_usd_total")) for row in rows]
+    noam_clearing_fee_values = [
+        safe_float(row.get("noam_clearing_fee_usd_total")) for row in rows
+    ]
+    noam_clearing_cycle_success_values = [
+        safe_float(row.get("noam_clearing_cycle_success_rate_cumulative")) for row in rows
+    ]
+    noam_clearing_cycle_value_values = [
+        safe_float(row.get("noam_clearing_cycle_value_usd_total")) for row in rows
+    ]
     stress_values = [safe_float(row.get("household_cash_stress_ratio")) for row in rows]
     consumer_stress_values = [
         safe_float(row.get("consumer_stable_reserve_stress_ratio", row.get("household_cash_stress_ratio")))
@@ -5883,6 +5981,30 @@ def summarize_frontier_cell(
         "route_fixed_success_p50": percentile(fixed_route_values, 0.50),
         "route_substitution_success_p05": percentile(substitution_route_values, 0.05),
         "route_substitution_success_p50": percentile(substitution_route_values, 0.50),
+        "noam_routing_swaps_total_p50": percentile(noam_routing_swaps_values, 0.50),
+        "noam_clearing_swaps_total_p50": percentile(noam_clearing_swaps_values, 0.50),
+        "noam_routing_volume_usd_total_p50": percentile(noam_routing_volume_values, 0.50),
+        "noam_clearing_volume_usd_total_p50": percentile(noam_clearing_volume_values, 0.50),
+        "noam_clearing_volume_share_p50": (
+            percentile(noam_clearing_volume_values, 0.50)
+            / max(
+                1e-9,
+                percentile(noam_routing_volume_values, 0.50)
+                + percentile(noam_clearing_volume_values, 0.50),
+            )
+        ),
+        "noam_routing_fee_usd_total_p50": percentile(noam_routing_fee_values, 0.50),
+        "noam_clearing_fee_usd_total_p50": percentile(noam_clearing_fee_values, 0.50),
+        "noam_total_fee_usd_total_p50": (
+            percentile(noam_routing_fee_values, 0.50)
+            + percentile(noam_clearing_fee_values, 0.50)
+        ),
+        "noam_clearing_cycle_success_rate_p50": percentile(
+            noam_clearing_cycle_success_values, 0.50
+        ),
+        "noam_clearing_cycle_value_usd_total_p50": percentile(
+            noam_clearing_cycle_value_values, 0.50
+        ),
         "household_cash_stress_p95": stress_p95,
         "household_cash_stress_delta_p95": stress_delta_p95,
         "consumer_cash_stress_p50": consumer_stress_p50,
