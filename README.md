@@ -2,7 +2,9 @@
 
 This repo simulates a network of agent-owned liquidity pools exchanging a stablecoin and agent-issued vouchers.
 It includes multi-hop routing, loan issuance/repayment via voucher swaps, stable supply growth, NOAM routing,
-NOAM clearing, and a CLC economics layer (fees + waterfall). A Streamlit UI (`app.py`) lets you run ticks,
+NOAM clearing, and a CLC economics layer (fees + waterfall). NOAM means Network-Overlay Adaptive
+Multiobjective Routing/Clearing: a network-aware scoring layer over bounded overlay/beam route search
+and optional cycle clearing. A Streamlit UI (`app.py`) lets you run ticks,
 inspect metrics, and sweep parameters.
 
 Defaults are calibrated for a **town‑scale network (~100 shops)**: 100 producers, 20 consumers, 4 lenders, and 1 LP.
@@ -145,6 +147,28 @@ third-party stable purchases of visible lender-held producer vouchers. This is
 the current frontier configuration; disable those flags only for explicit
 control or ablation runs.
 
+The current frontier is a voucher-capable ROSCA-like credit-pool test. It does
+not replay the literal Sarafu ledger, and it is not the future voucher-free
+ROSCA-to-ROLA regeneration counterfactual. It starts from a Sarafu-calibrated
+credit-pool substrate with stable-credit logic, borrowing rights, credit
+limits, repayment obligations, producer voucher identities, lender acceptance
+rules, and routing. Under those rules, the matched no-bond baseline already
+produces ROLA-like voucher exchange; the frontier asks whether bond-backed
+lending preserves or amplifies voucher-to-voucher value while repayment and
+non-extraction guardrails hold. Field-history claims about the prior weakening
+of ROLA-like practice come from practitioner/training context and literature;
+the transaction data supplies the separate revival evidence. The historical
+batch name `frontier-rola-regeneration-probe` should not be confused with the
+future no-voucher ROSCA-to-ROLA regeneration counterfactual, which is not yet
+implemented.
+
+Conceptually, the simulator keeps two obligation layers separate. The formal
+bond is a tradable debt instrument owed by the issuer to bondholders. A
+producer voucher in a lender pool is a transferable redeemable commitment owed
+through local fulfillment, redemption, return, or repair. Frontier tests ask
+whether the formal debt layer can add catalytic liquidity while preserving or
+regenerating the local voucher-obligation layer.
+
 The current frontier defaults are calibration driven where possible:
 producer debt maturity recovery uses the mature borrow-proxy value support rate
 (`0.673` in the current bundle); primary producer voucher-borrowing attempts
@@ -163,6 +187,13 @@ extra uncalibrated producer voucher-source boost. Producer-voucher overlap uses
 the empirical aggregate pool-overlap distribution. The focused `frontier-pilot`
 target now tests `current` and `connected_2x` networks, principal ratios
 `0.05-0.25`, coupon targets `0-10%`, and fee-service share `1.0`.
+The reviewed focused pilot should be described as a guardrail frontier rather
+than as a blanket safety claim: scheduled bondholder payment clears in all 60
+positive cells, voucher-to-voucher volume is preserved in 59/60 cells and
+increases in 41/60 cells, ordinary voucher-source swap count is at or above the
+matched baseline in all 60 cells, and the strongest paper-facing subset is the
+38/60 cells where voucher-to-voucher volume increases while issuer
+operating/risk headroom remains at least `1.25x`.
 
 The Streamlit app includes a **RegenBond MC** tab that runs this same script as
 a subprocess and displays the exact CLI-equivalent command. For identical
@@ -343,7 +374,9 @@ terminal and Streamlit outputs match when the displayed command is identical.
   explicit one-third monthly installment schedule in the current implementation.
 
 ### NOAM Routing (default)
-NOAM is the default router (`routing_mode=noam`). It is a **network-aware overlay + beam search**:
+NOAM is the default router (`routing_mode=noam`). It is **Network-Overlay Adaptive
+Multiobjective Routing/Clearing**: a network-aware overlay + beam-style route search with
+live pool validation:
 1) **Working set** (Top-K/Top-M)
    - `noam_topk_pools_per_asset` pools per asset
    - `noam_topm_out_per_pool` outputs per pool/asset
@@ -351,7 +384,7 @@ NOAM is the default router (`routing_mode=noam`). It is a **network-aware overla
 2) **Overlay routing** (optional)
    - Uses hub assets and precomputed overlay paths to reduce search.
    - Only used when `noam_overlay_enabled=True` **and** pool count ≥ `noam_overlay_min_pools`.
-3) **Beam search** with scoring:
+3) **Bounded beam-style search** with multiobjective scoring:
    - Success probability (`noam_weight_success`)
    - Fees (`noam_weight_fee`)
    - Scarcity (`noam_weight_lambda`, `noam_scarcity_eta`)
@@ -369,6 +402,9 @@ If NOAM is disabled, the legacy BFS router can be used (`routing_mode=bfs`).
 
 ## NOAM Clearing (batch cycles)
 NOAM Clearing runs periodically to clear feasible cycles and rebalance the network.
+It is conceptually related to network obligation-clearing or netting, but in
+the simulator it executes only feasible pool-exchange cycles that pass live
+quotes, inventory, limits, budget, and scoring constraints.
 
 - **Stride**: every `noam_clearing_stride_ticks` ticks.
 - **Working set**: same Top-K/Top-M graph as routing.

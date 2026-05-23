@@ -53,6 +53,14 @@ low-principal cells from `0` to `0.05` principal ratio with scheduled bond
 service paid and voucher-to-voucher circulation preserved. The normal
 `frontier-pilot` target is now wired to use the same mechanism.
 
+Terminology note: `frontier-rola-regeneration-probe` is a historical batch
+name. In the current documentation it means a voucher-capable ROSCA-like
+credit-pool mechanism probe. It starts from a Sarafu-calibrated substrate with
+stable-credit logic, borrowing rights, credit limits, repayment obligations,
+producer voucher identities, lender acceptance rules, and routing. The
+separate no-voucher ROSCA-to-ROLA regeneration counterfactual is future work
+and is not run by this target.
+
 Current frontier defaults are calibration-backed where possible:
 
 - producer debt maturity recovery uses the mature borrow-proxy value support
@@ -727,8 +735,10 @@ inflow/deposits.
 ### `frontier-rola-regeneration-probe`
 
 Current full-horizon low-principal probe for the ROLA/voucher-purchase
-mechanism. This is the preferred current-scale gate before the three-scale
-pilot.
+mechanism. This is the preferred current-scale gate before the focused pilot.
+Despite the target name, it is not the no-voucher ROSCA-to-ROLA regeneration
+counterfactual; it is a voucher-capable ROSCA-like credit-pool mechanism
+check.
 
 ```bash
 ./scripts/run_regenbond_remote_batch.sh frontier-rola-regeneration-probe
@@ -763,6 +773,13 @@ Full-horizon 20-run focused frontier pilot across `current` and
 `0,0.02,0.04,0.06,0.08,0.10`, and fee-service share `1.0`. `connected_5x` is no
 longer part of the main pilot because it is too slow for routine iteration;
 use it only as an explicit scaling stress test.
+
+The reviewed focused pilot is a guardrail frontier, not a blanket safety or
+pricing recommendation. Its strongest paper-facing cells are those where
+scheduled repayment clears, voucher-to-voucher volume increases versus the
+matched no-bond baseline, and issuer operating/risk headroom remains at least
+`1.25x`. In the current reviewed artifact this stricter subset contains
+`38 / 60` positive-principal cells.
 
 ```bash
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
@@ -1164,8 +1181,9 @@ The route-success floor in the frontier is a settlement-reliability sensitivity
 parameter, not a directly observed Sarafu failed-route scalar. In the revised
 default `ROUTE_SUCCESS_MODE=diagnostic`, route reliability is reported but is
 not a primary binding guardrail. Frontier safety rows still report and guard
-against voucher-to-voucher count/volume decline versus the matched no-bond
-baseline. Voucher-to-voucher share is reported as a diagnostic composition
-metric, but it is not a primary binding guardrail.
+against voucher-circulation deterioration versus the matched no-bond baseline,
+with paper interpretation focused on voucher-to-voucher value and ordinary
+voucher-source activity. Voucher-to-voucher count and share are reported as
+diagnostic composition metrics, but they are not growth headlines.
 Stable-dependency anchors come from
 `analysis/sarafu_calibration/stable_dependency_anchors.csv`.

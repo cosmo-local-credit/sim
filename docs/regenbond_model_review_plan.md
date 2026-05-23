@@ -25,6 +25,12 @@ latest validation and frontier artifacts.
   current-scale low-principal cells from `0` to `0.05` principal ratio. The
   current `frontier-pilot` target has been wired to enable the same primary
   producer voucher borrowing and bounded lender-held-voucher purchase demand.
+- The probe name is historical. The current run is a voucher-capable
+  ROSCA-like credit-pool mechanism check: it starts from a Sarafu-calibrated
+  substrate with stable-credit logic, borrowing rights, credit limits,
+  repayment obligations, producer voucher identities, lender acceptance rules,
+  and routing. It is not the future no-voucher ROSCA-to-ROLA regeneration
+  counterfactual.
 - The 10-run `frontier-maturity-smoke` now passes the pre-pilot full-term
   check: scheduled bondholder payment clears, unpaid scheduled claims are
   zero, voucher circulation is preserved, and the `1.25x` available
@@ -32,8 +38,16 @@ latest validation and frontier artifacts.
   headroom.
 - The current `frontier-pilot` target is the focused grid:
   `current,connected_2x` network scales; principal ratios
-  `0.02,0.04,0.06,0.08,0.10,0.12,0.15`; coupon targets
-  `0,0.03,0.06,0.09,0.12`; fee-service share `1.0`.
+  `0.05,0.10,0.15,0.20,0.25`; coupon targets
+  `0,0.02,0.04,0.06,0.08,0.10`; fee-service share `1.0`;
+  frontier mode `grid`; refinement rounds `0`.
+- The reviewed focused pilot has `59 / 60` guardrail-passing positive cells.
+  Scheduled payment clears in all cells, voucher-to-voucher volume is
+  preserved in `59 / 60`, and voucher-to-voucher volume increases in `41 / 60`.
+  Ordinary voucher-source swap count is at or above the matched no-bond
+  baseline in all `60 / 60` cells. The strongest paper-facing subset is the
+  `38 / 60` cells that also maintain issuer operating/risk headroom of at
+  least `1.25x`.
 - Earlier pilot results that rejected all cells under `p50_service_coverage`
   and reserve-constrained fee-service mechanics are superseded historical
   evidence for model debugging, not current frontier evidence.
@@ -162,13 +176,18 @@ productive credit, voucher redemption, fee conversion, and route substitution.
 
 Answer these questions again after the next model revision:
 
-- Which cells are safe, and which are unsafe?
+- Which cells pass current guardrails, and which fail?
 - Which binding constraints appear most often?
-- Does safe principal fall as coupon rises?
-- Does safe principal change monotonically with principal ratio?
+- Does guardrail-passing principal fall as coupon rises?
+- Does guardrail-passing principal change monotonically with principal ratio?
 - Does `connected_5x` improve route success without excessive concentration?
-- Do safe cells preserve voucher-to-voucher count, volume, and share relative to matched no-bond baselines?
-- Do safe cells avoid rising stable dependency, measured by active-pool stable value share and stable-to-voucher value ratio?
+- Do guardrail-passing cells preserve voucher-to-voucher volume and ordinary
+  voucher-source activity relative to matched no-bond baselines, while
+  reporting voucher-to-voucher count and share as diagnostic composition
+  metrics?
+- Do guardrail-passing cells avoid rising stable dependency, measured by active-pool stable value share and stable-to-voucher value ratio?
+- Which cells both increase voucher-to-voucher volume and maintain at least
+  `1.25x` issuer operating/risk headroom?
 - Do higher service shares improve scheduled-payment coverage or cash headroom
   while degrading local settlement diagnostics?
 - Are unpaid scheduled claims attributed to issuer cashflow, recovered-stable
@@ -246,11 +265,14 @@ NOAM routing models marketplace-assisted route discovery over published pools, a
 
 Review tasks:
 
-- Reduce NOAM caps, route cache, or beam width and check whether the safe frontier shrinks.
+- Reduce NOAM caps, route cache, or beam width and check whether the guardrail frontier shrinks.
 - Treat route-success floors as stress parameters, not directly observed Sarafu facts.
 - Compare route success with voucher-to-voucher preservation, stable-credit closure, and concentration diagnostics.
 - Add route-substitution behavior: if the desired target cannot be routed because of liquidity or limits, agents should be able to choose an alternative acceptable purchase or redemption route where calibration supports it.
-- Reconsider the fixed `0.85` p05 route-success safety floor. It may be removed from the primary safe frontier or replaced with degradation-versus-baseline diagnostics after substitution behavior is implemented.
+- Reconsider the fixed `0.85` p05 route-success floor. It may be removed from
+  the primary guardrail frontier or replaced with
+  degradation-versus-baseline diagnostics after substitution behavior is
+  implemented.
 
 ### Affinity And Stickiness
 
@@ -331,7 +353,9 @@ Do not promote frontier results into headline paper claims until:
 - The validation gate remains passing for the relevant code version.
 - Frontier outputs are reconstructed from complete shards.
 - No failed or stale shard manifests are included.
-- Safe cells pass issuer service, unpaid claim, route success, leakage, concentration, cash stress, stable dependency, and matched no-bond degradation guardrails.
+- Guardrail-passing cells pass issuer service, unpaid claim, route success,
+  leakage, concentration, cash stress, stable dependency, and matched no-bond
+  degradation guardrails.
 - Binding constraints are summarized by scale, coupon, principal ratio, service
   share, scheduled-payment coverage, and cash headroom.
 - Surprising results are checked against code and calibration assumptions.
