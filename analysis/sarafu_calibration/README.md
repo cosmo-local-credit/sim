@@ -37,24 +37,21 @@ bucketed degree distribution, and shared-voucher pool-pool edge counts. It does
 not include raw token or pool addresses and should be read as route potential,
 not participant intent.
 The current ROLA/frontier-pilot purchase-demand setting uses a network-level
-weekly stable budget, not a per-consumer allowance. In the research workspace,
-the aggregate stable-to-voucher purchase value is also exported as a weekly
-distribution and figure so the flat budget can be replaced by a dynamic
-purchase-timing model once buyer-income moments are added. The current flat
-purchase budget is a conservative 260-week spreading of the aggregate purchase
-value, not a dynamic buyer-income process.
-Current frontier jobs also consume three calibration-derived controls from
-this bundle:
-
-- mature producer debt recovery uses the mature borrow-proxy value support
-  rate, currently `0.673`;
-- primary producer voucher-borrowing attempts use the recent voucher-source
-  motif share, currently `0.863292`, rather than a fixed `50%` scenario
-  assumption;
-- producer voucher overlap uses the exported aggregate pool-degree
-  distribution, with a current multi-pool voucher share of approximately
-  `0.147554`.
-
+weekly stable budget, not a per-consumer allowance. It is set to the direct
+pool-era empirical mean stable-to-voucher purchase cash value per week. In the
+research workspace, the aggregate stable-to-voucher purchase value is also
+exported as a weekly distribution and figure so the flat budget can later be
+replaced by a dynamic purchase-timing model once buyer-income moments are
+added.
+The productive-credit voucher activity boost calibration uses privacy-safe
+post-borrow event windows around voucher-to-stable borrow-proxy events. It
+reports same-voucher source activity and target-side voucher demand before and
+after borrowing, and converts only the source-side motif into the simulator's
+voucher-source boost coefficients. In the current artifact, same-voucher
+source activity does not rise after borrow-proxy events, so the calibrated
+source-weight boost is 0.0 and the source-size multiplier is 1.0. Target-side
+voucher demand rises, which supports the purchase-demand channel rather than an
+extra uncalibrated producer source boost.
 The public bundle also exports a standalone stable/cash deposit weekly series.
 That series counts ordinary successful pool-era stable/cash deposit logs and
 excludes swap-associated deposit logs, while reporting the inclusive

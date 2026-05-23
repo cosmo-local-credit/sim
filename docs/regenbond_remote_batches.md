@@ -61,8 +61,20 @@ Current frontier defaults are calibration-backed where possible:
   motif share, currently `0.863292`, unless explicitly overridden;
 - producer-voucher overlap uses the empirical aggregate pool-degree
   distribution;
-- the visible lender-held voucher purchase budget is a network-level
-  `$77.164163` per weekly tick, not a per-consumer allowance;
+- the visible lender-held voucher purchase budget is a current-network
+  `$184.061305` per weekly tick, not a per-consumer allowance; this is the
+  direct pool-era stable-to-voucher purchase cash mean and frontier runs scale
+  it by network size;
+- productive-credit voucher-source boost coefficients are loaded from the
+  post-borrow event-window calibration artifact. In the current artifact the
+  same-voucher source boost is `0.0` and the source-size multiplier is `1.0`,
+  because same-voucher voucher-to-voucher source activity does not increase in
+  the 91-day post-borrow window. Target-side voucher demand does increase, so
+  the calibrated purchase-demand budget carries that empirical signal instead
+  of adding an unsupported source boost;
+- frontier runs treat producer/consumer stable balances as transactional
+  money, not savings reserves, so ordinary stable-spend reserve protection is
+  off by default;
 - the main pilot uses fee-service share `1.0`, so eligible fee cash reserves
   into the lockbox before excess goes to the waterfall.
 
@@ -239,7 +251,7 @@ ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND=1
 LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK=5
 LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE=0.75
 LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE=0.05
-LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK=77.164163
+LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK=184.061305
 ```
 
 These remain ordinary environment overrides. Set them explicitly only for
@@ -490,6 +502,7 @@ Frontier-specific parameters:
 | `ROUTE_SUCCESS_MODE` | `diagnostic`, `relative`, or `absolute`. | `diagnostic` |
 | `ROUTE_SUCCESS_FLOOR` | p05 route-success safety floor, binding only when `ROUTE_SUCCESS_MODE=absolute`. | `0.85` |
 | `BOND_TERM` | Frontier term in ticks. Do not use `TERM`. | `260` |
+| `ENABLE_ORDINARY_STABLE_SPEND_PROTECTION` | Optional control run: restore producer/consumer stable reserve and voucher-buffer preservation for ordinary stable-source spending. | `0` |
 
 Do not use `TERM` for bond terms; shells and `tmux` use `TERM` for terminal
 type values such as `tmux-256color`.

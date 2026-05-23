@@ -166,6 +166,7 @@ class Calibration:
     stable_dependency_anchors: dict[str, dict[str, float]]
     producer_deposit_by_tier: dict[str, dict[str, float]]
     productive_credit_by_tier: dict[str, dict[str, float]]
+    productive_credit_activity_boost_calibration: dict[str, float]
     debt_removal_calibration: dict[str, float]
     fee_conversion_calibration: dict[str, float]
     quarterly_clearing_calibration: dict[str, float]
@@ -313,7 +314,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--disable-ordinary-stable-spend-protection",
         action="store_true",
-        help="Frontier ablation: allow ordinary producer/consumer stable-source swaps to spend below reserve buffers.",
+        help="Legacy no-op unless stable-spend protection is explicitly enabled.",
+    )
+    parser.add_argument(
+        "--enable-ordinary-stable-spend-protection",
+        action="store_true",
+        help=(
+            "Frontier control: preserve producer/consumer stable reserves and "
+            "a voucher-value buffer for ordinary stable-source spending."
+        ),
     )
     parser.add_argument(
         "--disable-producer-loan-failure-backfill",
@@ -624,6 +633,7 @@ SHARD_CONFIG_KEYS = (
     "productive_credit_voucher_deposit_cap_rate_per_month",
     "disable_productive_credit_voucher_activity_boost",
     "disable_ordinary_stable_spend_protection",
+    "enable_ordinary_stable_spend_protection",
     "disable_producer_loan_failure_backfill",
     "enable_producer_voucher_loan_fallback",
     "enable_producer_voucher_loan_activity_boost",
@@ -1063,6 +1073,9 @@ def load_calibration(calibration_dir: Path) -> Calibration:
         return values
 
     debt_removal_calibration = load_metric_table("debt_removal_calibration.csv")
+    productive_credit_activity_boost_calibration = load_metric_table(
+        "productive_credit_activity_boost_calibration.csv"
+    )
     fee_conversion_calibration = load_metric_table("fee_conversion_calibration.csv")
     quarterly_clearing_calibration = load_metric_table("quarterly_clearing_calibration.csv")
     settlement_reliability_anchors = load_metric_table("settlement_reliability_anchors.csv")
@@ -1085,6 +1098,7 @@ def load_calibration(calibration_dir: Path) -> Calibration:
         stable_dependency_anchors=stable_dependency_anchors,
         producer_deposit_by_tier=producer_deposit_by_tier,
         productive_credit_by_tier=productive_credit_by_tier,
+        productive_credit_activity_boost_calibration=productive_credit_activity_boost_calibration,
         debt_removal_calibration=debt_removal_calibration,
         fee_conversion_calibration=fee_conversion_calibration,
         quarterly_clearing_calibration=quarterly_clearing_calibration,
@@ -1335,6 +1349,23 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
         f"_{prefix}_producer_primary_voucher_borrowing_attempt_share",
         max(0.0, min(1.0, primary_voucher_borrowing_attempt_share)),
     )
+    activity_boost = calibration.productive_credit_activity_boost_calibration
+    setattr(
+        args,
+        f"_{prefix}_productive_credit_voucher_source_weight_boost",
+        max(
+            0.0,
+            safe_float(activity_boost.get("calibrated_voucher_source_weight_boost"), 0.0),
+        ),
+    )
+    setattr(
+        args,
+        f"_{prefix}_productive_credit_voucher_source_size_multiplier",
+        max(
+            0.0,
+            safe_float(activity_boost.get("calibrated_voucher_source_size_multiplier"), 1.0),
+        ),
+    )
     setattr(
         args,
         f"_{prefix}_quarterly_clearing_surplus_share",
@@ -1534,6 +1565,7 @@ def scenario_config(
             + cfg.initial_consumers
             + cfg.initial_liquidity_providers
         )
+        cfg.min_stable_reserve_mean = 0.0
         cfg.producer_inflow_per_tick = 0.0
         cfg.consumer_inflow_per_tick = 0.0
         cfg.lender_inflow_per_tick = 0.0
@@ -1590,8 +1622,20 @@ def scenario_config(
         cfg.productive_credit_voucher_activity_boost_window_ticks = max(
             1, int(getattr(args, "issuer_payment_stride", 13))
         )
-        cfg.productive_credit_voucher_source_weight_boost = 0.50
-        cfg.productive_credit_voucher_source_size_multiplier = 1.25
+        cfg.productive_credit_voucher_source_weight_boost = max(
+            0.0,
+            float(getattr(args, "_frontier_productive_credit_voucher_source_weight_boost", 0.0)),
+        )
+        cfg.productive_credit_voucher_source_size_multiplier = max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "_frontier_productive_credit_voucher_source_size_multiplier",
+                    1.0,
+                )
+            ),
+        )
         cfg.producer_debt_maturity_enabled = True
         cfg.producer_debt_maturity_ticks = max(1, int(getattr(args, "issuer_payment_stride", 13)))
         cfg.producer_debt_maturity_recovery_rate = max(
@@ -1649,10 +1693,12 @@ def scenario_config(
             cfg.productive_credit_return_rate,
             1.0 + stable_contract_margin,
         )
-        cfg.ordinary_stable_spend_protection_enabled = not bool(
-            getattr(args, "disable_ordinary_stable_spend_protection", False)
+        cfg.ordinary_stable_spend_protection_enabled = bool(
+            getattr(args, "enable_ordinary_stable_spend_protection", False)
+        ) and not bool(getattr(args, "disable_ordinary_stable_spend_protection", False))
+        cfg.ordinary_stable_spend_buffer_voucher_share = (
+            0.05 if cfg.ordinary_stable_spend_protection_enabled else 0.0
         )
-        cfg.ordinary_stable_spend_buffer_voucher_share = 0.05
         cfg.producer_loan_failure_backfill_enabled = not bool(
             getattr(args, "disable_producer_loan_failure_backfill", False)
         )
@@ -1716,7 +1762,7 @@ def scenario_config(
             0.0,
             float(getattr(args, "lender_voucher_purchase_inventory_share", 0.05) or 0.0),
         )
-        cfg.lender_voucher_purchase_stable_budget_usd_per_tick = max(
+        cfg.lender_voucher_purchase_stable_budget_usd_per_tick = factor * max(
             0.0,
             float(
                 getattr(args, "lender_voucher_purchase_stable_budget_usd_per_tick", 0.0)
@@ -2627,6 +2673,20 @@ def run_one(
                     args,
                     f"_{control_prefix}_productive_credit_voucher_deposit_cap_rate_per_month",
                     0.0,
+                )
+            ),
+            "configured_productive_credit_voucher_source_weight_boost": safe_float(
+                getattr(
+                    args,
+                    f"_{control_prefix}_productive_credit_voucher_source_weight_boost",
+                    0.0,
+                )
+            ),
+            "configured_productive_credit_voucher_source_size_multiplier": safe_float(
+                getattr(
+                    args,
+                    f"_{control_prefix}_productive_credit_voucher_source_size_multiplier",
+                    1.0,
                 )
             ),
             "configured_producer_debt_contract_service_margin_rate": safe_float(

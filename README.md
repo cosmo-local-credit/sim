@@ -151,11 +151,18 @@ producer debt maturity recovery uses the mature borrow-proxy value support rate
 use the recent voucher-source settlement motif share (`0.863292`, computed as
 voucher-to-voucher events divided by voucher-to-voucher plus voucher-to-stable
 events); visible lender-held voucher purchase demand uses a network-level
-stable purchase budget of `$77.164163` per weekly tick; and producer-voucher
-overlap uses the empirical aggregate pool-overlap distribution. The focused
-`frontier-pilot` target now tests `current` and `connected_2x` networks,
-principal ratios `0.02-0.15`, coupon targets `0-12%`, and fee-service share
-`1.0`.
+stable purchase budget of `$184.061305` per weekly tick, the direct pool-era
+stable-to-voucher purchase cash mean; productive-credit voucher-source boost
+coefficients are loaded from post-borrow event-window calibration. The current
+activity-boost artifact estimates a neutral same-voucher source boost
+(`0.0`) and neutral source-size multiplier (`1.0`): same-voucher
+voucher-to-voucher source use falls in the 91-day post-borrow window, while
+target-side voucher demand rises. That means the empirically supported near-term
+frontier channel is stronger visible-voucher stable purchase demand, not an
+extra uncalibrated producer voucher-source boost. Producer-voucher overlap uses
+the empirical aggregate pool-overlap distribution. The focused `frontier-pilot`
+target now tests `current` and `connected_2x` networks, principal ratios
+`0.05-0.25`, coupon targets `0-10%`, and fee-service share `1.0`.
 
 The Streamlit app includes a **RegenBond MC** tab that runs this same script as
 a subprocess and displays the exact CLI-equivalent command. For identical

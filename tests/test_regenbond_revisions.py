@@ -675,10 +675,11 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.productive_credit_voucher_deposit_share, 0.384157)
         self.assertAlmostEqual(cfg.productive_credit_voucher_deposit_cap_rate_per_month, 0.143206)
         self.assertTrue(cfg.productive_credit_voucher_activity_boost_enabled)
-        self.assertAlmostEqual(cfg.productive_credit_voucher_source_weight_boost, 0.50)
-        self.assertAlmostEqual(cfg.productive_credit_voucher_source_size_multiplier, 1.25)
-        self.assertTrue(cfg.ordinary_stable_spend_protection_enabled)
-        self.assertAlmostEqual(cfg.ordinary_stable_spend_buffer_voucher_share, 0.05)
+        self.assertAlmostEqual(cfg.productive_credit_voucher_source_weight_boost, 0.0)
+        self.assertAlmostEqual(cfg.productive_credit_voucher_source_size_multiplier, 1.0)
+        self.assertAlmostEqual(cfg.min_stable_reserve_mean, 0.0)
+        self.assertFalse(cfg.ordinary_stable_spend_protection_enabled)
+        self.assertAlmostEqual(cfg.ordinary_stable_spend_buffer_voucher_share, 0.0)
         self.assertTrue(cfg.producer_loan_failure_backfill_enabled)
         self.assertEqual(cfg.producer_loan_failure_backfill_max_attempts, 1)
         self.assertFalse(cfg.producer_voucher_loan_fallback_enabled)
@@ -705,11 +706,21 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(len(liquidity_providers), 0)
         self.assertAlmostEqual(sum(pool.vault.get(stable_id) for pool in lenders), 1000.0)
 
+        args._current_scale_factor = 2.0
+        args.lender_voucher_purchase_stable_budget_usd_per_tick = 184.061305
+        args.enable_lender_voucher_purchase_demand = True
+        cfg_scaled = scenario_config("bond_issuer_frontier", 0.06, 260, args)
+        self.assertAlmostEqual(
+            cfg_scaled.lender_voucher_purchase_stable_budget_usd_per_tick,
+            368.12261,
+        )
+
     def test_frontier_probe_flags_are_preserved_in_shard_payloads(self):
         for key in (
             "enable_producer_voucher_loan_fallback",
             "enable_producer_voucher_loan_activity_boost",
             "enable_producer_primary_voucher_borrowing",
+            "enable_ordinary_stable_spend_protection",
             "producer_primary_voucher_borrowing_attempt_share",
             "producer_voucher_loan_max_target_candidates",
             "producer_voucher_overlap_mode",
