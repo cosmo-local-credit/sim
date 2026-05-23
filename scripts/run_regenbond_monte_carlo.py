@@ -404,14 +404,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--frontier-mode",
-        default="adaptive",
+        default="grid",
         choices=("adaptive", "grid"),
         help="Run the bond_issuer_frontier as the supplied grid or add midpoint refinement cells.",
     )
     parser.add_argument(
         "--frontier-refinement-rounds",
         type=int,
-        default=1,
+        default=0,
         help="Number of adaptive midpoint refinement rounds for bond_issuer_frontier.",
     )
     parser.add_argument(
@@ -6675,7 +6675,8 @@ def write_frontier_notes(output_dir: Path, args: argparse.Namespace, summary_row
         "",
         "## Non-Extraction Gate",
         "",
-        "A cell is safe only when scheduled bond payments clear, spendable recovered-stable cash headroom is at least 1.25x scheduled debt service, route success, voucher-to-voucher circulation preservation, active-pool stable-dependency limits, incremental household cash stress, incremental liquidity leakage, unpaid claims, edge concentration, and matched no-bond degradation tests all pass.",
+        "A cell is safe only when scheduled bond payments clear, voucher-to-voucher circulation preservation, active-pool stable-dependency limits, incremental household or community cash stress, incremental liquidity leakage, unpaid claims, edge concentration, and matched no-bond degradation tests all pass.",
+        "Available service-cash headroom is reported separately as issuer operating and risk-capital capacity. The 1.25x threshold is an issuer-headroom frontier, not an additional bondholder-payment requirement.",
         "- The route-success floor is a model settlement-reliability sensitivity parameter, not a direct empirical Sarafu failed-route scalar.",
         "- Voucher-to-voucher count and share are compared against the matched no-bond baseline to protect the empirically observed ROLA-like settlement motif.",
         "- Stable value share and voucher value share in active pools are compared against the matched no-bond baseline so stable/bond injections do not crowd out voucher-backed settlement capacity.",

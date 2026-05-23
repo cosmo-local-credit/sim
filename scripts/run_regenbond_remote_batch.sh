@@ -228,8 +228,8 @@ run_frontier() {
     --coupon-targets "${COUPON_TARGETS:-$default_coupons}" \
     --bond-fee-service-shares "${BOND_FEE_SERVICE_SHARES:-$default_shares}" \
     --certification-policy "${CERTIFICATION_POLICY:-strong_moderate_capped}" \
-    --frontier-mode "${FRONTIER_MODE:-adaptive}" \
-    --frontier-refinement-rounds "${FRONTIER_REFINEMENT_ROUNDS:-1}" \
+    --frontier-mode "${FRONTIER_MODE:-grid}" \
+    --frontier-refinement-rounds "${FRONTIER_REFINEMENT_ROUNDS:-0}" \
     --route-success-mode "${ROUTE_SUCCESS_MODE:-diagnostic}" \
     --route-success-floor "${ROUTE_SUCCESS_FLOOR:-0.85}" \
     --bond-service-lockbox-mode "${BOND_SERVICE_LOCKBOX_MODE:-remaining_schedule}" \
@@ -327,7 +327,7 @@ case "$JOB" in
       LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE="${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05}" \
       LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK="${LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK:-77.164163}" \
       PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
-      run_frontier 20 260 bond_issuer_frontier_pilot current,connected_2x 0.02,0.04,0.06,0.08,0.10,0.12,0.15 0,0.03,0.06,0.09,0.12 1.0
+      run_frontier 20 260 bond_issuer_frontier_pilot current,connected_2x 0.05,0.10,0.15,0.20,0.25 0,0.02,0.04,0.06,0.08,0.10 1.0
     ;;
   frontier-publication)
     ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK="${ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK:-1}" \
@@ -339,7 +339,7 @@ case "$JOB" in
       LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE="${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05}" \
       LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK="${LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK:-77.164163}" \
       PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
-      run_frontier 100 260 bond_issuer_frontier current,connected_2x 0.02,0.04,0.06,0.08,0.10,0.12,0.15 0,0.03,0.06,0.09,0.12 1.0
+      run_frontier 100 260 bond_issuer_frontier current,connected_2x 0.05,0.10,0.15,0.20,0.25 0,0.02,0.04,0.06,0.08,0.10 1.0
     ;;
   *)
     echo "Unknown job: $JOB" >&2

@@ -43,6 +43,18 @@ distribution and figure so the flat budget can be replaced by a dynamic
 purchase-timing model once buyer-income moments are added. The current flat
 purchase budget is a conservative 260-week spreading of the aggregate purchase
 value, not a dynamic buyer-income process.
+Current frontier jobs also consume three calibration-derived controls from
+this bundle:
+
+- mature producer debt recovery uses the mature borrow-proxy value support
+  rate, currently `0.673`;
+- primary producer voucher-borrowing attempts use the recent voucher-source
+  motif share, currently `0.863292`, rather than a fixed `50%` scenario
+  assumption;
+- producer voucher overlap uses the exported aggregate pool-degree
+  distribution, with a current multi-pool voucher share of approximately
+  `0.147554`.
+
 The public bundle also exports a standalone stable/cash deposit weekly series.
 That series counts ordinary successful pool-era stable/cash deposit logs and
 excludes swap-associated deposit logs, while reporting the inclusive

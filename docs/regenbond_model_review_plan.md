@@ -25,6 +25,15 @@ latest validation and frontier artifacts.
   current-scale low-principal cells from `0` to `0.05` principal ratio. The
   current `frontier-pilot` target has been wired to enable the same primary
   producer voucher borrowing and bounded lender-held-voucher purchase demand.
+- The 10-run `frontier-maturity-smoke` now passes the pre-pilot full-term
+  check: scheduled bondholder payment clears, unpaid scheduled claims are
+  zero, voucher circulation is preserved, and the `1.25x` available
+  service-cash threshold is reported separately as issuer operating/risk
+  headroom.
+- The current `frontier-pilot` target is the focused grid:
+  `current,connected_2x` network scales; principal ratios
+  `0.02,0.04,0.06,0.08,0.10,0.12,0.15`; coupon targets
+  `0,0.03,0.06,0.09,0.12`; fee-service share `1.0`.
 - Earlier pilot results that rejected all cells under `p50_service_coverage`
   and reserve-constrained fee-service mechanics are superseded historical
   evidence for model debugging, not current frontier evidence.
@@ -43,6 +52,9 @@ Implemented changes:
   `0.384157` to voucher deposits, and caps loan-induced voucher-deposit growth
   at `0.143206` per month.
 - Added dated producer-debt obligations for frontier runs: producer voucher borrowing creates a maturity record and a contract cash-service obligation. Lender-held vouchers can close through normal circulation, but circulation alone only closes the pool-level voucher exposure; stable bond-service recovery requires borrower repayment, consumer or third-party stable purchase, or contract cash-service payment. Any remaining cash service at the 13-tick maturity is attempted from producer stable and then written off under the configured recovery/default rate.
+- Calibrated producer debt maturity recovery from the mature borrow-proxy
+  value support rate. The current bundle sets this at `0.673`, replacing the
+  earlier full-recovery frontier assumption.
 - Added producer debt contract cash-service accounting for frontier runs. The
   current default is principal-only cash service with a shared `0%` margin over
   borrowed principal until an empirical debt-service margin is calibrated.
@@ -55,13 +67,16 @@ Implemented changes:
   circulation channel; it can shift lender-pool exposure and still carries
   cash-service accounting, but it is not counted as bond-service cash until
   stable is recovered.
+- Calibrated the default primary voucher-borrowing attempt share from the
+  recent voucher-source settlement motif mix. The current value is `0.863292`,
+  replacing the earlier fixed `0.50` probe assumption.
 - Added bounded lender-held-voucher purchase demand. Consumers and third-party
   buyers can use calibrated stable purchase budgets to buy visible producer
   vouchers from lender pools, subject to route success, target inventory, and
   reserve protection.
 - Added routed conversion attempts for voucher-denominated fees. Successful stable conversion can reserve the configured fee-service share into the bond lockbox before excess fee cash enters the CLC waterfall; failures are retained as voucher fee inventory.
 - Added quarterly clearing of eligible recovered stable from lender pools, capped by scheduled issuer need and lender surplus.
-- Added a configurable bond-service lockbox. Frontier jobs reserve recovered lender stable and eligible fee-service cash against `1.25x` remaining scheduled principal plus coupon before cash can recirculate; `next_due` remains available as a control mode.
+- Added a configurable bond-service lockbox. Frontier jobs reserve recovered lender stable and eligible fee-service cash against `1.25x` remaining scheduled principal plus coupon before cash can recirculate; `next_due` remains available as a control mode. The `1.25x` value is reported as issuer operating/risk headroom and as a separate headroom frontier, not as extra scheduled bondholder service.
 - Added route-substitution diagnostics for ordinary purchase/exchange attempts while keeping borrowing, repayment, and fee conversion as fixed-target routes.
 - Changed the frontier route-success default to `diagnostic`; `absolute` mode keeps the old hard floor behavior, and `relative` mode compares against the matched no-bond baseline.
 

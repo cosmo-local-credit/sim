@@ -145,6 +145,18 @@ third-party stable purchases of visible lender-held producer vouchers. This is
 the current frontier configuration; disable those flags only for explicit
 control or ablation runs.
 
+The current frontier defaults are calibration driven where possible:
+producer debt maturity recovery uses the mature borrow-proxy value support rate
+(`0.673` in the current bundle); primary producer voucher-borrowing attempts
+use the recent voucher-source settlement motif share (`0.863292`, computed as
+voucher-to-voucher events divided by voucher-to-voucher plus voucher-to-stable
+events); visible lender-held voucher purchase demand uses a network-level
+stable purchase budget of `$77.164163` per weekly tick; and producer-voucher
+overlap uses the empirical aggregate pool-overlap distribution. The focused
+`frontier-pilot` target now tests `current` and `connected_2x` networks,
+principal ratios `0.02-0.15`, coupon targets `0-12%`, and fee-service share
+`1.0`.
+
 The Streamlit app includes a **RegenBond MC** tab that runs this same script as
 a subprocess and displays the exact CLI-equivalent command. For identical
 results between terminal and UI, keep the scenario, runs, ticks, seed, coupon

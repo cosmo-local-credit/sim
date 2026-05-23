@@ -53,6 +53,19 @@ low-principal cells from `0` to `0.05` principal ratio with scheduled bond
 service paid and voucher-to-voucher circulation preserved. The normal
 `frontier-pilot` target is now wired to use the same mechanism.
 
+Current frontier defaults are calibration-backed where possible:
+
+- producer debt maturity recovery uses the mature borrow-proxy value support
+  rate, currently `0.673`;
+- producer primary voucher-borrowing attempts use the recent voucher-source
+  motif share, currently `0.863292`, unless explicitly overridden;
+- producer-voucher overlap uses the empirical aggregate pool-degree
+  distribution;
+- the visible lender-held voucher purchase budget is a network-level
+  `$77.164163` per weekly tick, not a per-consumer allowance;
+- the main pilot uses fee-service share `1.0`, so eligible fee cash reserves
+  into the lockbox before excess goes to the waterfall.
+
 For later runs:
 
 ```bash
@@ -153,6 +166,8 @@ Recommended gate:
    reports `status=pass`.
 4. Run `frontier-smoke` and inspect frontier output structure.
 5. Run `frontier-maturity-smoke` and confirm the full-term lockbox guard passes.
+   If the two-run smoke is borderline, rerun it with `RUNS=10` into a separate
+   output directory before spending time on the full pilot.
 6. Run `frontier-rola-regeneration-probe` and inspect productive-credit
    feedback, primary voucher borrowing, stable purchase demand,
    matched-baseline voucher-to-voucher circulation, and consumer/community
@@ -179,11 +194,11 @@ is set.
 | `validation-pilot` | Full-horizon validation pilot | 20 runs, 260 ticks | `analysis/monte_carlo/engine_validation_20run/` | `analysis/monte_carlo/validation-pilot.log` |
 | `validation-full` | Paper-facing validation gate | 100 runs, 260 ticks | `analysis/monte_carlo/engine_validation/` | `analysis/monte_carlo/validation-full.log` |
 | `frontier-smoke` | Small bond-frontier structure check | 5 runs, 52 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_smoke/` | `analysis/monte_carlo/frontier-smoke.log` |
-| `frontier-maturity-smoke` | Fast full-maturity lockbox check | 2 runs, 260 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/` | `analysis/monte_carlo/frontier-maturity-smoke.log` |
+| `frontier-maturity-smoke` | Fast full-maturity lockbox check | 2 runs by default, 260 ticks, current scale; use `RUNS=10` for the pre-pilot gate | `analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/` | `analysis/monte_carlo/frontier-maturity-smoke.log` |
 | `frontier-feedback-probe` | Focused capacity-feedback principal probe | 2 runs, 260 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_feedback_probe/` | `analysis/monte_carlo/frontier-feedback-probe.log` |
 | `frontier-rola-regeneration-probe` | Current-scale low-principal ROLA/voucher-purchase probe | 5 runs by default, 260 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/` | `analysis/monte_carlo/frontier-rola-regeneration-probe.log` |
-| `frontier-pilot` | Full-horizon frontier pilot | 20 runs, 260 ticks, 3 scales | `analysis/monte_carlo/bond_issuer_frontier_pilot/` | `analysis/monte_carlo/frontier-pilot.log` |
-| `frontier-publication` | Paper-facing frontier grid | 100 runs, 260 ticks, 3 scales | `analysis/monte_carlo/bond_issuer_frontier/` | `analysis/monte_carlo/frontier-publication.log` |
+| `frontier-pilot` | Full-horizon focused frontier pilot | 20 runs, 260 ticks, `current` and `connected_2x` | `analysis/monte_carlo/bond_issuer_frontier_pilot/` | `analysis/monte_carlo/frontier-pilot.log` |
+| `frontier-publication` | Paper-facing focused frontier grid | 100 runs, 260 ticks, `current` and `connected_2x` | `analysis/monte_carlo/bond_issuer_frontier/` | `analysis/monte_carlo/frontier-publication.log` |
 
 `frontier-*` jobs read the full validation gate at
 `analysis/monte_carlo/engine_validation/engine_validation_summary.csv`. If it
@@ -218,7 +233,8 @@ passed the low-principal probe:
 ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK=1
 ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST=1
 ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING=1
-PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE=0.50
+# Leave unset for the calibrated default, currently 0.863292.
+# PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE=0.863292
 ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND=1
 LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK=5
 LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE=0.75
@@ -227,7 +243,7 @@ LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK=77.164163
 ```
 
 These remain ordinary environment overrides. Set them explicitly only for
-control/ablation runs or if you intentionally want to disable the current
+control/ablation runs or if you intentionally want to override the current
 frontier-pilot mechanism.
 
 ## Calibration Bundle
@@ -469,8 +485,8 @@ Frontier-specific parameters:
 | `COUPON_TARGETS` | Comma-separated annual coupon targets. | job-specific |
 | `BOND_FEE_SERVICE_SHARES` | Comma-separated eligible fee/service shares. | job-specific |
 | `CERTIFICATION_POLICY` | Eligible-pool policy used by the current frontier code. | `strong_moderate_capped` |
-| `FRONTIER_MODE` | `adaptive` or `grid`. | `adaptive` |
-| `FRONTIER_REFINEMENT_ROUNDS` | Adaptive midpoint rounds. | `1` |
+| `FRONTIER_MODE` | `grid` or `adaptive`. | `grid` |
+| `FRONTIER_REFINEMENT_ROUNDS` | Adaptive midpoint rounds; ignored unless `FRONTIER_MODE=adaptive`. | `0` |
 | `ROUTE_SUCCESS_MODE` | `diagnostic`, `relative`, or `absolute`. | `diagnostic` |
 | `ROUTE_SUCCESS_FLOOR` | p05 route-success safety floor, binding only when `ROUTE_SUCCESS_MODE=absolute`. | `0.85` |
 | `BOND_TERM` | Frontier term in ticks. Do not use `TERM`. | `260` |
@@ -632,6 +648,16 @@ hidden 260-week repayment failures before spending time on `frontier-pilot`.
 ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
 ```
 
+Ten-run pre-pilot version:
+
+```bash
+SESSION=regenbond-maturity-smoke10 \
+LOG_FILE=analysis/monte_carlo/frontier-maturity-smoke-10run.log \
+OUTPUT=analysis/monte_carlo/bond_issuer_frontier_maturity_smoke_10run \
+RUNS=10 WORKERS=15 RESUME=0 \
+  ./scripts/start_regenbond_batch_tmux.sh frontier-maturity-smoke
+```
+
 Sensitivity run with an explicit shared producer debt contract service margin:
 
 ```bash
@@ -717,8 +743,12 @@ realized productive-credit voucher-deposit share.
 
 ### `frontier-pilot`
 
-Full-horizon 20-run frontier pilot across `current`, `connected_2x`, and
-`connected_5x`.
+Full-horizon 20-run focused frontier pilot across `current` and
+`connected_2x`. The default grid is principal ratios
+`0.05,0.10,0.15,0.20,0.25`, coupon targets
+`0,0.02,0.04,0.06,0.08,0.10`, and fee-service share `1.0`. `connected_5x` is no
+longer part of the main pilot because it is too slow for routine iteration;
+use it only as an explicit scaling stress test.
 
 ```bash
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
@@ -805,10 +835,18 @@ OUTPUT=analysis/monte_carlo/bond_issuer_frontier_maturity_smoke_next_due \
   ./scripts/run_regenbond_remote_batch.sh frontier-maturity-smoke
 ```
 
-Run a fixed grid without adaptive midpoint refinement:
+Adaptive midpoint refinement is opt-in. The default frontier pilot now runs the
+fixed configured grid only:
 
 ```bash
-FRONTIER_MODE=grid ./scripts/run_regenbond_remote_batch.sh frontier-pilot
+./scripts/run_regenbond_remote_batch.sh frontier-pilot
+```
+
+Enable adaptive midpoint refinement explicitly when needed:
+
+```bash
+FRONTIER_MODE=adaptive FRONTIER_REFINEMENT_ROUNDS=1 \
+  ./scripts/run_regenbond_remote_batch.sh frontier-pilot
 ```
 
 Run only one scale:
