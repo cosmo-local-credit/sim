@@ -719,7 +719,8 @@ head analysis/monte_carlo/bond_issuer_frontier_feedback_probe/safe_injection_fro
 ```
 
 The key columns to inspect are the scheduled-payment coverage fields, unpaid
-claims, swap-volume ratio versus baseline, voucher-to-voucher share change,
+claims, swap-volume ratio versus baseline, voucher-to-voucher count/volume
+preservation, voucher-to-voucher share as a diagnostic composition metric,
 baseline productive-credit inflow/deposits, and incremental productive-credit
 inflow/deposits.
 
@@ -1163,6 +1164,8 @@ The route-success floor in the frontier is a settlement-reliability sensitivity
 parameter, not a directly observed Sarafu failed-route scalar. In the revised
 default `ROUTE_SUCCESS_MODE=diagnostic`, route reliability is reported but is
 not a primary binding guardrail. Frontier safety rows still report and guard
-against voucher-to-voucher decline versus the matched no-bond baseline.
+against voucher-to-voucher count/volume decline versus the matched no-bond
+baseline. Voucher-to-voucher share is reported as a diagnostic composition
+metric, but it is not a primary binding guardrail.
 Stable-dependency anchors come from
 `analysis/sarafu_calibration/stable_dependency_anchors.csv`.

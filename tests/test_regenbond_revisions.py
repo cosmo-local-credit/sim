@@ -1521,6 +1521,63 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertIn("total_swap_volume_decline", summary["diagnostic_decline_reasons"])
         self.assertNotIn("swap_volume_decline_vs_no_bond", summary["binding_constraint"])
 
+    def test_frontier_safety_treats_voucher_share_decline_as_diagnostic(self):
+        row = {
+            "bond_principal_usd": 1000.0,
+            "principal_ratio": 0.05,
+            "network_scale": "current",
+            "coupon_target_annual": 0.0,
+            "bond_fee_service_share": 1.0,
+            "issuer_service_coverage_ratio": 1.0,
+            "issuer_paid_coverage_ratio": 1.0,
+            "issuer_service_cash_headroom_ratio": 2.0,
+            "issuer_available_service_cash_headroom_ratio": 2.0,
+            "issuer_scheduled_debt_service_due_usd": 100.0,
+            "issuer_actual_bondholder_payment_usd": 100.0,
+            "issuer_unpaid_scheduled_claim_usd": 0.0,
+            "route_success_rate_cumulative": 1.0,
+            "realized_edge_top_share": 0.0,
+            "swap_volume_usd_total": 500.0,
+            "transactions_total": 200.0,
+            "swap_count_vchr_to_vchr_total": 100.0,
+            "swap_volume_vchr_to_vchr_total": 120.0,
+            "ordinary_voucher_source_swap_count_total": 100.0,
+            "ordinary_voucher_source_swap_volume_usd_total": 120.0,
+            "stable_value_share_in_active_pools": 0.10,
+            "voucher_value_share_in_active_pools": 0.90,
+            "consumer_stable_reserve_stress_ratio": 0.0,
+            "community_stable_reserve_stress_ratio": 0.0,
+            "stable_liquidity_leakage_ratio_cumulative": 0.0,
+        }
+        baseline = {
+            "route_success_p50": 1.0,
+            "swap_volume_p50": 500.0,
+            "voucher_to_voucher_count_p50": 80.0,
+            "voucher_to_voucher_volume_p50": 100.0,
+            "voucher_to_voucher_share_p50": 0.80,
+            "ordinary_voucher_source_swap_count_total_p50": 80.0,
+            "ordinary_voucher_source_swap_volume_usd_total_p50": 100.0,
+            "stable_value_share_p95": 0.10,
+            "voucher_value_share_p50": 0.90,
+            "consumer_cash_stress_p50": 0.0,
+            "consumer_cash_stress_p95": 0.0,
+            "community_cash_stress_p50": 0.0,
+            "community_cash_stress_p95": 0.0,
+            "liquidity_leakage_p50": 0.0,
+            "liquidity_leakage_p95": 0.0,
+        }
+
+        summary = summarize_frontier_cell([row] * 5, baseline, 0.85, "diagnostic")
+
+        self.assertEqual(summary["safe"], 1)
+        self.assertEqual(summary["voucher_to_voucher_share_decline_vs_no_bond"], 1)
+        self.assertEqual(summary["diagnostic_voucher_to_voucher_share_decline"], 1)
+        self.assertEqual(summary["material_decline_voucher_to_voucher_share_decline"], 0)
+        self.assertEqual(summary["material_decline_voucher_circulation_decline"], 0)
+        self.assertEqual(summary["material_decline_vs_no_bond"], 0)
+        self.assertIn("voucher_to_voucher_share_decline", summary["diagnostic_decline_reasons"])
+        self.assertNotIn("voucher_to_voucher_share_decline_vs_no_bond", summary["binding_constraint"])
+
     def test_frontier_safety_reports_baseline_productive_credit_feedback(self):
         baseline_row = {
             "route_success_rate_cumulative": 1.0,

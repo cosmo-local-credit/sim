@@ -5915,7 +5915,6 @@ def summarize_frontier_cell(
     voucher_circulation_decline = (
         v2v_count_decline
         or v2v_volume_decline
-        or v2v_share_decline
         or ordinary_voucher_source_count_decline
         or ordinary_voucher_source_volume_decline
     )
@@ -5958,8 +5957,6 @@ def summarize_frontier_cell(
         constraints.append("p95_realized_edge_concentration")
     if v2v_count_decline:
         constraints.append("voucher_to_voucher_count_decline_vs_no_bond")
-    if v2v_share_decline:
-        constraints.append("voucher_to_voucher_share_decline_vs_no_bond")
     if v2v_volume_decline:
         constraints.append("voucher_to_voucher_volume_decline_vs_no_bond")
     if ordinary_voucher_source_count_decline:
@@ -5993,7 +5990,7 @@ def summarize_frontier_cell(
     if v2v_volume_decline:
         material_reasons.append("voucher_to_voucher_volume_decline")
     if v2v_share_decline:
-        material_reasons.append("voucher_to_voucher_share_decline")
+        diagnostic_reasons.append("voucher_to_voucher_share_decline")
     if ordinary_voucher_source_count_decline:
         material_reasons.append("ordinary_voucher_source_count_decline")
     if ordinary_voucher_source_volume_decline:
@@ -6485,11 +6482,12 @@ def summarize_frontier_cell(
         "diagnostic_ordinary_stable_source_volume_decline": int(
             ordinary_stable_source_volume_decline
         ),
+        "diagnostic_voucher_to_voucher_share_decline": int(v2v_share_decline),
         "material_decline_swap_volume_decline": 0,
         "material_decline_voucher_circulation_decline": int(voucher_circulation_decline),
         "material_decline_voucher_to_voucher_count_decline": int(v2v_count_decline),
         "material_decline_voucher_to_voucher_volume_decline": int(v2v_volume_decline),
-        "material_decline_voucher_to_voucher_share_decline": int(v2v_share_decline),
+        "material_decline_voucher_to_voucher_share_decline": 0,
         "material_decline_ordinary_voucher_source_count_decline": int(
             ordinary_voucher_source_count_decline
         ),
