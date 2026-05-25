@@ -134,6 +134,77 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertIsNot(first, third)
         self.assertEqual(set(first), set(third))
 
+    def test_affinity_buddies_use_top_known_partner_without_full_threshold(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=2,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=3,
+                affinity_buddy_count=6,
+                affinity_buddy_min_count=1,
+            ),
+            seed=23,
+        )
+        producer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "producer")
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+
+        engine._update_affinity(producer_pool.pool_id, lender_pool.pool_id, 100.0)
+
+        self.assertEqual(engine._affinity_buddies_for_pool(producer_pool.pool_id), {lender_pool.pool_id})
+
+    def test_repeat_partner_mode_uses_sticky_route_before_new_target_search(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                decision_based_activity_enabled=True,
+                repeat_partner_route_share=1.0,
+                route_substitution_enabled=False,
+                swap_target_retry_count=1,
+            ),
+            seed=29,
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        current_stable = producer_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(producer_pool, stable_id, current_stable, "test_clear", "test")
+        lender_pool.values.set_value(voucher_id, 1.0)
+        lender_pool.values.set_value(stable_id, 1.0)
+        engine._vault_add(lender_pool, stable_id, 100.0, "test_seed", "test")
+        engine._sticky_target_by_pool[(producer_pool.pool_id, voucher_id)] = stable_id
+        engine._sticky_plan_by_pool[(producer_pool.pool_id, voucher_id, stable_id)] = RoutePlan(
+            ok=True,
+            reason="test_sticky",
+            hops=[
+                Hop(
+                    pool_id=lender_pool.pool_id,
+                    asset_in=voucher_id,
+                    asset_out=stable_id,
+                    amount_in=1.0,
+                )
+            ],
+        )
+
+        attempted = engine._random_route_request(
+            source_pool=producer_pool,
+            max_assets=1,
+            activity_mode="repeat_partner",
+        )
+
+        self.assertEqual(attempted, 1)
+        self.assertEqual(engine._route_repeat_partner_requested_tick, 1)
+        self.assertEqual(engine._route_sticky_used_tick, 1)
+        self.assertEqual(engine._route_new_target_search_tick, 0)
+
     def test_private_wallet_roles_do_not_create_consumer_vouchers(self):
         engine = SimulationEngine(
             small_config(
@@ -998,6 +1069,9 @@ class RegenBondRevisionTests(unittest.TestCase):
             "noam_clearing_max_cycles",
             "noam_clearing_max_hops",
             "noam_clearing_edge_cap_per_asset",
+            "decision_based_activity_enabled",
+            "repeat_partner_route_share",
+            "affinity_buddy_min_count",
             "swap_sustain_max_extra_attempts",
             "swap_sustain_max_rounds",
             "swap_sustain_attempts_per_missing_swap",
@@ -1074,6 +1148,9 @@ class RegenBondRevisionTests(unittest.TestCase):
             noam_clearing_max_cycles=17,
             noam_clearing_max_hops=3,
             noam_clearing_edge_cap_per_asset=9,
+            decision_based_activity_enabled=1,
+            repeat_partner_route_share=0.55,
+            affinity_buddy_min_count=1,
             swap_sustain_max_extra_attempts=23,
             swap_sustain_max_rounds=4,
             swap_sustain_attempts_per_missing_swap=1.5,
@@ -1092,6 +1169,9 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(cfg.noam_clearing_max_cycles, 17)
         self.assertEqual(cfg.noam_clearing_max_hops, 3)
         self.assertEqual(cfg.noam_clearing_edge_cap_per_asset, 9)
+        self.assertTrue(cfg.decision_based_activity_enabled)
+        self.assertAlmostEqual(cfg.repeat_partner_route_share, 0.55)
+        self.assertEqual(cfg.affinity_buddy_min_count, 1)
         self.assertEqual(cfg.swap_sustain_max_extra_attempts, 23)
         self.assertEqual(cfg.swap_sustain_max_rounds, 4)
         self.assertAlmostEqual(cfg.swap_sustain_attempts_per_missing_swap, 1.5)
@@ -2307,12 +2387,25 @@ class RegenBondRevisionTests(unittest.TestCase):
         engine.log.add(Event(1, "ROUTE_FAILED", meta={"route_attempt_kind": "fixed"}))
         engine.log.add(Event(1, "ROUTE_REQUESTED", meta={"route_attempt_kind": "substitution"}))
         engine.log.add(Event(1, "ROUTE_FOUND", meta={"route_attempt_kind": "substitution"}))
+        engine._route_repeat_partner_requested_tick = 1
+        engine._route_exploration_requested_tick = 1
+        engine._route_sticky_used_tick = 1
+        engine._route_buddy_direct_used_tick = 1
+        engine._route_new_target_search_tick = 1
+        engine._route_search_fallback_used_tick = 1
 
         engine.snapshot_metrics(force_network=True)
         latest = engine.metrics.network_rows[-1]
 
         self.assertEqual(latest["route_fixed_failed_tick"], 1)
         self.assertEqual(latest["route_substitution_found_tick"], 1)
+        self.assertEqual(latest["route_repeat_partner_requested_tick"], 1)
+        self.assertEqual(latest["route_exploration_requested_tick"], 1)
+        self.assertAlmostEqual(latest["route_repeat_partner_share_tick"], 0.5)
+        self.assertAlmostEqual(latest["route_sticky_share_tick"], 0.5)
+        self.assertAlmostEqual(latest["route_buddy_direct_share_tick"], 0.5)
+        self.assertAlmostEqual(latest["route_new_target_search_share_tick"], 0.5)
+        self.assertAlmostEqual(latest["route_search_fallback_share_tick"], 0.5)
 
 
 if __name__ == "__main__":

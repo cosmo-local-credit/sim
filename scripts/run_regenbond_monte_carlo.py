@@ -535,6 +535,25 @@ def parse_args() -> argparse.Namespace:
         help="Optional cap on clearing candidate edges per asset.",
     )
     parser.add_argument(
+        "--decision-based-activity-enabled",
+        type=int,
+        choices=(0, 1),
+        default=None,
+        help="Set to 0/1 to override decision-based repeat/exploration route attempts.",
+    )
+    parser.add_argument(
+        "--repeat-partner-route-share",
+        type=float,
+        default=None,
+        help="Share of ordinary route attempts that prefer known partners when available.",
+    )
+    parser.add_argument(
+        "--affinity-buddy-min-count",
+        type=int,
+        default=None,
+        help="Minimum known buddies required before buddy-direct repeat routing can engage.",
+    )
+    parser.add_argument(
         "--swap-sustain-max-extra-attempts",
         type=int,
         default=None,
@@ -764,6 +783,9 @@ SHARD_CONFIG_KEYS = (
     "noam_clearing_max_cycles",
     "noam_clearing_max_hops",
     "noam_clearing_edge_cap_per_asset",
+    "decision_based_activity_enabled",
+    "repeat_partner_route_share",
+    "affinity_buddy_min_count",
     "swap_sustain_max_extra_attempts",
     "swap_sustain_max_rounds",
     "swap_sustain_attempts_per_missing_swap",
@@ -1675,6 +1697,19 @@ def apply_current_network_routing_profile(cfg: ScenarioConfig, args: argparse.Na
             1,
             int(args.noam_clearing_edge_cap_per_asset),
         )
+    if getattr(args, "decision_based_activity_enabled", None) is not None:
+        cfg.decision_based_activity_enabled = _optional_flag(
+            args,
+            "decision_based_activity_enabled",
+            True,
+        )
+    if getattr(args, "repeat_partner_route_share", None) is not None:
+        cfg.repeat_partner_route_share = max(
+            0.0,
+            min(1.0, float(args.repeat_partner_route_share)),
+        )
+    if getattr(args, "affinity_buddy_min_count", None) is not None:
+        cfg.affinity_buddy_min_count = max(1, int(args.affinity_buddy_min_count))
     if getattr(args, "swap_sustain_max_extra_attempts", None) is not None:
         cfg.swap_sustain_max_extra_attempts = max(
             0,
@@ -2967,6 +3002,12 @@ def run_one(
             "noam_clearing_cycles_attempted_tick",
             "noam_clearing_cycles_executed_tick",
             "noam_clearing_cycle_value_usd_tick",
+            "route_repeat_partner_requested_tick",
+            "route_exploration_requested_tick",
+            "route_sticky_used_tick",
+            "route_buddy_direct_used_tick",
+            "route_new_target_search_tick",
+            "route_search_fallback_used_tick",
             "ordinary_swap_count_tick",
             "ordinary_swap_volume_usd_tick",
             "ordinary_stable_source_swap_count_tick",
@@ -3112,6 +3153,11 @@ def run_one(
             if substitution_route_attempts_total
             else 0.0
         )
+        route_decision_attempts_total = (
+            cumulative_float["route_repeat_partner_requested_tick"]
+            + cumulative_float["route_exploration_requested_tick"]
+        )
+        route_requested_total = max(1.0, float(cumulative["route_found"] + cumulative["route_failed"]))
         stress_ratio = safe_float(latest.get("pools_under_stable_reserve")) / max(
             1.0, safe_float(latest.get("num_pools"), 1.0)
         )
@@ -3329,6 +3375,18 @@ def run_one(
             ),
             "configured_noam_clearing_budget_scale_by_stride": int(
                 bool(getattr(cfg, "noam_clearing_budget_scale_by_stride", False))
+            ),
+            "configured_decision_based_activity_enabled": int(
+                bool(getattr(cfg, "decision_based_activity_enabled", False))
+            ),
+            "configured_repeat_partner_route_share": safe_float(
+                getattr(cfg, "repeat_partner_route_share", 0.0)
+            ),
+            "configured_affinity_buddy_count": int(
+                getattr(cfg, "affinity_buddy_count", 0) or 0
+            ),
+            "configured_affinity_buddy_min_count": int(
+                getattr(cfg, "affinity_buddy_min_count", 0) or 0
             ),
             "configured_swap_sustain_max_extra_attempts": int(
                 getattr(cfg, "swap_sustain_max_extra_attempts", 0) or 0
@@ -3639,6 +3697,50 @@ def run_one(
             "route_substitution_success_rate_cumulative": substitution_route_success_total,
             "route_substitution_found_total": cumulative["route_substitution_found"],
             "route_substitution_failed_total": cumulative["route_substitution_failed"],
+            "route_repeat_partner_requested_tick": latest.get(
+                "route_repeat_partner_requested_tick", 0
+            ),
+            "route_exploration_requested_tick": latest.get(
+                "route_exploration_requested_tick", 0
+            ),
+            "route_sticky_used_tick": latest.get("route_sticky_used_tick", 0),
+            "route_buddy_direct_used_tick": latest.get("route_buddy_direct_used_tick", 0),
+            "route_new_target_search_tick": latest.get("route_new_target_search_tick", 0),
+            "route_search_fallback_used_tick": latest.get("route_search_fallback_used_tick", 0),
+            "route_repeat_partner_requested_total": cumulative_float[
+                "route_repeat_partner_requested_tick"
+            ],
+            "route_exploration_requested_total": cumulative_float[
+                "route_exploration_requested_tick"
+            ],
+            "route_sticky_used_total": cumulative_float["route_sticky_used_tick"],
+            "route_buddy_direct_used_total": cumulative_float["route_buddy_direct_used_tick"],
+            "route_new_target_search_total": cumulative_float[
+                "route_new_target_search_tick"
+            ],
+            "route_search_fallback_used_total": cumulative_float[
+                "route_search_fallback_used_tick"
+            ],
+            "route_repeat_partner_share_total": (
+                cumulative_float["route_repeat_partner_requested_tick"]
+                / max(1e-9, route_decision_attempts_total)
+            ),
+            "route_exploration_share_total": (
+                cumulative_float["route_exploration_requested_tick"]
+                / max(1e-9, route_decision_attempts_total)
+            ),
+            "route_sticky_share_total": (
+                cumulative_float["route_sticky_used_tick"] / route_requested_total
+            ),
+            "route_buddy_direct_share_total": (
+                cumulative_float["route_buddy_direct_used_tick"] / route_requested_total
+            ),
+            "route_new_target_search_share_total": (
+                cumulative_float["route_new_target_search_tick"] / route_requested_total
+            ),
+            "route_search_fallback_share_total": (
+                cumulative_float["route_search_fallback_used_tick"] / route_requested_total
+            ),
             "noam_routing_swaps_tick": latest.get("noam_routing_swaps_tick", 0),
             "noam_clearing_swaps_tick": latest.get("noam_clearing_swaps_tick", 0),
             "noam_routing_swaps_total": cumulative_float["noam_routing_swaps_tick"],

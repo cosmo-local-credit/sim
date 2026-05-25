@@ -50,6 +50,9 @@ append_optional_arg NOAM_CLEARING_STRIDE_TICKS --noam-clearing-stride-ticks
 append_optional_arg NOAM_CLEARING_MAX_CYCLES --noam-clearing-max-cycles
 append_optional_arg NOAM_CLEARING_MAX_HOPS --noam-clearing-max-hops
 append_optional_arg NOAM_CLEARING_EDGE_CAP_PER_ASSET --noam-clearing-edge-cap-per-asset
+append_optional_arg DECISION_BASED_ACTIVITY_ENABLED --decision-based-activity-enabled
+append_optional_arg REPEAT_PARTNER_ROUTE_SHARE --repeat-partner-route-share
+append_optional_arg AFFINITY_BUDDY_MIN_COUNT --affinity-buddy-min-count
 append_optional_arg SWAP_SUSTAIN_MAX_EXTRA_ATTEMPTS --swap-sustain-max-extra-attempts
 append_optional_arg SWAP_SUSTAIN_MAX_ROUNDS --swap-sustain-max-rounds
 append_optional_arg SWAP_SUSTAIN_ATTEMPTS_PER_MISSING_SWAP --swap-sustain-attempts-per-missing-swap
@@ -95,6 +98,7 @@ echo "[batch] resume=${RESUME:-1}"
 echo "[batch] dry_run=${DRY_RUN:-0}"
 echo "[batch] route_success_mode=${ROUTE_SUCCESS_MODE:-diagnostic}"
 echo "[batch] routing_profile=max_hops:${MAX_HOPS:-3} noam_max_hops:${NOAM_MAX_HOPS:-3} overlay:${NOAM_OVERLAY_ENABLED:-1} clearing:${NOAM_CLEARING_ENABLED:-1} clearing_stride:${NOAM_CLEARING_STRIDE_TICKS:-13}"
+echo "[batch] activity_profile=decision_based:${DECISION_BASED_ACTIVITY_ENABLED:-1} repeat_partner_share:${REPEAT_PARTNER_ROUTE_SHARE:-0.70} buddy_min:${AFFINITY_BUDDY_MIN_COUNT:-1}"
 echo "[batch] kes_per_usd=${KES_PER_USD:-missing}"
 echo "[batch] voucher_kes_value=${VOUCHER_KES_VALUE:-missing}"
 

@@ -378,6 +378,12 @@ class SimulationEngine:
         self._route_substitution_requested_tick: int = 0
         self._route_substitution_found_tick: int = 0
         self._route_substitution_failed_tick: int = 0
+        self._route_repeat_partner_requested_tick: int = 0
+        self._route_exploration_requested_tick: int = 0
+        self._route_sticky_used_tick: int = 0
+        self._route_buddy_direct_used_tick: int = 0
+        self._route_new_target_search_tick: int = 0
+        self._route_search_fallback_used_tick: int = 0
         self._pool_value_cache: Dict[str, float] = {}
         self._pool_voucher_value_cache: Dict[str, float] = {}
         self._swap_success_ema: Dict[str, float] = {}
@@ -2658,6 +2664,7 @@ class SimulationEngine:
             if score > 1e-6:
                 keep[key] = score
         self.pool_affinity = keep
+        self._affinity_buddies = {}
 
     def _update_affinity(self, a: str, b: str, amount_usd: float) -> None:
         gain = float(self.cfg.sticky_affinity_gain or 0.0)
@@ -2672,11 +2679,14 @@ class SimulationEngine:
         if cap > 0.0:
             updated = min(cap, updated)
         self.pool_affinity[key] = updated
+        self._affinity_buddies.pop(a, None)
+        self._affinity_buddies.pop(b, None)
 
     def _affinity_buddies_for_pool(self, pool_id: str) -> Optional[Set[str]]:
         buddy_count = max(0, int(self.cfg.affinity_buddy_count or 0))
         if buddy_count <= 0:
             return None
+        min_count = max(1, int(getattr(self.cfg, "affinity_buddy_min_count", 1) or 1))
         existing = self._affinity_buddies.get(pool_id)
         if existing is not None:
             return existing
@@ -2688,11 +2698,12 @@ class SimulationEngine:
                 scores[b] = max(scores.get(b, 0.0), score)
             elif b == pool_id:
                 scores[a] = max(scores.get(a, 0.0), score)
-        if len(scores) < buddy_count:
+        if len(scores) < min_count:
             return None
-        top = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:buddy_count]
+        top_count = min(buddy_count, len(scores))
+        top = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:top_count]
         buddies = {pid for pid, _ in top}
-        if len(buddies) < buddy_count:
+        if len(buddies) < min_count:
             return None
         self._affinity_buddies[pool_id] = buddies
         return buddies
@@ -6439,6 +6450,12 @@ class SimulationEngine:
             self._route_substitution_requested_tick = 0
             self._route_substitution_found_tick = 0
             self._route_substitution_failed_tick = 0
+            self._route_repeat_partner_requested_tick = 0
+            self._route_exploration_requested_tick = 0
+            self._route_sticky_used_tick = 0
+            self._route_buddy_direct_used_tick = 0
+            self._route_new_target_search_tick = 0
+            self._route_search_fallback_used_tick = 0
             self._swap_attempt_counts = {}
 
             self._apply_productive_credit_inflows()
@@ -6561,11 +6578,64 @@ class SimulationEngine:
                 self._stable_offramp_usd_month = 0.0
             self.snapshot_metrics()
 
+    def _has_repeat_partner_candidate(self, source_pool: "Pool", asset_candidates: list[str]) -> bool:
+        for asset_id in asset_candidates:
+            if self._sticky_target_by_pool.get((source_pool.pool_id, asset_id)):
+                return True
+            for key in self._sticky_plan_by_pool:
+                if key[0] == source_pool.pool_id and key[1] == asset_id:
+                    return True
+        if source_pool.policy.role in ("producer", "consumer"):
+            return self._affinity_buddies_for_pool(source_pool.pool_id) is not None
+        return False
+
+    def _choose_route_activity_mode(
+        self,
+        source_pool: "Pool",
+        asset_candidates: list[str],
+        route_context: str,
+        requested_mode: str,
+    ) -> str:
+        mode = str(requested_mode or "auto")
+        if mode in {"repeat_partner", "exploration"}:
+            return mode
+        if route_context != "ordinary":
+            return "exploration"
+        if not bool(getattr(self.cfg, "decision_based_activity_enabled", True)):
+            return "exploration"
+        if not self._has_repeat_partner_candidate(source_pool, asset_candidates):
+            return "exploration"
+        repeat_share = max(0.0, min(1.0, float(getattr(self.cfg, "repeat_partner_route_share", 0.0) or 0.0)))
+        return "repeat_partner" if self.rng.random() < repeat_share else "exploration"
+
+    def _record_route_decision_attempt(
+        self,
+        activity_mode: str,
+        *,
+        sticky: bool = False,
+        buddy_direct: bool = False,
+        new_target_search: bool = False,
+        fallback: bool = False,
+    ) -> None:
+        if activity_mode == "repeat_partner":
+            self._route_repeat_partner_requested_tick += 1
+        else:
+            self._route_exploration_requested_tick += 1
+        if sticky:
+            self._route_sticky_used_tick += 1
+        if buddy_direct:
+            self._route_buddy_direct_used_tick += 1
+        if new_target_search:
+            self._route_new_target_search_tick += 1
+        if fallback:
+            self._route_search_fallback_used_tick += 1
+
     def _random_route_request(
         self,
         source_pool: Optional["Pool"] = None,
         max_assets: Optional[int] = None,
         route_context: str = "ordinary",
+        activity_mode: str = "auto",
     ) -> int:
         """
         Choose a random source pool and try to swap some asset it holds into a different asset.
@@ -6642,12 +6712,30 @@ class SimulationEngine:
                 else:
                     asset_candidates = random.sample(asset_candidates, k=max_assets)
 
+        selected_activity_mode = self._choose_route_activity_mode(
+            source_pool,
+            asset_candidates,
+            route_context,
+            activity_mode,
+        )
+        decision_mode_active = (
+            bool(getattr(self.cfg, "decision_based_activity_enabled", True))
+            and route_context == "ordinary"
+        )
         attempted = 0
         buddy_pools: Optional[Set[str]] = None
         if source_pool.policy.role in ("producer", "consumer"):
             buddy_pools = self._affinity_buddies_for_pool(source_pool.pool_id)
-        buddy_direct_only = bool(self.cfg.affinity_buddy_direct_only) and buddy_pools is not None
-        sticky_bias = max(0.0, float(self.cfg.sticky_route_bias or 0.0))
+        if decision_mode_active:
+            buddy_direct_only = (
+                selected_activity_mode == "repeat_partner"
+                and bool(self.cfg.affinity_buddy_direct_only)
+                and buddy_pools is not None
+            )
+            sticky_bias = 1.0 if selected_activity_mode == "repeat_partner" else 0.0
+        else:
+            buddy_direct_only = bool(self.cfg.affinity_buddy_direct_only) and buddy_pools is not None
+            sticky_bias = max(0.0, float(self.cfg.sticky_route_bias or 0.0))
         sticky_fail_threshold = max(1, int(self.cfg.sticky_fail_threshold or 1))
 
         for asset_in in asset_candidates:
@@ -6663,7 +6751,16 @@ class SimulationEngine:
                 if max_assets is not None and max_assets > 0 and attempted >= max_assets:
                     break
                 attempt_kind = "substitution" if attempt_index > 0 else "fixed"
-                if buddy_direct_only:
+                sticky_target_allowed = (
+                    sticky_target
+                    and sticky_target not in targets_tried
+                    and sticky_target != asset_in
+                    and (
+                        motif_target_class is None
+                        or self._settlement_asset_class(sticky_target) == motif_target_class
+                    )
+                )
+                if buddy_direct_only and not sticky_target_allowed:
                     amount_in = self._sample_amount_in(source_pool, asset_in)
                     if amount_in <= 1e-9:
                         break
@@ -6675,7 +6772,18 @@ class SimulationEngine:
                         buddy_pools=buddy_pools or set(),
                         target_class=motif_target_class,
                     )
-                    meta = {"target_asset": asset_out, "buddy_direct": True, "route_attempt_kind": attempt_kind}
+                    self._record_route_decision_attempt(
+                        selected_activity_mode,
+                        buddy_direct=True,
+                        fallback=used_fallback,
+                    )
+                    meta = {
+                        "target_asset": asset_out,
+                        "buddy_direct": True,
+                        "route_attempt_kind": attempt_kind,
+                        "route_activity_mode": selected_activity_mode,
+                        "target_selection": "buddy_direct",
+                    }
                     if used_fallback:
                         meta["fallback"] = True
                     self.log.add(Event(self.tick, "ROUTE_REQUESTED", pool_id=source_pool.pool_id,
@@ -6683,11 +6791,25 @@ class SimulationEngine:
                     if not plan.ok or asset_out is None:
                         self.log.add(Event(self.tick, "ROUTE_FAILED", pool_id=source_pool.pool_id,
                                            asset_id=asset_in, amount=amount_used,
-                                           meta={"reason": plan.reason, "target": asset_out, "buddy_direct": True, "route_attempt_kind": attempt_kind}))
+                                           meta={
+                                               "reason": plan.reason,
+                                               "target": asset_out,
+                                               "buddy_direct": True,
+                                               "route_attempt_kind": attempt_kind,
+                                               "route_activity_mode": selected_activity_mode,
+                                               "target_selection": "buddy_direct",
+                                           }))
                         self._record_swap_attempt(source_pool.pool_id, success=False)
                         continue
                     self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
-                                       meta={"hops": [h.__dict__ for h in plan.hops], "target": asset_out, "buddy_direct": True, "route_attempt_kind": attempt_kind}))
+                                       meta={
+                                           "hops": [h.__dict__ for h in plan.hops],
+                                           "target": asset_out,
+                                           "buddy_direct": True,
+                                           "route_attempt_kind": attempt_kind,
+                                           "route_activity_mode": selected_activity_mode,
+                                           "target_selection": "buddy_direct",
+                                       }))
                     ok = self.execute_route_from_pool(
                         source_pool.pool_id, plan, amount_used, route_context=route_context
                     )
@@ -6697,17 +6819,9 @@ class SimulationEngine:
                         self._sticky_plan_by_pool[(source_pool.pool_id, asset_in, asset_out)] = plan
                         break
                     continue
-                sticky_target_allowed = (
-                    sticky_target
-                    and sticky_target not in targets_tried
-                    and sticky_target != asset_in
-                    and (
-                        motif_target_class is None
-                        or self._settlement_asset_class(sticky_target) == motif_target_class
-                    )
-                )
                 if sticky_target_allowed and self.rng.random() < sticky_bias:
                     asset_out = sticky_target
+                    target_selection = "sticky"
                 else:
                     asset_out = self._choose_target_asset(
                         asset_in,
@@ -6715,6 +6829,7 @@ class SimulationEngine:
                         exclude=targets_tried,
                         preferred_class=motif_target_class,
                     )
+                    target_selection = "new_search"
                     if not asset_out and motif_target_class is None:
                         asset_out = self._choose_target_asset(
                             asset_in,
@@ -6730,19 +6845,37 @@ class SimulationEngine:
                     break
 
                 attempted += 1
+                self._record_route_decision_attempt(
+                    selected_activity_mode,
+                    new_target_search=(target_selection == "new_search"),
+                )
                 self.log.add(Event(self.tick, "ROUTE_REQUESTED", pool_id=source_pool.pool_id,
                                    asset_id=asset_in, amount=amount_in,
-                                   meta={"target_asset": asset_out, "route_attempt_kind": attempt_kind}))
+                                   meta={
+                                       "target_asset": asset_out,
+                                       "route_attempt_kind": attempt_kind,
+                                       "route_activity_mode": selected_activity_mode,
+                                       "target_selection": target_selection,
+                                   }))
                 sticky_key = (source_pool.pool_id, asset_in, asset_out)
                 sticky_plan = self._sticky_plan_by_pool.get(sticky_key)
-                if sticky_plan and buddy_pools is not None:
-                    if any(h.pool_id not in buddy_pools for h in sticky_plan.hops):
+                active_buddy_pools = buddy_pools if selected_activity_mode == "repeat_partner" else None
+                if sticky_plan and active_buddy_pools is not None:
+                    if any(h.pool_id not in active_buddy_pools for h in sticky_plan.hops):
                         sticky_plan = None
                 if sticky_plan:
                     failures = self._sticky_failures.get(sticky_key, 0)
                     if self._validate_route_plan(sticky_plan, amount_in, source_pool):
+                        self._route_sticky_used_tick += 1
                         self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
-                                           meta={"hops": [h.__dict__ for h in sticky_plan.hops], "target": asset_out, "sticky": True, "route_attempt_kind": attempt_kind}))
+                                           meta={
+                                               "hops": [h.__dict__ for h in sticky_plan.hops],
+                                               "target": asset_out,
+                                               "sticky": True,
+                                               "route_attempt_kind": attempt_kind,
+                                               "route_activity_mode": selected_activity_mode,
+                                               "target_selection": target_selection,
+                                           }))
                         ok = self.execute_route_from_pool(
                             source_pool.pool_id, sticky_plan, amount_in, route_context=route_context
                         )
@@ -6770,22 +6903,41 @@ class SimulationEngine:
                     target_asset=asset_out,
                     amount_in=amount_in,
                     source_pool=source_pool,
-                    pool_whitelist=buddy_pools,
+                    pool_whitelist=active_buddy_pools,
                 )
                 if used_fallback:
+                    self._route_search_fallback_used_tick += 1
                     self.log.add(Event(self.tick, "ROUTE_REQUESTED", pool_id=source_pool.pool_id,
                                        asset_id=asset_in, amount=amount_used,
-                                       meta={"target_asset": asset_out, "fallback": True, "route_attempt_kind": attempt_kind}))
+                                       meta={
+                                           "target_asset": asset_out,
+                                           "fallback": True,
+                                           "route_attempt_kind": attempt_kind,
+                                           "route_activity_mode": selected_activity_mode,
+                                           "target_selection": target_selection,
+                                       }))
 
                 if not plan.ok:
                     self.log.add(Event(self.tick, "ROUTE_FAILED", pool_id=source_pool.pool_id,
                                        asset_id=asset_in, amount=amount_used,
-                                       meta={"reason": plan.reason, "target": asset_out, "route_attempt_kind": attempt_kind}))
+                                       meta={
+                                           "reason": plan.reason,
+                                           "target": asset_out,
+                                           "route_attempt_kind": attempt_kind,
+                                           "route_activity_mode": selected_activity_mode,
+                                           "target_selection": target_selection,
+                                       }))
                     self._record_swap_attempt(source_pool.pool_id, success=False)
                     continue
 
                 self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
-                                   meta={"hops": [h.__dict__ for h in plan.hops], "target": asset_out, "route_attempt_kind": attempt_kind}))
+                                   meta={
+                                       "hops": [h.__dict__ for h in plan.hops],
+                                       "target": asset_out,
+                                       "route_attempt_kind": attempt_kind,
+                                       "route_activity_mode": selected_activity_mode,
+                                       "target_selection": target_selection,
+                                   }))
 
                 # Execute with escrow:
                 ok = self.execute_route_from_pool(
@@ -8866,6 +9018,50 @@ class SimulationEngine:
                 "route_substitution_requested_tick": int(route_substitution_requested),
                 "route_substitution_found_tick": int(route_substitution_found),
                 "route_substitution_failed_tick": int(route_substitution_failed),
+                "route_repeat_partner_requested_tick": int(
+                    self._route_repeat_partner_requested_tick
+                ),
+                "route_exploration_requested_tick": int(
+                    self._route_exploration_requested_tick
+                ),
+                "route_sticky_used_tick": int(self._route_sticky_used_tick),
+                "route_buddy_direct_used_tick": int(self._route_buddy_direct_used_tick),
+                "route_new_target_search_tick": int(self._route_new_target_search_tick),
+                "route_search_fallback_used_tick": int(
+                    self._route_search_fallback_used_tick
+                ),
+                "route_repeat_partner_share_tick": (
+                    float(self._route_repeat_partner_requested_tick)
+                    / max(
+                        1.0,
+                        float(
+                            self._route_repeat_partner_requested_tick
+                            + self._route_exploration_requested_tick
+                        ),
+                    )
+                ),
+                "route_exploration_share_tick": (
+                    float(self._route_exploration_requested_tick)
+                    / max(
+                        1.0,
+                        float(
+                            self._route_repeat_partner_requested_tick
+                            + self._route_exploration_requested_tick
+                        ),
+                    )
+                ),
+                "route_sticky_share_tick": (
+                    float(self._route_sticky_used_tick) / max(1.0, float(route_requested))
+                ),
+                "route_buddy_direct_share_tick": (
+                    float(self._route_buddy_direct_used_tick) / max(1.0, float(route_requested))
+                ),
+                "route_new_target_search_share_tick": (
+                    float(self._route_new_target_search_tick) / max(1.0, float(route_requested))
+                ),
+                "route_search_fallback_share_tick": (
+                    float(self._route_search_fallback_used_tick) / max(1.0, float(route_requested))
+                ),
                 "noam_routing_swaps_tick": int(self._noam_routing_swaps_tick),
                 "noam_clearing_swaps_tick": int(self._noam_clearing_swaps_tick),
                 "noam_routing_volume_usd_tick": float(self._noam_routing_volume_usd_tick),
