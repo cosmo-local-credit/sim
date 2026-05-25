@@ -60,23 +60,16 @@ within aggregate calibration shares and growth caps.
 Validation, matched no-bond frontier baselines, `frontier-pilot`, and
 `frontier-publication` now use the same current-network routing profile:
 `max_hops=3`, `noam_max_hops=3`, NOAM overlay enabled, NOAM clearing enabled,
-and quarterly NOAM clearing every 13 weekly ticks. `connected_2x` remains
-available through `NETWORK_SCALES=connected_2x`, but it is no longer a
-paper-facing default.
+and quarterly NOAM clearing every 13 weekly ticks.
 
 The current ROLA/frontier-pilot configuration also enables producer primary
 voucher borrowing, voucher-loan fallback, voucher-loan activity boost, and
 bounded consumer/third-party stable purchases of pool-held producer vouchers.
-The earlier 20-run `frontier-rola-regeneration-probe` passed all tested
+The 20-run `frontier-rola-regeneration-probe` passed all tested
 current-scale low-principal cells from `0` to `0.05` principal ratio with
 scheduled bond service paid and voucher-to-voucher circulation preserved. That
-result remains useful model-development evidence, but validation and frontier
-artifacts should be regenerated after the current cohort and private-wallet
-routing update.
-
-Terminology note: `frontier-rola-regeneration-probe` is a historical batch
-name. In the current documentation it means a voucher-capable ROSCA-like
-credit-pool mechanism probe. It starts from a Sarafu-calibrated substrate with
+result is a voucher-capable ROSCA-like credit-pool mechanism probe. It starts
+from a Sarafu-calibrated substrate with
 stable-credit logic, borrowing rights, credit limits, repayment obligations,
 producer voucher identities, pool acceptance rules, and routing. The
 separate no-voucher ROSCA-to-ROLA regeneration counterfactual is future work
@@ -884,16 +877,10 @@ realized productive-credit voucher-deposit share.
 Full-horizon 20-run focused frontier pilot on the `current` network. The
 default grid is principal ratios
 `0.05,0.10,0.15,0.20,0.25`, coupon targets
-`0,0.02,0.04,0.06,0.08,0.10`, and fee-service share `1.0`. `connected_2x` and
-`connected_5x` are no longer part of the main pilot because they are too slow
-for routine paper-facing iteration; use them only as explicit scaling stress
-tests.
+`0,0.02,0.04,0.06,0.08,0.10`, and fee-service share `1.0`.
 
-The previously reviewed focused pilot is a guardrail frontier, not a blanket
-safety or pricing recommendation. It was generated before the current Kenya
-cohort and private-wallet routing update, so treat it as historical pilot
-evidence until the current validation and publication-grid artifacts are
-regenerated.
+The focused pilot is a guardrail frontier, not a blanket safety or pricing
+recommendation.
 
 ```bash
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
@@ -943,6 +930,18 @@ Detached:
 ```bash
 WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-publication
 tail -f analysis/monte_carlo/frontier-publication.log
+```
+
+If the remote server has the sibling `~/RegenBonds` checkout and you want the
+paper artifact path used by the current manuscript workflow, write directly to
+that checkout:
+
+```bash
+SESSION=regenbond-frontier-current-publication \
+LOG_FILE=../RegenBonds/analysis/monte_carlo/frontier-current-publication.log \
+RUNS=100 WORKERS=15 RESUME=0 \
+OUTPUT=../RegenBonds/analysis/monte_carlo/bond_issuer_frontier_current_grid \
+  ./scripts/start_regenbond_batch_tmux.sh frontier-publication
 ```
 
 If interrupted, rerun the same job with `RESUME=1`.
@@ -1213,6 +1212,22 @@ rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-publication.log \
   /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier/
+```
+
+If the remote job wrote to the sibling `~/RegenBonds` checkout with
+`OUTPUT=../RegenBonds/analysis/monte_carlo/bond_issuer_frontier_current_grid`,
+pull the paper-facing current-grid artifacts instead:
+
+```bash
+rsync -avh --progress --exclude '_shards/' --exclude '*.partial.csv' \
+  -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:/root/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_current_grid/ \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_current_grid/
+
+rsync -avh --progress \
+  -e 'ssh -i ~/.ssh/id_ed25519' \
+  root@128.140.120.36:/root/RegenBonds/analysis/monte_carlo/frontier-current-publication.log \
+  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/frontier-current-publication.log
 ```
 
 ### SSH Alias Form

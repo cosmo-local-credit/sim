@@ -16,11 +16,11 @@ latest validation and frontier artifacts.
   can start or receive routes, but routing and NOAM clearing may traverse only
   open lender pools. A producer voucher can be accepted in multiple lender
   pools according to the exported overlap calibration.
-- The previous full no-bond Sarafu engine-validation gate passed before the
-  2026-05-25 cohort and private-wallet routing update: 100 runs, 260 weekly
-  ticks, 28 binding pass rows, zero review rows, and zero failures. Rerun
-  `validation-full` before citing full validation statistics for the current
-  model revision.
+- The current full no-bond Sarafu engine-validation gate passes after the
+  2026-05-25 cohort, private-wallet routing, route-motif accounting, and
+  stable-to-voucher purchase calibration updates: 100 runs, 260 weekly ticks,
+  32 binding pass rows, zero review rows, zero failures, and 22 non-binding
+  diagnostic rows.
 - The current bond-issuer frontier deploys 100% of gross bond principal as
   stable liquidity into eligible lender pools rather than withholding an
   initial reserve-waterfall split.
@@ -32,37 +32,29 @@ latest validation and frontier artifacts.
   producer borrowing can create additional voucher deposits and voucher-source
   activity, but only through aggregate calibration shares and growth caps, and
   always against a matched no-bond baseline.
-- The earlier 20-run `frontier-rola-regeneration-probe` passed all tested
-  current-scale low-principal cells from `0` to `0.05` principal ratio before
-  the current cohort and private-wallet routing update. The current
-  `frontier-pilot` and `frontier-publication` targets use the same primary
-  producer voucher borrowing and bounded lender-held-voucher purchase demand.
-- The probe name is historical. The current run is a voucher-capable
-  ROSCA-like credit-pool mechanism check: it starts from a Sarafu-calibrated
-  substrate with stable-credit logic, borrowing rights, credit limits,
-  repayment obligations, producer voucher identities, lender acceptance rules,
-  and routing. It is not the future no-voucher ROSCA-to-ROLA regeneration
-  counterfactual.
-- The earlier 10-run `frontier-maturity-smoke` passed the pre-pilot full-term
-  check: scheduled bondholder payment cleared, unpaid scheduled claims were
+- The 20-run `frontier-rola-regeneration-probe` passed all tested
+  current-scale low-principal cells from `0` to `0.05` principal ratio. The
+  current `frontier-pilot` and `frontier-publication` targets use the same
+  primary producer voucher borrowing and bounded lender-held-voucher purchase
+  demand.
+- The `frontier-rola-regeneration-probe` is a voucher-capable ROSCA-like
+  credit-pool mechanism check: it starts from a Sarafu-calibrated substrate
+  with stable-credit logic, borrowing rights, credit limits, repayment
+  obligations, producer voucher identities, lender acceptance rules, and
+  routing.
+- The 10-run `frontier-maturity-smoke` passed the full-term check: scheduled
+  bondholder payment cleared, unpaid scheduled claims were
   zero, voucher circulation was preserved, and the `1.25x` available
   service-cash threshold was reported separately as issuer operating/risk
-  headroom. Rerun this after the current calibration/topology change before
-  using it as a paper-facing gate.
-- The current `frontier-pilot` target is the focused grid:
-  `current,connected_2x` network scales; principal ratios
-  `0.05,0.10,0.15,0.20,0.25`; coupon targets
-  `0,0.02,0.04,0.06,0.08,0.10`; fee-service share `1.0`;
-  frontier mode `grid`; refinement rounds `0`.
-- The reviewed focused pilot is historical evidence generated before the
-  current cohort and private-wallet routing update. The paper-facing next step
-  is to rerun validation and then run `frontier-publication`, the 100-run
-  expansion of the same mechanism over `current` and `connected_2x`, 13 coupon
-  targets from `0%` through `12%`, and 10 positive principal ratios from
-  `0.05` through `0.50`.
-- Earlier pilot results that rejected all cells under `p50_service_coverage`
-  and reserve-constrained fee-service mechanics are superseded historical
-  evidence for model debugging, not current frontier evidence.
+  headroom.
+- The current `frontier-pilot` target is the focused current-scale grid:
+  principal ratios `0.05,0.10,0.15,0.20,0.25`; coupon targets
+  `0,0.02,0.04,0.06,0.08,0.10`; fee-service share `1.0`; frontier mode
+  `grid`; refinement rounds `0`.
+- The paper-facing next step is `frontier-publication`, the 100-run expansion
+  of the same mechanism at current scale only: 13 coupon targets from `0%`
+  through `12%`, 10 positive principal ratios from `0.05` through `0.50`, and
+  one matched no-bond baseline.
 - Existing model changes should be judged against the paper's non-extraction frame: issuer responsibility must remain explicit, and local pools must not become hidden guarantors.
 
 ## Calibration-First Revision
@@ -350,8 +342,8 @@ Review tasks:
 
 ## Planned Sensitivity Matrix
 
-Run these only after the model-semantics changes above have been implemented
-and the validation gate is rerun:
+Run these as future sensitivity checks after the current publication frontier
+artifacts are complete and the validation gate remains passing:
 
 - Lower route visibility: reduce NOAM beam width, top-k/top-m, edge caps, or cache.
 - Route-substitution sensitivity: compare fixed-target route success, substituted route success, and degradation versus matched no-bond baselines.
