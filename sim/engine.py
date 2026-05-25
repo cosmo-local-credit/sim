@@ -2466,6 +2466,12 @@ class SimulationEngine:
         v2v = max(0.0, float(getattr(self.cfg, "settlement_motif_voucher_to_voucher_share", 0.0) or 0.0))
         v2s = max(0.0, float(getattr(self.cfg, "settlement_motif_voucher_to_stable_share", 0.0) or 0.0))
         s2v = max(0.0, float(getattr(self.cfg, "settlement_motif_stable_to_voucher_share", 0.0) or 0.0))
+        if (
+            bool(getattr(self.cfg, "settlement_motif_purchase_lane_adjustment_enabled", False))
+            and bool(getattr(self.cfg, "lender_voucher_purchase_demand_enabled", False))
+            and s2v > 0.0
+        ):
+            v2s *= max(0.0, 1.0 - min(1.0, s2v))
         return v2v, v2s, s2v
 
     def _settlement_motif_targets(self) -> Dict[str, float]:
@@ -7189,6 +7195,9 @@ class SimulationEngine:
             float(getattr(self.cfg, "lender_voucher_purchase_stable_to_voucher_value_ratio", 0.563188) or 0.0),
         )
         target_spend_usd = target_score * inventory_share * ratio
+        target_usd = getattr(self.cfg, "lender_voucher_purchase_target_usd", None)
+        if target_usd is not None:
+            target_spend_usd = max(0.0, float(target_usd))
         max_usd = getattr(self.cfg, "lender_voucher_purchase_max_usd", None)
         if max_usd is not None:
             target_spend_usd = min(target_spend_usd, max(0.0, float(max_usd)))

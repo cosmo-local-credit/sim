@@ -152,6 +152,7 @@ class ScenarioConfig:
     settlement_motif_voucher_to_voucher_share: float = 0.0
     settlement_motif_voucher_to_stable_share: float = 0.0
     settlement_motif_stable_to_voucher_share: float = 0.0
+    settlement_motif_purchase_lane_adjustment_enabled: bool = False
 
     # Limits & fees
     default_window_len: int = 10
@@ -202,8 +203,15 @@ class ScenarioConfig:
     lender_voucher_purchase_stable_to_voucher_value_ratio: float = 0.563188
     lender_voucher_purchase_inventory_share: float = 0.05
     lender_voucher_purchase_min_usd: float = 1.0
+    lender_voucher_purchase_target_usd: float | None = None
     lender_voucher_purchase_max_usd: float | None = None
     lender_voucher_purchase_stable_budget_usd_per_tick: float = 0.0
+    lender_voucher_purchase_empirical_window: str = ""
+    lender_voucher_purchase_empirical_s2v_events: float = 0.0
+    lender_voucher_purchase_empirical_s2v_per_week: float = 0.0
+    lender_voucher_purchase_empirical_stable_input_usd: float = 0.0
+    lender_voucher_purchase_avg_stable_spend_usd: float = 0.0
+    lender_voucher_purchase_stable_budget_source: str = "buyer_wallet_replenishment"
     waterfall_alpha_ops_share: float = 0.20
     waterfall_beta_liquidity_share: float = 0.40
     waterfall_gamma_insurance_share: float = 0.40

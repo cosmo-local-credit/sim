@@ -1452,9 +1452,10 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
     )
     empirical_voucher_backing = sum(safe_float(row.get("backing_voucher_inflow")) for row in empirical_targets)
     swap_floor = int(math.ceil(empirical_total_swaps / max(1, int(ticks))))
+    swap_budget = max(60, int(math.ceil(swap_floor * 0.25)))
     setattr(args, f"_{prefix}_swap_floor_per_tick", swap_floor)
     setattr(args, f"_{prefix}_route_requests_per_tick", 1)
-    setattr(args, f"_{prefix}_swap_budget_per_tick", max(60, int(math.ceil(swap_floor * 0.25))))
+    setattr(args, f"_{prefix}_swap_budget_per_tick", swap_budget)
     setattr(args, f"_{prefix}_swap_attempts_max_per_pool", 2)
     setattr(args, f"_{prefix}_swap_sustain_max_extra_attempts", max(1, int(math.ceil(swap_floor * 3.0))))
     setattr(args, f"_{prefix}_swap_sustain_max_rounds", 8)
@@ -1522,12 +1523,14 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
         f"_{prefix}_producer_debt_maturity_recovery_rate",
         max(0.0, min(1.0, debt_maturity_recovery_rate)),
     )
-    current_circulation = (
-        calibration.voucher_circulation_baselines.get("trailing_90d")
-        or calibration.voucher_circulation_baselines.get("trailing_52w")
-        or calibration.voucher_circulation_baselines.get("pool_era")
-        or {}
-    )
+    circulation_window = ""
+    current_circulation: dict[str, float] = {}
+    for candidate_window in ("trailing_90d", "trailing_52w", "pool_era"):
+        candidate_circulation = calibration.voucher_circulation_baselines.get(candidate_window)
+        if candidate_circulation:
+            circulation_window = candidate_window
+            current_circulation = candidate_circulation
+            break
     voucher_to_voucher_count = safe_float(current_circulation.get("voucher_to_voucher_count"))
     voucher_to_stable_count = safe_float(current_circulation.get("voucher_to_stable_count"))
     stable_to_voucher_count = safe_float(current_circulation.get("stable_to_voucher_count"))
@@ -1583,20 +1586,44 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
         max(0.0, min(0.95, producer_credit_request_budget_share)),
     )
     purchase_cash_value = safe_float(
-        calibration.debt_removal_calibration.get("stable_to_voucher_purchase_cash_value")
+        current_circulation.get("stable_to_voucher_stable_input_value")
     )
-    purchase_events = safe_float(
-        calibration.debt_removal_calibration.get("stable_to_voucher_purchase_events")
-    )
+    if purchase_cash_value <= 0.0:
+        purchase_cash_value = safe_float(
+            calibration.debt_removal_calibration.get("stable_to_voucher_purchase_cash_value")
+        )
+    purchase_events = stable_to_voucher_count
+    if purchase_events <= 0.0:
+        purchase_events = safe_float(
+            calibration.debt_removal_calibration.get("stable_to_voucher_purchase_events")
+        )
+    purchase_per_week = safe_float(current_circulation.get("stable_to_voucher_per_week"))
+    purchase_avg_stable_spend = purchase_cash_value / purchase_events if purchase_events > 1e-9 else 0.0
+    if motif_s2v_share > 0.0:
+        purchase_attempts_per_tick = int(math.ceil(swap_budget * motif_s2v_share))
+    elif purchase_events > 0.0:
+        purchase_attempts_per_tick = int(math.ceil(purchase_events / max(1, int(ticks))))
+    else:
+        purchase_attempts_per_tick = 0
+    if purchase_events > 0.0:
+        purchase_attempts_per_tick = max(1, purchase_attempts_per_tick)
+    purchase_budget_per_tick = purchase_attempts_per_tick * purchase_avg_stable_spend
+    setattr(args, f"_{prefix}_lender_voucher_purchase_empirical_window", circulation_window)
+    setattr(args, f"_{prefix}_lender_voucher_purchase_empirical_s2v_events", purchase_events)
+    setattr(args, f"_{prefix}_lender_voucher_purchase_empirical_s2v_per_week", purchase_per_week)
+    setattr(args, f"_{prefix}_lender_voucher_purchase_empirical_stable_input_usd", purchase_cash_value)
+    setattr(args, f"_{prefix}_lender_voucher_purchase_avg_stable_spend_usd", purchase_avg_stable_spend)
+    setattr(args, f"_{prefix}_lender_voucher_purchase_target_usd", purchase_avg_stable_spend)
+    setattr(args, f"_{prefix}_lender_voucher_purchase_max_usd", purchase_avg_stable_spend)
     setattr(
         args,
         f"_{prefix}_lender_voucher_purchase_stable_budget_usd_per_tick",
-        0.0,
+        purchase_budget_per_tick,
     )
     setattr(
         args,
         f"_{prefix}_lender_voucher_purchase_attempts_per_tick",
-        max(1, int(math.ceil(purchase_events / max(1, int(ticks))))) if purchase_events > 0.0 else 0,
+        purchase_attempts_per_tick,
     )
     purchase_external_events = safe_float(
         calibration.stable_actor_demographics.get("stable_to_voucher_external_events")
@@ -1847,6 +1874,7 @@ def scenario_config(
         cfg.swap_attempts_max_per_pool = int(getattr(args, "_validation_swap_attempts_max_per_pool", 2))
         cfg.open_pool_direct_voucher_to_voucher_enabled = True
         cfg.settlement_motif_targeting_enabled = True
+        cfg.settlement_motif_purchase_lane_adjustment_enabled = True
         cfg.settlement_motif_voucher_to_voucher_share = max(
             0.0,
             min(
@@ -2007,6 +2035,46 @@ def scenario_config(
                 )
                 or 0.0
             ),
+        )
+        cfg.lender_voucher_purchase_empirical_window = str(
+            getattr(args, "_validation_lender_voucher_purchase_empirical_window", "") or ""
+        )
+        cfg.lender_voucher_purchase_empirical_s2v_events = max(
+            0.0,
+            float(getattr(args, "_validation_lender_voucher_purchase_empirical_s2v_events", 0.0) or 0.0),
+        )
+        cfg.lender_voucher_purchase_empirical_s2v_per_week = max(
+            0.0,
+            float(getattr(args, "_validation_lender_voucher_purchase_empirical_s2v_per_week", 0.0) or 0.0),
+        )
+        cfg.lender_voucher_purchase_empirical_stable_input_usd = max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "_validation_lender_voucher_purchase_empirical_stable_input_usd",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        cfg.lender_voucher_purchase_avg_stable_spend_usd = max(
+            0.0,
+            float(getattr(args, "_validation_lender_voucher_purchase_avg_stable_spend_usd", 0.0) or 0.0),
+        )
+        validation_purchase_max_usd = max(
+            0.0,
+            float(getattr(args, "_validation_lender_voucher_purchase_max_usd", 0.0) or 0.0),
+        )
+        validation_purchase_target_usd = max(
+            0.0,
+            float(getattr(args, "_validation_lender_voucher_purchase_target_usd", 0.0) or 0.0),
+        )
+        cfg.lender_voucher_purchase_target_usd = (
+            validation_purchase_target_usd if validation_purchase_target_usd > 0.0 else None
+        )
+        cfg.lender_voucher_purchase_max_usd = (
+            validation_purchase_max_usd if validation_purchase_max_usd > 0.0 else None
         )
         cfg.consumer_stable_source_bias = 0.25
         cfg.producer_stable_source_bias = 0.05
@@ -2306,11 +2374,52 @@ def scenario_config(
             0.0,
             float(configured_purchase_budget or 0.0),
         )
+        cfg.lender_voucher_purchase_empirical_window = str(
+            getattr(args, "_frontier_lender_voucher_purchase_empirical_window", "") or ""
+        )
+        cfg.lender_voucher_purchase_empirical_s2v_events = factor * max(
+            0.0,
+            float(getattr(args, "_frontier_lender_voucher_purchase_empirical_s2v_events", 0.0) or 0.0),
+        )
+        cfg.lender_voucher_purchase_empirical_s2v_per_week = factor * max(
+            0.0,
+            float(getattr(args, "_frontier_lender_voucher_purchase_empirical_s2v_per_week", 0.0) or 0.0),
+        )
+        cfg.lender_voucher_purchase_empirical_stable_input_usd = factor * max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "_frontier_lender_voucher_purchase_empirical_stable_input_usd",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        cfg.lender_voucher_purchase_avg_stable_spend_usd = max(
+            0.0,
+            float(getattr(args, "_frontier_lender_voucher_purchase_avg_stable_spend_usd", 0.0) or 0.0),
+        )
+        frontier_purchase_max_usd = max(
+            0.0,
+            float(getattr(args, "_frontier_lender_voucher_purchase_max_usd", 0.0) or 0.0),
+        )
+        frontier_purchase_target_usd = max(
+            0.0,
+            float(getattr(args, "_frontier_lender_voucher_purchase_target_usd", 0.0) or 0.0),
+        )
+        cfg.lender_voucher_purchase_target_usd = (
+            frontier_purchase_target_usd if frontier_purchase_target_usd > 0.0 else None
+        )
+        cfg.lender_voucher_purchase_max_usd = (
+            frontier_purchase_max_usd if frontier_purchase_max_usd > 0.0 else None
+        )
         cfg.liquidity_mandate_mode = "community_deficit_then_lender"
         cfg.route_substitution_enabled = True
         cfg.route_substitution_max_alternatives = 3
         cfg.open_pool_direct_voucher_to_voucher_enabled = True
         cfg.settlement_motif_targeting_enabled = True
+        cfg.settlement_motif_purchase_lane_adjustment_enabled = True
         cfg.settlement_motif_voucher_to_voucher_share = max(
             0.0,
             min(
@@ -3219,6 +3328,68 @@ def run_one(
         configured_voucher_deposit_share = safe_float(
             getattr(args, f"_{control_prefix}_productive_credit_voucher_deposit_share", 0.0)
         )
+        voucher_purchase_attempts_total = safe_float(
+            latest.get(
+                "voucher_purchase_attempts_total",
+                cumulative_float["voucher_purchase_attempts_tick"],
+            )
+        )
+        voucher_purchase_success_total = (
+            safe_float(
+                latest.get(
+                    "consumer_voucher_purchase_success_total",
+                    cumulative_float["consumer_voucher_purchase_success_tick"],
+                )
+            )
+            + safe_float(
+                latest.get(
+                    "third_party_voucher_purchase_success_total",
+                    cumulative_float["third_party_voucher_purchase_success_tick"],
+                )
+            )
+        )
+        voucher_purchase_no_stable_total = (
+            safe_float(
+                latest.get(
+                    "consumer_voucher_purchase_no_stable_total",
+                    cumulative_float["consumer_voucher_purchase_no_stable_tick"],
+                )
+            )
+            + safe_float(
+                latest.get(
+                    "third_party_voucher_purchase_no_stable_total",
+                    cumulative_float["third_party_voucher_purchase_no_stable_tick"],
+                )
+            )
+        )
+        voucher_purchase_no_route_total = (
+            safe_float(
+                latest.get(
+                    "consumer_voucher_purchase_no_route_total",
+                    cumulative_float["consumer_voucher_purchase_no_route_tick"],
+                )
+            )
+            + safe_float(
+                latest.get(
+                    "third_party_voucher_purchase_no_route_total",
+                    cumulative_float["third_party_voucher_purchase_no_route_tick"],
+                )
+            )
+        )
+        voucher_purchase_no_target_total = (
+            safe_float(
+                latest.get(
+                    "consumer_voucher_purchase_no_target_total",
+                    cumulative_float["consumer_voucher_purchase_no_target_tick"],
+                )
+            )
+            + safe_float(
+                latest.get(
+                    "third_party_voucher_purchase_no_target_total",
+                    cumulative_float["third_party_voucher_purchase_no_target_tick"],
+                )
+            )
+        )
 
         common = {
             "scenario": scenario,
@@ -3326,6 +3497,21 @@ def run_one(
             "configured_settlement_motif_stable_to_voucher_share": safe_float(
                 getattr(cfg, "settlement_motif_stable_to_voucher_share", 0.0)
             ),
+            "configured_settlement_motif_purchase_lane_adjustment_enabled": int(
+                bool(getattr(cfg, "settlement_motif_purchase_lane_adjustment_enabled", False))
+            ),
+            "configured_effective_ordinary_settlement_motif_voucher_to_stable_share": (
+                safe_float(getattr(cfg, "settlement_motif_voucher_to_stable_share", 0.0))
+                * (
+                    1.0
+                    - safe_float(getattr(cfg, "settlement_motif_stable_to_voucher_share", 0.0))
+                )
+                if (
+                    bool(getattr(cfg, "settlement_motif_purchase_lane_adjustment_enabled", False))
+                    and bool(getattr(cfg, "lender_voucher_purchase_demand_enabled", False))
+                )
+                else safe_float(getattr(cfg, "settlement_motif_voucher_to_stable_share", 0.0))
+            ),
             "configured_lender_voucher_purchase_demand_enabled": int(
                 bool(getattr(cfg, "lender_voucher_purchase_demand_enabled", False))
             ),
@@ -3340,6 +3526,36 @@ def run_one(
             ),
             "configured_lender_voucher_purchase_stable_budget_usd_per_tick": safe_float(
                 getattr(cfg, "lender_voucher_purchase_stable_budget_usd_per_tick", 0.0)
+            ),
+            "configured_lender_voucher_purchase_target_usd": (
+                ""
+                if getattr(cfg, "lender_voucher_purchase_target_usd", None) is None
+                else safe_float(getattr(cfg, "lender_voucher_purchase_target_usd", 0.0))
+            ),
+            "configured_lender_voucher_purchase_max_usd": (
+                ""
+                if getattr(cfg, "lender_voucher_purchase_max_usd", None) is None
+                else safe_float(getattr(cfg, "lender_voucher_purchase_max_usd", 0.0))
+            ),
+            "configured_lender_voucher_purchase_empirical_window": getattr(
+                cfg, "lender_voucher_purchase_empirical_window", ""
+            ),
+            "configured_lender_voucher_purchase_empirical_s2v_events": safe_float(
+                getattr(cfg, "lender_voucher_purchase_empirical_s2v_events", 0.0)
+            ),
+            "configured_lender_voucher_purchase_empirical_s2v_per_week": safe_float(
+                getattr(cfg, "lender_voucher_purchase_empirical_s2v_per_week", 0.0)
+            ),
+            "configured_lender_voucher_purchase_empirical_stable_input_usd": safe_float(
+                getattr(cfg, "lender_voucher_purchase_empirical_stable_input_usd", 0.0)
+            ),
+            "configured_lender_voucher_purchase_avg_stable_spend_usd": safe_float(
+                getattr(cfg, "lender_voucher_purchase_avg_stable_spend_usd", 0.0)
+            ),
+            "configured_lender_voucher_purchase_stable_budget_source": getattr(
+                cfg,
+                "lender_voucher_purchase_stable_budget_source",
+                "buyer_wallet_replenishment",
             ),
             "configured_producer_voucher_overlap_mode": getattr(
                 cfg, "producer_voucher_overlap_mode", "single_lender"
@@ -4142,6 +4358,18 @@ def run_one(
             "lender_voucher_purchase_stable_budget_onramp_usd_total": latest.get(
                 "lender_voucher_purchase_stable_budget_onramp_usd_total",
                 cumulative_float["lender_voucher_purchase_stable_budget_onramp_usd_tick"],
+            ),
+            "voucher_purchase_success_rate_total": (
+                voucher_purchase_success_total / max(1.0, voucher_purchase_attempts_total)
+            ),
+            "voucher_purchase_no_stable_share_total": (
+                voucher_purchase_no_stable_total / max(1.0, voucher_purchase_attempts_total)
+            ),
+            "voucher_purchase_no_route_share_total": (
+                voucher_purchase_no_route_total / max(1.0, voucher_purchase_attempts_total)
+            ),
+            "voucher_purchase_no_target_share_total": (
+                voucher_purchase_no_target_total / max(1.0, voucher_purchase_attempts_total)
             ),
             "consumer_voucher_purchase_stable_budget_onramp_usd": latest.get(
                 "consumer_voucher_purchase_stable_budget_onramp_usd_tick", 0.0

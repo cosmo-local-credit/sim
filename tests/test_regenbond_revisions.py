@@ -804,6 +804,34 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertGreater(engine._stable_onramp_usd_tick, 0.0)
         self.assertGreaterEqual(consumer_pool.vault.get(stable_id), consumer_pool.policy.min_stable_reserve)
 
+    def test_voucher_purchase_budget_is_private_buyer_wallet_replenishment(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_consumers=1,
+                max_pools=4,
+                lender_voucher_purchase_demand_enabled=True,
+                lender_voucher_purchase_stable_budget_usd_per_tick=5.0,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        consumer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "consumer")
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        consumer_before = consumer_pool.vault.get(stable_id)
+        lender_before = lender_pool.vault.get(stable_id)
+        engine._lender_voucher_purchase_stable_budget_remaining_usd_tick = 5.0
+
+        applied = engine._apply_voucher_purchase_stable_budget(
+            "consumer",
+            consumer_pool,
+            3.0,
+        )
+
+        self.assertAlmostEqual(applied, 3.0)
+        self.assertAlmostEqual(consumer_pool.vault.get(stable_id), consumer_before + 3.0)
+        self.assertAlmostEqual(lender_pool.vault.get(stable_id), lender_before)
+        self.assertAlmostEqual(engine._consumer_voucher_purchase_stable_budget_onramp_usd_tick, 3.0)
+        self.assertAlmostEqual(engine._lender_voucher_purchase_stable_budget_onramp_usd_tick, 3.0)
+
     def test_snapshot_reports_lender_stable_available_above_reserve(self):
         engine = SimulationEngine(small_config())
         stable_id = engine.cfg.stable_symbol
@@ -1055,6 +1083,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertTrue(cfg.noam_overlay_enabled)
         self.assertTrue(cfg.noam_clearing_enabled)
         self.assertEqual(cfg.noam_clearing_stride_ticks, 13)
+        self.assertTrue(cfg.settlement_motif_purchase_lane_adjustment_enabled)
         self.assertTrue(cfg.noam_clearing_budget_scale_by_stride)
 
         baseline_args = argparse.Namespace(**vars(args))
@@ -1195,6 +1224,39 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(
             args._validation_settlement_motif_stable_to_voucher_share,
             0.053786,
+        )
+        self.assertEqual(
+            args._validation_lender_voucher_purchase_empirical_window,
+            "trailing_90d",
+        )
+        self.assertAlmostEqual(
+            args._validation_lender_voucher_purchase_empirical_s2v_events,
+            260.0,
+        )
+        self.assertAlmostEqual(
+            args._validation_lender_voucher_purchase_empirical_s2v_per_week,
+            20.0,
+        )
+        self.assertAlmostEqual(
+            args._validation_lender_voucher_purchase_empirical_stable_input_usd,
+            2008.61454,
+        )
+        self.assertEqual(args._validation_lender_voucher_purchase_attempts_per_tick, 6)
+        self.assertAlmostEqual(
+            args._validation_lender_voucher_purchase_avg_stable_spend_usd,
+            2008.61454 / 260.0,
+        )
+        self.assertAlmostEqual(
+            args._validation_lender_voucher_purchase_target_usd,
+            2008.61454 / 260.0,
+        )
+        self.assertAlmostEqual(
+            args._validation_lender_voucher_purchase_max_usd,
+            2008.61454 / 260.0,
+        )
+        self.assertAlmostEqual(
+            args._validation_lender_voucher_purchase_stable_budget_usd_per_tick,
+            6 * (2008.61454 / 260.0),
         )
 
     def test_calibration_loader_reads_overlap_distribution(self):
