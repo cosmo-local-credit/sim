@@ -1,0 +1,8 @@
+metric,value,claim_boundary
+included_pools,73,Kenya KES/KSH community lending pools after exact non-community and minimum active-swap-history exclusions. Raw included-pool addresses are retained only in included_pool_cohort.local.csv.
+included_accepted_voucher_members,1247,Members are represented by accepted/listed or active KES/KSH voucher tokens. Raw included-pool addresses are retained only in included_pool_cohort.local.csv.
+excluded_insufficient_swap_history,23,Raw pool addresses are retained only in excluded_pool_cohort.local.csv.
+excluded_named_non_community_pool,12,Raw pool addresses are retained only in excluded_pool_cohort.local.csv.
+excluded_no_pool_activity,19,Raw pool addresses are retained only in excluded_pool_cohort.local.csv.
+excluded_non_kes_or_non_kenya,36,Raw pool addresses are retained only in excluded_pool_cohort.local.csv.
+excluded_outside_kenya,189,Raw pool addresses are retained only in excluded_pool_cohort.local.csv.

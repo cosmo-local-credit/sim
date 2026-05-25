@@ -305,6 +305,8 @@ class Pool:
     def can_swap(self, tick: int, asset_in: str, amount_in: float, asset_out: str, amount_out: float) -> Tuple[bool, str]:
         if self.policy.paused:
             return False, "paused"
+        if self.policy.role in ("producer", "consumer"):
+            return False, "private_wallet_not_open"
         if not self.registry.is_listed(asset_in) or not self.registry.is_listed(asset_out):
             return False, "not_listed"
         if self.policy.limits_enabled:

@@ -16,6 +16,7 @@ from scripts.run_regenbond_monte_carlo import (
 from sim.config import ScenarioConfig
 from sim.core import Event, IssuerLedger
 from sim.engine import SimulationEngine
+from sim.router import Hop, RoutePlan
 
 
 def small_config(**overrides):
@@ -95,6 +96,139 @@ class RegenBondRevisionTests(unittest.TestCase):
         metrics = engine.metrics.network_rows[-1]
         self.assertAlmostEqual(metrics["producer_voucher_multi_lender_share"], 1.0)
         self.assertAlmostEqual(metrics["producer_voucher_lender_degree_p50"], 3.0)
+
+    def test_private_wallet_roles_do_not_create_consumer_vouchers(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=3,
+                initial_producers=2,
+                initial_consumers=2,
+                initial_liquidity_providers=0,
+                max_pools=7,
+                producer_voucher_single_lender=False,
+                producer_voucher_overlap_mode="empirical_overlap",
+                producer_voucher_overlap_bucket_weights={"2": 1.0},
+            ),
+            seed=17,
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer_agents = [agent for agent in engine.agents.values() if agent.role == "producer"]
+        consumer_agents = [agent for agent in engine.agents.values() if agent.role == "consumer"]
+
+        for agent in producer_agents:
+            voucher_id = agent.voucher_spec.voucher_id
+            pool = engine.pools[agent.pool_id]
+            self.assertIn(voucher_id, engine.factory.voucher_specs)
+            self.assertTrue(pool.registry.is_listed(stable_id))
+            self.assertTrue(pool.registry.is_listed(voucher_id))
+            self.assertEqual(
+                {
+                    asset_id
+                    for asset_id, policy in pool.registry.listings.items()
+                    if policy.enabled
+                },
+                {stable_id, voucher_id},
+            )
+            self.assertGreater(pool.vault.get(voucher_id), 0.0)
+            self.assertEqual(len(engine._producer_voucher_lender_assignments[voucher_id]), 2)
+
+        for agent in consumer_agents:
+            voucher_id = agent.voucher_spec.voucher_id
+            pool = engine.pools[agent.pool_id]
+            self.assertNotIn(voucher_id, engine.factory.voucher_specs)
+            self.assertNotIn(voucher_id, engine.factory.asset_universe)
+            self.assertTrue(pool.registry.is_listed(stable_id))
+            self.assertEqual(
+                {
+                    asset_id
+                    for asset_id, policy in pool.registry.listings.items()
+                    if policy.enabled
+                },
+                {stable_id},
+            )
+            self.assertFalse(
+                any(asset_id.startswith("VCHR:") for asset_id in pool.vault.inventory)
+            )
+            self.assertAlmostEqual(agent.issuer.issued_total, 0.0)
+
+    def test_private_wallets_are_not_routable_or_noam_venues(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=3,
+                initial_producers=2,
+                initial_consumers=2,
+                initial_liquidity_providers=0,
+                max_pools=7,
+                producer_voucher_single_lender=False,
+                producer_voucher_overlap_mode="empirical_overlap",
+                producer_voucher_overlap_bucket_weights={"2": 1.0},
+            ),
+            seed=23,
+        )
+        private_pool_ids = {
+            pool.pool_id
+            for pool in engine.pools.values()
+            if pool.policy.role in ("producer", "consumer")
+        }
+        self.assertTrue(private_pool_ids)
+
+        for index in (engine.accept_index, engine.offer_index):
+            for pool_ids in index.values():
+                self.assertTrue(private_pool_ids.isdisjoint(pool_ids))
+                self.assertTrue(
+                    all(engine.pools[pool_id].policy.role == "lender" for pool_id in pool_ids)
+                )
+
+        engine._refresh_noam_working_set()
+        for pool_ids in engine._noam_top_pools.values():
+            self.assertTrue(private_pool_ids.isdisjoint(pool_ids))
+            self.assertTrue(
+                all(engine.pools[pool_id].policy.role == "lender" for pool_id in pool_ids)
+            )
+        for pool_id, _asset_id in engine._noam_top_out:
+            self.assertNotIn(pool_id, private_pool_ids)
+            self.assertEqual(engine.pools[pool_id].policy.role, "lender")
+
+    def test_execute_route_rejects_private_wallet_hop_and_refunds_source(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=1,
+                initial_liquidity_providers=0,
+                max_pools=3,
+            ),
+            seed=29,
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        consumer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "consumer")
+        voucher_id = producer.voucher_spec.voucher_id
+
+        if consumer_pool.vault.get(stable_id) < 10.0:
+            engine._vault_add(consumer_pool, stable_id, 10.0, "test_seed", "test")
+        stable_before = consumer_pool.vault.get(stable_id)
+        voucher_before = producer_pool.vault.get(voucher_id)
+
+        plan = RoutePlan(
+            ok=True,
+            reason="test_private_wallet_hop",
+            hops=[
+                Hop(
+                    pool_id=producer_pool.pool_id,
+                    asset_in=stable_id,
+                    asset_out=voucher_id,
+                    amount_in=10.0,
+                )
+            ],
+        )
+
+        ok = engine.execute_route_from_pool(consumer_pool.pool_id, plan, 10.0)
+
+        self.assertFalse(ok)
+        self.assertAlmostEqual(consumer_pool.vault.get(stable_id), stable_before)
+        self.assertAlmostEqual(producer_pool.vault.get(voucher_id), voucher_before)
 
     def test_producer_loan_diagnostics_capture_live_limit_clipping(self):
         engine = SimulationEngine(

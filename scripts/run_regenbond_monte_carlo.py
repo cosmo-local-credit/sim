@@ -126,6 +126,7 @@ class PoolCalibration:
     active_weeks: float
     swaps_per_active_week: float
     total_users: float
+    accepted_voucher_members: float
     backing_inflow: float
     backing_cash_inflow: float
     backing_voucher_inflow: float
@@ -174,6 +175,7 @@ class Calibration:
     route_substitution_diagnostics: dict[str, float]
     voucher_pool_overlap_calibration: dict[str, float]
     voucher_pool_overlap_distribution: dict[str, float]
+    stable_actor_demographics: dict[str, float]
     unit_normalization: dict[str, float]
 
 
@@ -932,6 +934,9 @@ def load_calibration(calibration_dir: Path) -> Calibration:
                 active_weeks=safe_float(row.get("active_weeks")),
                 swaps_per_active_week=safe_float(row.get("swaps_per_active_week")),
                 total_users=safe_float(row.get("total_users")),
+                accepted_voucher_members=safe_float(
+                    row.get("accepted_voucher_members", row.get("tagged_voucher_tokens", 0.0))
+                ),
                 backing_inflow=safe_float(row.get("backing_inflow")),
                 backing_cash_inflow=safe_float(
                     row.get("backing_cash_inflow", row.get("backing_inflow", 0.0))
@@ -1082,6 +1087,7 @@ def load_calibration(calibration_dir: Path) -> Calibration:
     route_substitution_diagnostics = load_metric_table("route_substitution_diagnostics.csv")
     voucher_pool_overlap_calibration = load_metric_table("voucher_pool_overlap_calibration.csv")
     voucher_pool_overlap_distribution = load_overlap_distribution()
+    stable_actor_demographics = load_metric_table("stable_actor_demographics.csv")
     unit_normalization = load_metric_table("unit_normalization_calibration.csv")
 
     return Calibration(
@@ -1106,6 +1112,7 @@ def load_calibration(calibration_dir: Path) -> Calibration:
         route_substitution_diagnostics=route_substitution_diagnostics,
         voucher_pool_overlap_calibration=voucher_pool_overlap_calibration,
         voucher_pool_overlap_distribution=voucher_pool_overlap_distribution,
+        stable_actor_demographics=stable_actor_demographics,
         unit_normalization=unit_normalization,
     )
 
@@ -1207,13 +1214,47 @@ def scaled_tier_counts(calibration: Calibration, factor: float) -> dict[str, int
     return counts
 
 
-def role_counts_for_pool_count(pool_count: int) -> dict[str, int]:
-    producer_count = int(round(pool_count * 100.0 / 124.0))
-    lender_count = max(1, int(round(pool_count * 4.0 / 124.0)))
-    consumer_count = max(0, pool_count - producer_count - lender_count)
-    if consumer_count < 0:
-        producer_count = max(0, producer_count + consumer_count)
-        consumer_count = 0
+def scaled_count(value: float, factor: float) -> int:
+    return max(0, int(round(max(0.0, value) * factor)))
+
+
+def empirical_unique_producer_vouchers(calibration: Calibration) -> float:
+    actor_value = safe_float(
+        calibration.stable_actor_demographics.get("recommended_producer_wallets")
+    )
+    if actor_value > 0.0:
+        return actor_value
+    unique_tokens = safe_float(
+        calibration.voucher_pool_overlap_calibration.get("total_voucher_tokens")
+    )
+    if unique_tokens > 0.0:
+        return unique_tokens
+    return sum(pool.accepted_voucher_members for pool in calibration.pool_rows)
+
+
+def role_counts_for_calibration(calibration: Calibration, factor: float) -> dict[str, int]:
+    """Map empirical cohort demographics onto explicit runtime wallets.
+
+    The empirical cohort rows are community lending pools. Unique KES/KSh
+    voucher tokens are modeled as producer/member wallets, accepted-voucher
+    counts remain pool membership slots, and active interactors are modeled as
+    consumer wallets with private stable balances. When the stable-actor
+    demographics file is available, consumer wallets are external
+    non-producer stable-side users rather than all active interactors.
+    """
+    lender_count = scaled_count(len(calibration.pool_rows), factor)
+    producer_count = scaled_count(empirical_unique_producer_vouchers(calibration), factor)
+    empirical_consumer_wallets = safe_float(
+        calibration.stable_actor_demographics.get("recommended_consumer_wallets")
+    )
+    if empirical_consumer_wallets <= 0.0:
+        empirical_consumer_wallets = sum(pool.total_users for pool in calibration.pool_rows)
+    consumer_count = scaled_count(
+        empirical_consumer_wallets,
+        factor,
+    )
+    if calibration.pool_rows and lender_count <= 0:
+        lender_count = 1
     return {
         "lenders": lender_count,
         "producers": producer_count,
@@ -1235,7 +1276,7 @@ def apply_network_context(
     if factor is None:
         raise ValueError(f"Unknown network scale: {network_scale}")
     target_counts = scaled_tier_counts(calibration, factor)
-    role_counts = role_counts_for_pool_count(sum(target_counts.values()))
+    role_counts = role_counts_for_calibration(calibration, factor)
     args._target_tier_counts = target_counts
     args._current_network_scale = network_scale
     args._current_scale_factor = factor
@@ -1246,6 +1287,23 @@ def apply_network_context(
     args._current_initial_lenders = role_counts["lenders"]
     args._current_initial_producers = role_counts["producers"]
     args._current_initial_consumers = role_counts["consumers"]
+    args._current_empirical_lender_pool_templates = len(calibration.pool_rows)
+    args._current_empirical_unique_producer_vouchers = empirical_unique_producer_vouchers(calibration)
+    args._current_empirical_accepted_voucher_members = sum(
+        pool.accepted_voucher_members for pool in calibration.pool_rows
+    )
+    args._current_empirical_active_interactors = sum(
+        pool.total_users for pool in calibration.pool_rows
+    )
+    args._current_empirical_unique_pool_interactor_addresses = safe_float(
+        calibration.stable_actor_demographics.get("unique_pool_interactor_addresses")
+    )
+    args._current_empirical_stable_external_nonproducer_users = safe_float(
+        calibration.stable_actor_demographics.get("stable_external_nonproducer_users")
+    )
+    args._current_empirical_producer_stable_users = safe_float(
+        calibration.stable_actor_demographics.get("producer_stable_users")
+    )
 
 
 def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Calibration, ticks: int, prefix: str) -> None:
@@ -1514,7 +1572,7 @@ def scenario_config(
         if stable_backing_total > 0.0:
             cfg.historical_stable_backing_tick = 1
             cfg.historical_stable_backing_total_usd = stable_backing_total
-            cfg.historical_stable_backing_roles = ("producer", "consumer")
+            cfg.historical_stable_backing_roles = ("lender",)
         voucher_backing_total = float(
             getattr(args, "_validation_historical_voucher_backing_total_usd", 0.0)
         )
@@ -1522,6 +1580,11 @@ def scenario_config(
             cfg.producer_deposits_enabled = True
             cfg.historical_voucher_backing_tick = 1
             cfg.historical_voucher_backing_total_usd = voucher_backing_total
+        cfg.producer_voucher_overlap_mode = "empirical_overlap"
+        cfg.producer_voucher_single_lender = False
+        cfg.producer_voucher_overlap_bucket_weights = dict(
+            getattr(args, "_validation_voucher_pool_overlap_distribution", {}) or {}
+        )
         cfg.consumer_stable_source_bias = 0.25
         cfg.producer_stable_source_bias = 0.05
         cfg.producer_consumer_stable_target_bias = 0.0
@@ -1812,7 +1875,7 @@ def scenario_config(
         if historical_cash_backing_total > 0.0:
             cfg.historical_stable_backing_tick = 1
             cfg.historical_stable_backing_total_usd = historical_cash_backing_total * factor
-            cfg.historical_stable_backing_roles = ("producer", "consumer")
+            cfg.historical_stable_backing_roles = ("lender",)
         historical_voucher_backing_total = float(
             getattr(args, "_frontier_historical_voucher_backing_total_usd", 0.0)
         )
@@ -1876,6 +1939,16 @@ def active_pool_ids(engine: SimulationEngine, *, include_clc: bool = False) -> s
     if include_clc and engine.clc_pool_id:
         ids.add(engine.clc_pool_id)
     return ids
+
+
+def calibrated_lender_pool_ids(engine: SimulationEngine) -> set[str]:
+    """Runtime pools corresponding to empirical community lending pools."""
+    ids = {
+        pid
+        for pid, pool in engine.pools.items()
+        if not pool.policy.system_pool and pool.policy.role == "lender"
+    }
+    return ids or active_pool_ids(engine)
 
 
 def graph_metrics(nodes: set[str], edge_weights: dict[tuple[str, str], float], prefix: str) -> dict[str, float]:
@@ -2004,7 +2077,7 @@ def ensure_pool_tiers(
     calibration: Calibration,
     target_tier_counts: dict[str, int] | None = None,
 ) -> None:
-    pool_ids = sorted(active_pool_ids(engine))
+    pool_ids = sorted(calibrated_lender_pool_ids(engine))
     if target_tier_counts:
         assigned_counts = Counter(tiers.get(pid) for pid in pool_ids if pid in tiers)
         deck = []
@@ -2023,7 +2096,7 @@ def ensure_pool_tiers(
 
 
 def tier_mix(engine: SimulationEngine, tiers: dict[str, str]) -> dict[str, float]:
-    counts = Counter(tiers.get(pid, "moderate") for pid in active_pool_ids(engine))
+    counts = Counter(tiers.get(pid, "moderate") for pid in calibrated_lender_pool_ids(engine))
     total = sum(counts.values()) or 1
     return {tier: counts.get(tier, 0) / total for tier in ("strong", "moderate", "weak")}
 
@@ -2290,9 +2363,11 @@ def unit_value_diagnostics(engine: SimulationEngine, args: argparse.Namespace) -
     consumer = next((agent for agent in engine.agents.values() if agent.role == "consumer"), None)
 
     def voucher_value(agent) -> tuple[str, float]:
-        if agent is None:
+        if agent is None or getattr(agent, "role", "") != "producer":
             return "", 0.0
         voucher_id = agent.voucher_spec.voucher_id
+        if voucher_id not in engine.factory.voucher_specs:
+            return "", 0.0
         pool = engine.pools.get(agent.pool_id)
         value = pool.values.get_value(voucher_id) if pool is not None else 0.0
         if value <= 0.0:
@@ -2658,6 +2733,29 @@ def run_one(
             "certified_backing_capacity_usd": getattr(args, "_current_certified_capacity_usd", 0.0),
             "kes_per_usd": getattr(args, "_calibration_kes_per_usd", 0.0),
             "voucher_unit_value_usd": getattr(args, "_voucher_unit_value_usd", 1.0),
+            "configured_lender_pools": getattr(args, "_current_initial_lenders", 0),
+            "configured_producer_wallets": getattr(args, "_current_initial_producers", 0),
+            "configured_consumer_wallets": getattr(args, "_current_initial_consumers", 0),
+            "empirical_lender_pool_templates": getattr(args, "_current_empirical_lender_pool_templates", 0),
+            "empirical_unique_producer_vouchers": getattr(
+                args, "_current_empirical_unique_producer_vouchers", 0
+            ),
+            "empirical_accepted_voucher_members": getattr(
+                args, "_current_empirical_accepted_voucher_members", 0
+            ),
+            "empirical_accepted_voucher_member_slots": getattr(
+                args, "_current_empirical_accepted_voucher_members", 0
+            ),
+            "empirical_active_interactors": getattr(args, "_current_empirical_active_interactors", 0),
+            "empirical_unique_pool_interactor_addresses": getattr(
+                args, "_current_empirical_unique_pool_interactor_addresses", 0
+            ),
+            "empirical_stable_external_nonproducer_users": getattr(
+                args, "_current_empirical_stable_external_nonproducer_users", 0
+            ),
+            "empirical_producer_stable_users": getattr(
+                args, "_current_empirical_producer_stable_users", 0
+            ),
             "configured_producer_stable_deposit_rate_per_month": safe_float(
                 getattr(args, f"_{control_prefix}_producer_stable_deposit_rate_per_month", 0.0)
             ),
@@ -3614,16 +3712,19 @@ def run_one(
 
     final = bond_rows[-1] if bond_rows else {}
     final_network = network_rows[-1] if network_rows else {}
-    tier_counts = Counter(pool_tiers.get(pid, "moderate") for pid in active_pool_ids(engine))
+    tier_counts = Counter(pool_tiers.get(pid, "moderate") for pid in calibrated_lender_pool_ids(engine))
     tier_swap_counts = Counter(
-        pool_tiers.get(pid, "moderate") for pid, count in pool_swap_counts.items() for _ in range(int(count))
+        pool_tiers[pid]
+        for pid, count in pool_swap_counts.items()
+        if pid in pool_tiers
+        for _ in range(int(count))
     )
     report_by_tier = {}
     for tier in TIER_ORDER:
         counts = [
             count
             for pid, count in pool_swap_counts.items()
-            if pool_tiers.get(pid, "moderate") == tier
+            if pool_tiers.get(pid) == tier
         ]
         report_by_tier[tier], _ = expected_report_exposure_from_counts(calibration, counts)
     total_active_pools = sum(tier_counts.values()) or 1

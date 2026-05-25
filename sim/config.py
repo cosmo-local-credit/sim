@@ -122,8 +122,8 @@ class ScenarioConfig:
     noam_clearing_budget_usd: float = 25000.0
     noam_clearing_budget_share: float = 0.01
     noam_clearing_min_cycle_value_usd: float = 1.0
-    noam_clearing_lenders_only: bool = False
-    noam_clearing_include_clc: bool = True
+    noam_clearing_lenders_only: bool = True
+    noam_clearing_include_clc: bool = False
     noam_clearing_budget_scale_by_stride: bool = True
     noam_clearing_lender_edge_bonus: float = 0.5
     noam_success_ema_alpha: float = 0.2

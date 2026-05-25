@@ -36,6 +36,14 @@ pipeline. That pipeline uses `RegenBonds/cleaned_data/data/csv` and should be
 run in the private research workspace, then exported into this repo as the
 public-safe `analysis/sarafu_calibration/` bundle before pushing.
 
+The current exported calibration is the Kenya KES/KSh community lending-pool
+cohort: `73` open lender pools, `996` unique producer-voucher wallets,
+`1,247` accepted-voucher member slots, and `462` recommended external
+non-producer consumer wallets. Stable-side pool interaction has `950`
+address-pool slots; that is an interaction count, not the consumer-wallet
+count. Producer and consumer wallets are private source/sink wallets, while
+open routing and NOAM clearing venues are lender pools only.
+
 Current paper-facing interpretation uses `sarafu_engine_validation` as the
 no-bond gate and `bond_issuer_frontier` as the issuer/lender-pool frontier.
 The frontier deploys gross bond principal directly into eligible lender pools,
@@ -48,10 +56,12 @@ within aggregate calibration shares and growth caps.
 The current ROLA/frontier-pilot configuration also enables producer primary
 voucher borrowing, voucher-loan fallback, voucher-loan activity boost, and
 bounded consumer/third-party stable purchases of lender-held producer vouchers.
-The 20-run `frontier-rola-regeneration-probe` passed all tested current-scale
-low-principal cells from `0` to `0.05` principal ratio with scheduled bond
-service paid and voucher-to-voucher circulation preserved. The normal
-`frontier-pilot` target is now wired to use the same mechanism.
+The earlier 20-run `frontier-rola-regeneration-probe` passed all tested
+current-scale low-principal cells from `0` to `0.05` principal ratio with
+scheduled bond service paid and voucher-to-voucher circulation preserved. That
+result remains useful model-development evidence, but validation and frontier
+artifacts should be regenerated after the current cohort and private-wallet
+routing update.
 
 Terminology note: `frontier-rola-regeneration-probe` is a historical batch
 name. In the current documentation it means a voucher-capable ROSCA-like
@@ -143,8 +153,10 @@ WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-pilot
 ```
 
 Run `frontier-pilot` only after `frontier-maturity-smoke` and
-`frontier-rola-regeneration-probe` pass. Run `frontier-publication` only after the
-revised pilot is reviewed.
+`frontier-rola-regeneration-probe` pass. Run `frontier-publication` after the
+validation gate and pilot checks look correct. `frontier-publication` is the
+paper-facing expansion of the `frontier-pilot` setup used so far, with a denser
+coupon/principal grid.
 
 Run batches from the repo root. The wrapper defaults to parallel, resumable
 execution:
@@ -195,7 +207,8 @@ Recommended gate:
 7. Run `frontier-pilot`; this target now enables the same ROLA/purchase
    mechanism by default.
 8. Run `frontier-publication` only after validation and pilot outputs look
-   correct.
+   correct. `frontier-publication` uses the same paper `frontier-pilot` setup
+   with more coupon/principal cells.
 
 After any calibration, accounting, routing, cashflow, or credit-behavior model
 change, rerun all validation jobs before treating frontier outputs as
@@ -218,7 +231,7 @@ is set.
 | `frontier-feedback-probe` | Focused capacity-feedback principal probe | 2 runs, 260 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_feedback_probe/` | `analysis/monte_carlo/frontier-feedback-probe.log` |
 | `frontier-rola-regeneration-probe` | Current-scale low-principal ROLA/voucher-purchase probe | 5 runs by default, 260 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/` | `analysis/monte_carlo/frontier-rola-regeneration-probe.log` |
 | `frontier-pilot` | Full-horizon focused frontier pilot | 20 runs, 260 ticks, `current` and `connected_2x` | `analysis/monte_carlo/bond_issuer_frontier_pilot/` | `analysis/monte_carlo/frontier-pilot.log` |
-| `frontier-publication` | Paper-facing focused frontier grid | 100 runs, 260 ticks, `current` and `connected_2x` | `analysis/monte_carlo/bond_issuer_frontier/` | `analysis/monte_carlo/frontier-publication.log` |
+| `frontier-publication` | 100-run paper-facing expansion of the `frontier-pilot` setup with a denser coupon/principal grid | 100 runs, 260 ticks, `current` and `connected_2x`, 260 positive-principal cells | `analysis/monte_carlo/bond_issuer_frontier/` | `analysis/monte_carlo/frontier-publication.log` |
 
 `frontier-*` jobs read the full validation gate at
 `analysis/monte_carlo/engine_validation/engine_validation_summary.csv`. If it
@@ -774,12 +787,11 @@ Full-horizon 20-run focused frontier pilot across `current` and
 longer part of the main pilot because it is too slow for routine iteration;
 use it only as an explicit scaling stress test.
 
-The reviewed focused pilot is a guardrail frontier, not a blanket safety or
-pricing recommendation. Its strongest paper-facing cells are those where
-scheduled repayment clears, voucher-to-voucher volume increases versus the
-matched no-bond baseline, and issuer operating/risk headroom remains at least
-`1.25x`. In the current reviewed artifact this stricter subset contains
-`38 / 60` positive-principal cells.
+The previously reviewed focused pilot is a guardrail frontier, not a blanket
+safety or pricing recommendation. It was generated before the current Kenya
+cohort and private-wallet routing update, so treat it as historical pilot
+evidence until the current validation and publication-grid artifacts are
+regenerated.
 
 ```bash
 ./scripts/run_regenbond_remote_batch.sh frontier-pilot
@@ -812,7 +824,13 @@ cat analysis/monte_carlo/bond_issuer_frontier_pilot/paper_integration_notes.md
 ### `frontier-publication`
 
 Paper-facing frontier grid. Run only after `validation-full` passes and the
-pilot output is acceptable.
+`frontier-pilot` output is acceptable. This job is the 100-run expansion of the
+`frontier-pilot` setup used so far in the paper: same `current` and
+`connected_2x` scales, but a denser coupon/principal grid. It excludes
+`principal_ratio=0` because matched no-bond baselines are generated separately,
+and tests 13 annual coupon targets from 0% through 12% against 10 positive
+principal ratios from 0.05 through 0.50. The resulting grid has 260 frontier
+cells, plus built-in no-bond baselines.
 
 ```bash
 ./scripts/run_regenbond_remote_batch.sh frontier-publication
@@ -821,9 +839,11 @@ pilot output is acceptable.
 Detached:
 
 ```bash
-./scripts/start_regenbond_batch_tmux.sh frontier-publication
+WORKERS=15 RESUME=0 ./scripts/start_regenbond_batch_tmux.sh frontier-publication
 tail -f analysis/monte_carlo/frontier-publication.log
 ```
+
+If interrupted, rerun the same job with `RESUME=1`.
 
 Inspect:
 
@@ -833,6 +853,27 @@ head analysis/monte_carlo/bond_issuer_frontier/safe_injection_frontier.csv
 head analysis/monte_carlo/bond_issuer_frontier/network_scaling_summary.csv
 cat analysis/monte_carlo/bond_issuer_frontier/paper_integration_notes.md
 ```
+
+Check the grid dimensions:
+
+```bash
+python3 - <<'PY'
+import csv
+from pathlib import Path
+
+out = Path("analysis/monte_carlo/bond_issuer_frontier")
+rows = list(csv.DictReader((out / "bond_issuer_frontier_safety.csv").open()))
+
+print("safety rows:", len(rows))
+print("scales:", sorted({r["network_scale"] for r in rows}))
+print("coupon count:", len({r["coupon_target_annual"] for r in rows}))
+print("principal ratio count:", len({r["principal_ratio"] for r in rows}))
+print("min principal ratio:", min(float(r["principal_ratio"]) for r in rows))
+PY
+```
+
+Expected: 260 safety rows, scales `current` and `connected_2x`, 13 coupon
+targets, 10 principal ratios, and minimum principal ratio 0.05.
 
 ## Sensitivity Runs
 

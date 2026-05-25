@@ -38,6 +38,8 @@ COPY_FILES = (
     "voucher_pool_overlap_distribution.csv",
     "impact_projection_by_activity.csv",
     "report_quality_counts.csv",
+    "pool_cohort_exclusion_summary.csv",
+    "stable_actor_demographics.csv",
 )
 
 POOL_COLUMNS = (
@@ -49,6 +51,7 @@ POOL_COLUMNS = (
     "active_weeks",
     "swaps_per_active_week",
     "total_users",
+    "accepted_voucher_members",
     "backing_inflow",
     "backing_cash_inflow",
     "backing_voucher_inflow",
@@ -96,8 +99,38 @@ def copy_public_csvs(source: Path, output: Path) -> None:
         write_csv(output / name, tuple(rows[0].keys()), rows)
 
 
-def write_readme(output: Path) -> None:
-    text = """# Public Sarafu Calibration Bundle
+def _metric_value(source: Path, filename: str, metric: str, default: str = "n/a") -> str:
+    path = source / filename
+    if not path.exists():
+        return default
+    for row in read_csv(path):
+        if row.get("metric") == metric:
+            value = row.get("value", default)
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return str(value)
+            if abs(number - round(number)) < 1e-9:
+                return str(int(round(number)))
+            return f"{number:.6g}"
+    return default
+
+
+def write_readme(source: Path, output: Path) -> None:
+    cohort_pools = _metric_value(source, "pool_cohort_exclusion_summary.csv", "included_pools")
+    accepted_members = _metric_value(
+        source, "pool_cohort_exclusion_summary.csv", "included_accepted_voucher_members"
+    )
+    producer_wallets = _metric_value(
+        source, "stable_actor_demographics.csv", "unique_producer_voucher_wallets"
+    )
+    consumer_wallets = _metric_value(
+        source, "stable_actor_demographics.csv", "recommended_consumer_wallets"
+    )
+    stable_pool_interactor_slots = _metric_value(
+        source, "stable_actor_demographics.csv", "pool_interactor_address_slots"
+    )
+    text = f"""# Public Sarafu Calibration Bundle
 
 This directory contains the aggregate, privacy-safe calibration inputs needed
 to run the RegenBond Monte Carlo workflows from a standalone public clone of
@@ -107,10 +140,28 @@ The per-pool calibration file is anonymized into synthetic template rows. It
 does not include raw transactions, addresses, report text, pool labels, or pool
 IDs. The simulator uses these templates only for tier mix, activity rates,
 repayment/return priors, backing-liquidity scale, and impact-report exposure.
-The paper calibration cohort is Kenyan KSh/KES individual voucher pools:
-cash/stable tokens and KSh/KES-denominated individual vouchers are retained,
-while USD/non-KSh/global voucher systems are excluded from the public paper
-cohort or handled separately in private review files.
+The paper calibration cohort is Kenyan KSh/KES community lending pools. Pools
+must have KSh/KES accepted-voucher membership evidence, must not be identified
+as non-Kenya by metadata, must not be in the exact named non-community
+exclusion list, and must have at least four distinct active swap weeks.
+The current exported cohort has {cohort_pools} lender-pool templates,
+{accepted_members} accepted-voucher member slots, {producer_wallets} unique
+producer-voucher wallets, and {consumer_wallets} recommended external
+non-producer consumer wallets. Stable-side pool interaction has
+{stable_pool_interactor_slots} address-pool slots; this is an interaction
+count, not the consumer-wallet count used by the Monte Carlo topology.
+Accepted voucher counts are exported as `accepted_voucher_members`; these are
+pool membership slots. Unique producer-voucher wallet counts and multi-pool
+membership degree are exported in the voucher-pool overlap calibration. Active
+interactors remain `total_users`. The stable actor demographics file separates
+external non-producer stable-side users from producer addresses that also use
+stable-side interactions. Raw included/excluded pool-address audits remain
+local-only in the research workspace.
+In the simulator, these empirical pools are open lender pools. Producer and
+consumer wallets are private source/sink wallets: they can start or receive a
+route, but other agents cannot traverse or clear through them. A producer's
+voucher can be accepted by multiple lender pools according to the exported
+overlap calibration.
 The settlement reliability anchor file adds aggregate ROLA-like voucher
 circulation, ROSCA-like stable-credit, same-token return, submitted-swap
 execution, and current cluster-topology metrics. The unit-normalization file
@@ -198,7 +249,7 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     copy_public_csvs(source, output)
     export_pool_templates(source, output)
-    write_readme(output)
+    write_readme(source, output)
     print(f"Wrote public Sarafu calibration bundle to {output}")
     return 0
 

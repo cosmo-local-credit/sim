@@ -7,9 +7,20 @@ latest validation and frontier artifacts.
 
 ## Current Status
 
-- The full no-bond Sarafu engine-validation gate has passed for the current
-  model revision: 100 runs, 260 weekly ticks, 28 binding pass rows, zero review
-  rows, and zero failures.
+- The empirical calibration has been redone for Kenya KES/KSh community
+  lending pools only: `73` open lender pools, `996` unique producer-voucher
+  wallets, `1,247` accepted-voucher member slots, and `462` recommended
+  external non-producer consumer wallets.
+- The current simulation topology treats those empirical pools as open lender
+  pools. Producer and consumer accounts are private source/sink wallets: they
+  can start or receive routes, but routing and NOAM clearing may traverse only
+  open lender pools. A producer voucher can be accepted in multiple lender
+  pools according to the exported overlap calibration.
+- The previous full no-bond Sarafu engine-validation gate passed before the
+  2026-05-25 cohort and private-wallet routing update: 100 runs, 260 weekly
+  ticks, 28 binding pass rows, zero review rows, and zero failures. Rerun
+  `validation-full` before citing full validation statistics for the current
+  model revision.
 - The current bond-issuer frontier deploys 100% of gross bond principal as
   stable liquidity into eligible lender pools rather than withholding an
   initial reserve-waterfall split.
@@ -21,9 +32,10 @@ latest validation and frontier artifacts.
   producer borrowing can create additional voucher deposits and voucher-source
   activity, but only through aggregate calibration shares and growth caps, and
   always against a matched no-bond baseline.
-- The 20-run `frontier-rola-regeneration-probe` now passes all tested
-  current-scale low-principal cells from `0` to `0.05` principal ratio. The
-  current `frontier-pilot` target has been wired to enable the same primary
+- The earlier 20-run `frontier-rola-regeneration-probe` passed all tested
+  current-scale low-principal cells from `0` to `0.05` principal ratio before
+  the current cohort and private-wallet routing update. The current
+  `frontier-pilot` and `frontier-publication` targets use the same primary
   producer voucher borrowing and bounded lender-held-voucher purchase demand.
 - The probe name is historical. The current run is a voucher-capable
   ROSCA-like credit-pool mechanism check: it starts from a Sarafu-calibrated
@@ -31,23 +43,23 @@ latest validation and frontier artifacts.
   repayment obligations, producer voucher identities, lender acceptance rules,
   and routing. It is not the future no-voucher ROSCA-to-ROLA regeneration
   counterfactual.
-- The 10-run `frontier-maturity-smoke` now passes the pre-pilot full-term
-  check: scheduled bondholder payment clears, unpaid scheduled claims are
-  zero, voucher circulation is preserved, and the `1.25x` available
-  service-cash threshold is reported separately as issuer operating/risk
-  headroom.
+- The earlier 10-run `frontier-maturity-smoke` passed the pre-pilot full-term
+  check: scheduled bondholder payment cleared, unpaid scheduled claims were
+  zero, voucher circulation was preserved, and the `1.25x` available
+  service-cash threshold was reported separately as issuer operating/risk
+  headroom. Rerun this after the current calibration/topology change before
+  using it as a paper-facing gate.
 - The current `frontier-pilot` target is the focused grid:
   `current,connected_2x` network scales; principal ratios
   `0.05,0.10,0.15,0.20,0.25`; coupon targets
   `0,0.02,0.04,0.06,0.08,0.10`; fee-service share `1.0`;
   frontier mode `grid`; refinement rounds `0`.
-- The reviewed focused pilot has `59 / 60` guardrail-passing positive cells.
-  Scheduled payment clears in all cells, voucher-to-voucher volume is
-  preserved in `59 / 60`, and voucher-to-voucher volume increases in `41 / 60`.
-  Ordinary voucher-source swap count is at or above the matched no-bond
-  baseline in all `60 / 60` cells. The strongest paper-facing subset is the
-  `38 / 60` cells that also maintain issuer operating/risk headroom of at
-  least `1.25x`.
+- The reviewed focused pilot is historical evidence generated before the
+  current cohort and private-wallet routing update. The paper-facing next step
+  is to rerun validation and then run `frontier-publication`, the 100-run
+  expansion of the same mechanism over `current` and `connected_2x`, 13 coupon
+  targets from `0%` through `12%`, and 10 positive principal ratios from
+  `0.05` through `0.50`.
 - Earlier pilot results that rejected all cells under `p50_service_coverage`
   and reserve-constrained fee-service mechanics are superseded historical
   evidence for model debugging, not current frontier evidence.
@@ -262,6 +274,10 @@ Review tasks:
 ### Routing
 
 NOAM routing models marketplace-assisted route discovery over published pools, accepted vouchers, limits, and inventories. It is not perfect hidden knowledge. BFS is useful only as a diagnostic on very small graphs because exhaustive search is too slow at Sarafu-like scale.
+For the current paper-facing topology, published open venues are lender pools.
+Producer and consumer private wallets may be route sources or sinks, but they
+are not intermediate venues. The CLC system pool is excluded from the open NOAM
+venue set.
 
 Review tasks:
 

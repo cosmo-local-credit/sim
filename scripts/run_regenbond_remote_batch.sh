@@ -45,6 +45,8 @@ REQUIRED_CALIBRATION_FILES=(
   debt_removal_calibration.csv
   fee_conversion_calibration.csv
   quarterly_clearing_calibration.csv
+  pool_cohort_exclusion_summary.csv
+  stable_actor_demographics.csv
   settlement_reliability_anchors.csv
   route_substitution_diagnostics.csv
   unit_normalization_calibration.csv
@@ -335,7 +337,9 @@ case "$JOB" in
       run_frontier 20 260 bond_issuer_frontier_pilot current,connected_2x 0.05,0.10,0.15,0.20,0.25 0,0.02,0.04,0.06,0.08,0.10 1.0
     ;;
   frontier-publication)
-    ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK="${ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK:-1}" \
+    FRONTIER_MODE="${FRONTIER_MODE:-grid}" \
+      FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}" \
+      ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK="${ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK:-1}" \
       ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST="${ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST:-1}" \
       ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING="${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-1}" \
       ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND="${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-1}" \
@@ -344,7 +348,7 @@ case "$JOB" in
       LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE="${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05}" \
       LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK="${LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK:-184.061305}" \
       PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
-      run_frontier 100 260 bond_issuer_frontier current,connected_2x 0.05,0.10,0.15,0.20,0.25 0,0.02,0.04,0.06,0.08,0.10 1.0
+      run_frontier 100 260 bond_issuer_frontier current,connected_2x 0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50 0,0.01,0.02,0.03,0.04,0.05,0.06,0.07,0.08,0.09,0.10,0.11,0.12 1.0
     ;;
   *)
     echo "Unknown job: $JOB" >&2

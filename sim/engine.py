@@ -663,7 +663,7 @@ class SimulationEngine:
         if not clean_weights:
             return 1
         total = sum(clean_weights.values())
-        draw = random.random() * total
+        draw = self.rng.random() * total
         running = 0.0
         selected = "1"
         for bucket, weight in sorted(clean_weights.items()):
@@ -675,11 +675,11 @@ class SimulationEngine:
             low_text, high_text = selected.split("-", 1)
             low = max(1, int(float(low_text)))
             high = max(low, int(float(high_text)))
-            target = random.randint(low, high)
+            target = self.rng.randint(low, high)
         elif selected.endswith("+"):
             low = max(1, int(float(selected[:-1])))
             high = max(low, lender_count)
-            target = random.randint(low, high)
+            target = self.rng.randint(low, high)
         else:
             target = max(1, int(float(selected)))
         max_acceptors = getattr(self.cfg, "producer_voucher_overlap_max_lender_acceptors", None)
@@ -1003,6 +1003,8 @@ class SimulationEngine:
                     pool = self.pools.get(pid)
                     if pool is None:
                         continue
+                    if not self._is_routable_pool(pool):
+                        continue
                     if pool.policy.paused:
                         continue
                     if pool.policy.mode in ("none", "borrow_only"):
@@ -1040,6 +1042,8 @@ class SimulationEngine:
                 return False
             pool = self.pools.get(hop.pool_id)
             if pool is None or pool.policy.paused:
+                return False
+            if not self._is_routable_pool(pool):
                 return False
             okq, reasonq, amount_out, fee_amt = pool.quote_swap(current_asset, current_amount, hop.asset_out)
             if not okq or amount_out <= 1e-9:
@@ -1094,29 +1098,32 @@ class SimulationEngine:
                 pool = self.pools.get(pid)
                 if pool is None:
                     continue
+                if not self._is_routable_pool(pool):
+                    continue
                 scored.append((self._noam_pool_score(pool), pid))
             scored.sort(reverse=True)
             top_pools[asset_id] = [pid for _, pid in scored[:top_k]]
 
         if self.clc_pool_id and self.clc_pool_id in self.pools:
             clc_pool = self.pools[self.clc_pool_id]
-            for asset_id in assets:
-                if not clc_pool.registry.is_listed(asset_id):
-                    continue
-                pools = top_pools.get(asset_id, [])
-                if self.clc_pool_id in pools:
-                    continue
-                if not pools:
-                    top_pools[asset_id] = [self.clc_pool_id]
-                    continue
-                if len(pools) >= top_k:
-                    pools = list(pools)
-                    pools[-1] = self.clc_pool_id
-                    top_pools[asset_id] = pools
-                else:
-                    pools = list(pools)
-                    pools.append(self.clc_pool_id)
-                    top_pools[asset_id] = pools
+            if self._is_routable_pool(clc_pool):
+                for asset_id in assets:
+                    if not clc_pool.registry.is_listed(asset_id):
+                        continue
+                    pools = top_pools.get(asset_id, [])
+                    if self.clc_pool_id in pools:
+                        continue
+                    if not pools:
+                        top_pools[asset_id] = [self.clc_pool_id]
+                        continue
+                    if len(pools) >= top_k:
+                        pools = list(pools)
+                        pools[-1] = self.clc_pool_id
+                        top_pools[asset_id] = pools
+                    else:
+                        pools = list(pools)
+                        pools.append(self.clc_pool_id)
+                        top_pools[asset_id] = pools
 
         # Ensure assigned lenders for each producer voucher are included in the NOAM working set.
         for voucher_id, lender_ids in self._producer_voucher_lender_assignments.items():
@@ -1166,6 +1173,8 @@ class SimulationEngine:
                 pool = self.pools.get(pid)
                 if pool is None:
                     continue
+                if not self._is_routable_pool(pool):
+                    continue
                 candidates = []
                 for asset_out, amt in pool.vault.inventory.items():
                     if amt <= 1e-9:
@@ -1212,6 +1221,8 @@ class SimulationEngine:
         for (pid, asset_in), outs in top_out.items():
             pool = self.pools.get(pid)
             if pool is None:
+                continue
+            if not self._is_routable_pool(pool):
                 continue
             reliability = float(self._swap_success_ema.get(pid, 1.0))
             if reliability <= 0.0:
@@ -1414,6 +1425,8 @@ class SimulationEngine:
             pool = self.pools.get(pid)
             if pool is None:
                 continue
+            if not self._is_routable_pool(pool):
+                continue
             if restrict_lenders:
                 if pool.policy.role != "lender":
                     if not (include_clc and self.clc_pool_id and pid == self.clc_pool_id):
@@ -1546,6 +1559,8 @@ class SimulationEngine:
             pool = self.pools.get(edge.pool_id)
             if pool is None:
                 return False, budget_remaining, 0.0
+            if not self._is_routable_pool(pool):
+                return False, budget_remaining, 0.0
             okq, reasonq, amount_out, fee_amt = pool.quote_swap(edge.asset_in, amount_in, edge.asset_out)
             if not okq or amount_out <= 1e-12:
                 return False, budget_remaining, 0.0
@@ -1564,6 +1579,8 @@ class SimulationEngine:
         for edge, amount_in, _amount_out in hop_amounts:
             pool = self.pools.get(edge.pool_id)
             if pool is None:
+                return False, budget_remaining, 0.0
+            if not self._is_routable_pool(pool):
                 return False, budget_remaining, 0.0
             receipt = pool.execute_swap(
                 self.tick,
@@ -1701,6 +1718,8 @@ class SimulationEngine:
         if self._noam_failure_active(pool.pool_id, asset_in, asset_out):
             return False
         if pool.policy.paused:
+            return False
+        if not self._is_routable_pool(pool):
             return False
         if not pool.registry.is_listed(asset_in) or not pool.registry.is_listed(asset_out):
             return False
@@ -2125,11 +2144,7 @@ class SimulationEngine:
             self._clc_pool_swapped_out_voucher_total += float(receipt.amount_out)
 
     def _is_routable_pool(self, pool: "Pool") -> bool:
-        if not pool.policy.system_pool:
-            return True
-        if pool.policy.role == "clc":
-            return True
-        return False
+        return (not pool.policy.system_pool) and pool.policy.role == "lender"
 
     def _refresh_liquidity_cache(self) -> None:
         if self._liquidity_tick == self.tick:
@@ -2463,6 +2478,8 @@ class SimulationEngine:
                 pool = self.pools.get(pid)
                 if pool is None or pool.policy.paused:
                     continue
+                if not self._is_routable_pool(pool):
+                    continue
                 if not pool.registry.is_listed(asset_in):
                     continue
                 if target_asset:
@@ -2593,6 +2610,8 @@ class SimulationEngine:
                         continue
                     pool = self.pools.get(pid)
                     if pool is None:
+                        continue
+                    if not self._is_routable_pool(pool):
                         continue
                     outs = self._noam_top_out.get((pid, asset_in), [])
                     if not outs:
@@ -3019,23 +3038,6 @@ class SimulationEngine:
             own_v = agent.voucher_spec.voucher_id
             list_voucher(own_v, cap_in=cfg.producer_voucher_cap_in)
 
-            want_k = max(1, int(np.random.poisson(cfg.add_pool_want_assets_mean)))
-            wanted = [
-                a for a in self.factory.sample_assets(want_k, p_overlap=cfg.p_want_overlap)
-                if a not in (cfg.stable_symbol, own_v)
-            ]
-            for a in wanted:
-                list_voucher(a, cap_in=cfg.producer_voucher_cap_in)
-
-            offer_k = max(1, int(np.random.poisson(cfg.add_pool_offer_assets_mean)))
-            offered = [
-                a for a in self.factory.sample_assets(offer_k, p_overlap=cfg.p_offer_overlap)
-                if a not in (cfg.stable_symbol, own_v)
-            ]
-            for a in offered:
-                if a not in wanted:
-                    list_voucher(a, cap_in=cfg.producer_voucher_cap_in)
-
             stable_seed = 0.0
             if stable_seed > 0.0:
                 self._vault_add(pool, cfg.stable_symbol, stable_seed, "seed_stable", "system")
@@ -3051,18 +3053,6 @@ class SimulationEngine:
                 supply_updates.add(own_v)
             self._assign_producer_voucher_to_lender(own_v)
 
-            for a in offered:
-                amt = float(max(0.0, np.random.exponential(10000.0)))
-                if amt <= 0:
-                    continue
-                spec = self.factory.voucher_specs.get(a)
-                if spec and spec.issuer_id != agent.agent_id:
-                    continue
-                self._vault_add(pool, a, amt, "seed_asset", "system")
-                if spec:
-                    agent.issuer.issue(amt)
-                    supply_updates.add(a)
-
         elif role == "liquidity_provider":
             self._lp_pending_contribution_tick[pool.pool_id] = self.tick + 1
             stable_seed = float(max(0.0, cfg.lp_initial_stable_mean))
@@ -3070,40 +3060,8 @@ class SimulationEngine:
                 self._vault_add(pool, cfg.stable_symbol, stable_seed, "seed_stable", "system")
 
         else:  # consumer
-            own_v = agent.voucher_spec.voucher_id
-            list_voucher(own_v, cap_in=cfg.default_cap_in)
-
-            want_k = max(1, int(np.random.poisson(cfg.add_pool_want_assets_mean)))
-            wanted = [a for a in self.factory.sample_assets(want_k, p_overlap=cfg.p_want_overlap) if a != cfg.stable_symbol]
-            for a in wanted:
-                list_voucher(a, cap_in=cfg.default_cap_in)
-
-            offer_k = max(1, int(np.random.poisson(cfg.add_pool_offer_assets_mean)))
-            offered = [a for a in self.factory.sample_assets(offer_k, p_overlap=cfg.p_offer_overlap) if a != cfg.stable_symbol]
-            for a in offered:
-                if a not in wanted:
-                    list_voucher(a, cap_in=cfg.default_cap_in)
-
             stable_seed = float(max(0.0, np.random.exponential(cfg.initial_stable_per_pool_mean * 0.25)))
             self._vault_add(pool, cfg.stable_symbol, stable_seed, "seed_stable", "system")
-
-            own_amt = float(max(0.0, np.random.exponential(200.0)))
-            if own_amt > 0:
-                self._vault_add(pool, own_v, own_amt, "seed_voucher", agent.agent_id)
-                agent.issuer.issue(own_amt)
-                supply_updates.add(own_v)
-
-            for a in offered:
-                amt = float(max(0.0, np.random.exponential(150.0)))
-                if amt <= 0:
-                    continue
-                spec = self.factory.voucher_specs.get(a)
-                if spec and spec.issuer_id != agent.agent_id:
-                    continue
-                self._vault_add(pool, a, amt, "seed_asset", "system")
-                if spec:
-                    agent.issuer.issue(amt)
-                    supply_updates.add(a)
 
         self.log.add(Event(self.tick, "POOL_CONFIGURED", actor_id=agent.agent_id, pool_id=pool.pool_id,
                            meta={"mode": pool.policy.mode, "role": pool.policy.role, "min_stable_reserve": pool.policy.min_stable_reserve}))
@@ -7340,13 +7298,26 @@ class SimulationEngine:
         current_amount = amount_in
         current_asset = asset_in
 
+        def refund_escrow() -> None:
+            for a, amt in list(escrow.items()):
+                if amt > 1e-9:
+                    self._vault_add(source_pool, a, amt, "route_refund", "escrow")
+                    escrow[a] = 0.0
+
         for hop in plan.hops:
             if hop.pool_id == source_pool_id:
+                refund_escrow()
                 self.log.add(Event(self.tick, "SWAP_FAILED", pool_id=hop.pool_id, asset_id=hop.asset_in, amount=hop.amount_in,
                                    meta={"reason": "self_swap_not_allowed"}))
                 return False
             pool = self.pools[hop.pool_id]
+            if not self._is_routable_pool(pool):
+                refund_escrow()
+                self.log.add(Event(self.tick, "SWAP_FAILED", pool_id=hop.pool_id, asset_id=hop.asset_in, amount=hop.amount_in,
+                                   meta={"reason": "private_wallet_not_open", "hop": hop.__dict__}))
+                return False
             if escrow.get(current_asset, 0.0) <= 1e-9:
+                refund_escrow()
                 self.log.add(Event(self.tick, "EXEC_ROUTE_FAILED", pool_id=source_pool_id, meta={"reason": "escrow_empty"}))
                 return False
 
@@ -7363,9 +7334,7 @@ class SimulationEngine:
                     fail_reason=receipt.fail_reason,
                 )
                 # refund remaining escrow to source pool (best-effort)
-                for a, amt in list(escrow.items()):
-                    if amt > 1e-9:
-                        self._vault_add(source_pool, a, amt, "route_refund", "escrow")
+                refund_escrow()
                 self.log.add(Event(self.tick, "SWAP_FAILED", pool_id=pool.pool_id, asset_id=current_asset, amount=amt_in,
                                    meta={"reason": receipt.fail_reason, "hop": hop.__dict__}))
                 return False

@@ -7,14 +7,19 @@ Multiobjective Routing/Clearing: a network-aware scoring layer over bounded over
 and optional cycle clearing. A Streamlit UI (`app.py`) lets you run ticks,
 inspect metrics, and sweep parameters.
 
-Defaults are calibrated for a **town‑scale network (~100 shops)**: 100 producers, 20 consumers, 4 lenders, and 1 LP.
+The generic UI defaults are small demonstration settings. The paper-facing
+RegenBond runner is calibrated from the exported Kenyan KSh/KES community
+lending-pool bundle: `current` scale is 73 open lender pools, 996 producer
+wallets with producer vouchers, and 462 external non-producer consumer wallets.
+The matching `connected_2x` scale doubles those counts while preserving the
+empirical role mix and producer-voucher pool-overlap distribution.
 
 **NOAM Routing (online, per request)**
 1) Build/refresh the **working set** (Top‑K pools per asset, Top‑M outs per pool/asset).
 2) (Optional) **Overlay**: find hub paths when enabled and the network is large enough.
 3) **Beam‑A*** over the working set with network‑aware scoring:
    success probability + fee penalty + scarcity penalty + inventory‑rebalance benefit + dead‑end penalty,
-   plus a CLC edge bonus.
+   over open lender-pool venues.
 4) **Validate** the best route with live quotes; if it fails, try the next best.
 5) **Execute**, update success/λ (scarcity) states, and cache outcomes.
 
@@ -121,13 +126,11 @@ above scheduled service is candidate issuer operating and risk headroom, not
 proven net profit until explicit issuer costs and first-loss capital are
 modeled.
 
-The current paper-facing no-bond validation gate is
-`sarafu_engine_validation` with 100 runs over 260 weekly ticks. In the latest
-validated bundle it passes all 28 binding checks: aggregate swap activity is
-105,593.2 versus a 105,499.8 empirical target, and report exposure is
-56,229.7 versus a 56,180.0 empirical target. Settlement-composition metrics
-are reported as diagnostics because one-time historical stable backing is not
-comparable to a 260-week inventory or full-horizon flow share.
+The paper-facing no-bond validation gate is `sarafu_engine_validation` with
+100 runs over 260 weekly ticks. The previous full gate passed before the
+2026-05-25 Kenya community-pool calibration and private-wallet routing update.
+After this update, rerun `validation-full` before citing full validation
+statistics; use `validation-smoke` only as a fast sanity check.
 
 Frontier runs also enable a producer debt contract cash-service layer. Producer
 borrowing still starts as own-voucher-in/stable-out through an eligible lender
@@ -140,12 +143,12 @@ explicit sensitivity/ablation runs. Issuer sustainability is reported
 separately through fee service, excess recovered stable, lockbox surplus, and
 available operating-surplus diagnostics.
 
-The current `frontier-pilot` batch target also enables the ROLA mechanism that
-passed the 20-run low-principal probe: primary producer voucher borrowing,
-voucher-loan fallback, voucher-loan activity boost, and bounded consumer or
-third-party stable purchases of visible lender-held producer vouchers. This is
-the current frontier configuration; disable those flags only for explicit
-control or ablation runs.
+The current `frontier-pilot` and `frontier-publication` batch targets enable
+the ROLA mechanism that previously passed the 20-run low-principal probe:
+primary producer voucher borrowing, voucher-loan fallback, voucher-loan
+activity boost, and bounded consumer or third-party stable purchases of visible
+lender-held producer vouchers. This is the current frontier configuration;
+disable those flags only for explicit control or ablation runs.
 
 The current frontier is a voucher-capable ROSCA-like credit-pool test. It does
 not replay the literal Sarafu ledger, and it is not the future voucher-free
@@ -184,16 +187,13 @@ voucher-to-voucher source use falls in the 91-day post-borrow window, while
 target-side voucher demand rises. That means the empirically supported near-term
 frontier channel is stronger visible-voucher stable purchase demand, not an
 extra uncalibrated producer voucher-source boost. Producer-voucher overlap uses
-the empirical aggregate pool-overlap distribution. The focused `frontier-pilot`
-target now tests `current` and `connected_2x` networks, principal ratios
-`0.05-0.25`, coupon targets `0-10%`, and fee-service share `1.0`.
-The reviewed focused pilot should be described as a guardrail frontier rather
-than as a blanket safety claim: scheduled bondholder payment clears in all 60
-positive cells, voucher-to-voucher volume is preserved in 59/60 cells and
-increases in 41/60 cells, ordinary voucher-source swap count is at or above the
-matched baseline in all 60 cells, and the strongest paper-facing subset is the
-38/60 cells where voucher-to-voucher volume increases while issuer
-operating/risk headroom remains at least `1.25x`.
+the empirical aggregate pool-overlap distribution. The `frontier-publication`
+job is the paper-facing expansion of the earlier focused `frontier-pilot`
+setup: it uses `current` and `connected_2x`, 13 coupon targets from `0%` to
+`12%`, 10 positive principal ratios from `0.05` to `0.50`, and built-in
+matched no-bond baselines. Earlier focused-pilot pass counts should be treated
+as historical pilot evidence until the expanded grid has been reviewed under
+the current calibration and private-wallet routing rules.
 
 The Streamlit app includes a **RegenBond MC** tab that runs this same script as
 a subprocess and displays the exact CLI-equivalent command. For identical
@@ -261,22 +261,26 @@ terminal and Streamlit outputs match when the displayed command is identical.
 
 ### Roles and policies
 **Producer pools**
-- **Goal**: sell their voucher / accept stable inflows, repay debt.
-- **Listings (wants)**: stable + own voucher + random wanted assets (Poisson mean `add_pool_want_assets_mean`).
-- **Inventory (offers)**: own voucher seed + offered assets seed.
+- **Goal**: hold the producer's private wallet, issue one producer voucher, use
+  that voucher for borrowing, and hold stable for repayment or ordinary use.
+- **Listings**: stable + the producer's own voucher. Producer wallets are not
+  open swap venues for other agents.
+- **Inventory**: own voucher seed; stable arrives through routes, borrowing,
+  productive-credit feedback, or other explicit inflows.
 - **Restrictions**: producers avoid ordinary stable-sourced swaps while debt is
   outstanding; stable can still be used for repayment and maturity settlement.
-- **Redemption**: auto‑redeem any **foreign** voucher received (keeps only own voucher + stable).
+- **Redemption**: auto‑redeem any **foreign** voucher received. Producer
+  wallets retain the producer's own voucher and stable.
 - **Stable usage**: ordinary stable-source selection is governed by the
   configured producer stable bias and stable-reserve protection.
 - **Starts with**:
   - Stable seed: `0`
   - Own voucher seed: `exp(mean=10000)`
-  - Offered asset seeds: `exp(mean=10000)` per offered asset
 
 **Lender pools**
 - **Goal**: provide stable loans; hold voucher collateral.
-- **Listings (wants)**: stable + random wanted assets.
+- **Listings (wants)**: stable plus producer vouchers assigned by the empirical
+  overlap calibration.
 - **Inventory (offers)**: stable + offered assets seed.
 - **Restrictions**: none on voucher↔voucher; stable can flow in/out.
 - **No mint/off‑ramp**: lenders do **not** mint or burn stables/vouchers.
@@ -287,17 +291,18 @@ terminal and Streamlit outputs match when the displayed command is identical.
   vouchers via **borrowing swaps** and **voucher↔voucher** swaps.
 
 **Consumer pools**
-- **Goal**: spend stable to acquire vouchers and redeem.
-- **Listings (wants)**: stable + own voucher + random wanted assets.
-- **Inventory (offers)**: stable + own voucher + offered assets seed.
+- **Goal**: hold a private stable wallet, spend stable to acquire producer
+  vouchers, and redeem acquired vouchers.
+- **Listings**: stable only. Consumers do not create tradable consumer vouchers
+  in the paper-facing topology.
+- **Inventory**: stable seed only; acquired producer vouchers are final route
+  outputs and can be redeemed.
 - **Restrictions**: ordinary stable spending is governed by source-selection
   bias and stable-reserve protection; consumers are no longer hard-forced to
   spend stable whenever they hold it.
-- **Redemption**: auto‑redeem any **foreign** voucher received (keeps only own voucher + stable).
+- **Redemption**: auto‑redeem acquired producer vouchers with their issuers.
 - **Starts with** (current implementation constants in `sim/engine.py`):
   - Stable seed: `exp(mean=initial_stable_per_pool_mean * 0.25)`
-  - Own voucher seed: `exp(mean=200)`
-  - Offered asset seeds: `exp(mean=150)` per offered asset
 
 **Liquidity Provider (LP) pools**
 - This LP/sCLC role is part of the generic CLC economics layer and legacy
@@ -313,8 +318,10 @@ terminal and Streamlit outputs match when the displayed command is identical.
 **System pools**
 - **ops**, **insurance**, **mandates**, **clc**. These are non-agent pools controlled by policy:
   - System pools are **paused** by default and do not trade.
-  - **CLC pool** is special (see CLC section), and is **always open** when `clc_pool_always_open=True`.
-  - **CLC stable outflow** is only allowed when the input is **sCLC**.
+  - **CLC pool** is a system settlement pool for explicit CLC mechanisms, not
+    an open NOAM route/clearing venue.
+  - **CLC stable outflow** in explicit CLC mechanisms is only allowed when the
+    input is **sCLC**.
 
 ### Swap rules and limits
 - **All pools list USD**; each listing has a cap-in per rolling window (`default_window_len`).
@@ -322,17 +329,21 @@ terminal and Streamlit outputs match when the displayed command is identical.
 - **Stable cap-in** uses role-specific caps (`lender_stable_cap_in`, `producer_stable_cap_in`, else `default_cap_in`).
 - **Stable reserve guardrail**: swaps that take stable below `min_stable_reserve` are blocked.
 - **Role constraints**:
-  - Lenders allow stable in/out and voucher↔voucher swaps.
+  - Lenders are the only open swap venues for ordinary routing and NOAM
+    clearing.
   - Producers with outstanding debt avoid ordinary stable-sourced swaps so
     stable remains available for repayment; repayment routes can still spend
     producer stable.
   - Consumers can spend stable under the configured source-selection bias. In
     validation/frontier-style runs this is value-weighted with stable bias and
     reserve protection rather than a hard "always spend stable" rule.
-  - CLC pool requires a stable/sCLC leg, and stable outflow requires **sCLC** in.
+  - Producer and consumer private wallets can start or receive routes, but
+    other agents cannot traverse or clear through them.
+  - CLC pool requires a stable/sCLC leg in explicit CLC mechanisms, and stable
+    outflow requires **sCLC** in.
 
 ### Redemption
-- **Producers/Consumers** auto‑redeem any **foreign** voucher they receive (keeps only own voucher + stable).
+- **Producers/Consumers** auto‑redeem any **foreign** voucher they receive.
 - **Final hop vouchers** are redeemed to the issuer **only** for producer/consumer source pools.
 - Redemptions **return vouchers to the issuer’s pool** and **do not burn supply** (issuer ledgers track `redeemed_total`).
 
@@ -377,8 +388,11 @@ terminal and Streamlit outputs match when the displayed command is identical.
 NOAM is the default router (`routing_mode=noam`). It is **Network-Overlay Adaptive
 Multiobjective Routing/Clearing**: a network-aware overlay + beam-style route search with
 live pool validation:
+Producer and consumer wallets are private source/sink wallets. They can initiate
+a route and receive the final output or redeemed voucher, but they are not open
+swap venues. The executable NOAM graph traverses lender pools only.
 1) **Working set** (Top-K/Top-M)
-   - `noam_topk_pools_per_asset` pools per asset
+   - `noam_topk_pools_per_asset` lender pools per asset
    - `noam_topm_out_per_pool` outputs per pool/asset
    - Adaptive caps can shrink these when the network is large.
 2) **Overlay routing** (optional)
@@ -390,7 +404,6 @@ live pool validation:
    - Scarcity (`noam_weight_lambda`, `noam_scarcity_eta`)
    - Inventory benefit (`noam_weight_benefit`)
    - Dead-end penalty (`noam_weight_deadend`)
-   - **CLC edge bonus** (`noam_clc_edge_bonus`) favors CLC pool edges
    - Amount propagation is **carry-only** (no rate propagation); validation happens at execution.
    - Benefit mode uses **inventory rebalance** (per-hop imbalance reduction).
 4) **Caching + failure TTL**
@@ -416,7 +429,8 @@ quotes, inventory, limits, budget, and scoring constraints.
 - **Minimum cycle value**: `noam_clearing_min_cycle_value_usd`.
 - **Execution**: quotes are validated live; fees and edge states update on success/failure.
 - **Scoring**: uses the same success/fee/scarcity/benefit/dead-end weights as NOAM routing.
-- **Priority**: lenders and CLC receive edge bonuses; clearing can still touch producer/consumer pools.
+- **Venue restriction**: clearing cycles execute only through lender pools. Producer and
+  consumer wallets are never clearing venues.
 
 NOAM clearing is separate from the bond-issuer quarterly clearing mechanism.
 NOAM clearing is route/cycle execution inside the pool network. Bond-issuer
@@ -483,10 +497,9 @@ Other modes (configurable):
 - `activity_weighted`, `deficit_weighted`, `utilization_weighted`.
 
 ### CLC pool behavior
-- **Always open** for swaps (pool is unpaused and `min_stable_reserve=0`).
-- **Preferred in routing/clearing** via `noam_clc_edge_bonus` + Top-K inclusion.
-- **Accepts stable for vouchers** when it holds in-kind fee assets (vouchers deposited to CLC via the waterfall);
-  routing/clearing can use CLC as the stable->voucher venue when inventory exists.
+- **System settlement pool**, not an open NOAM venue.
+- **Not traversed by routing/clearing**; NOAM route and clearing venues are lender pools.
+- **Accepts stable for vouchers** only in explicit CLC mechanisms outside the open lending-pool route graph.
 - **Rebalancing**: periodically swaps vouchers -> stable to maintain target ratio.
 - **Stable outflow**: only allowed when the input asset is **sCLC**.
 
@@ -515,7 +528,7 @@ All parameters live in `sim/config.py`. Defaults shown below.
 | --- | --- | --- |
 | `initial_pools` | `10` | Initial pool count (used only when `initial_*` counts are unset). |
 | `initial_lenders` | `4` | Initial lender count. |
-| `initial_producers` | `100` | Initial producer count (town‑scale default). |
+| `initial_producers` | `100` | Generic demo producer count; paper-facing runs override from calibration. |
 | `initial_consumers` | `20` | Initial consumer count. |
 | `initial_liquidity_providers` | `1` | Initial LP count. |
 | `pool_growth_rate_per_tick` | `0.0` | Pool growth rate per tick. |
@@ -628,8 +641,8 @@ Notes:
 | `noam_clearing_budget_usd` | `25000.0` | Base clearing budget. |
 | `noam_clearing_budget_share` | `0.01` | Budget share of network value. |
 | `noam_clearing_min_cycle_value_usd` | `1.0` | Min cycle value. |
-| `noam_clearing_lenders_only` | `False` | If true, restricts clearing to lenders (and optionally CLC). |
-| `noam_clearing_include_clc` | `True` | Include CLC in clearing edge set. |
+| `noam_clearing_lenders_only` | `True` | Restrict clearing to lender pools. |
+| `noam_clearing_include_clc` | `False` | Legacy option; CLC is not part of the open NOAM venue set. |
 | `noam_clearing_lender_edge_bonus` | `0.5` | Bonus to lender edges in clearing scoring. |
 | `noam_success_ema_alpha` | `0.2` | EMA alpha for success. |
 | `noam_success_min` | `0.05` | Min success. |
@@ -639,7 +652,7 @@ Notes:
 | `noam_weight_lambda` | `1.2` | Scarcity weight. |
 | `noam_weight_benefit` | `1.5` | Benefit weight. |
 | `noam_weight_deadend` | `1.0` | Dead-end weight. |
-| `noam_clc_edge_bonus` | `0.75` | CLC edge bonus. |
+| `noam_clc_edge_bonus` | `0.75` | Legacy CLC edge bonus; inactive when CLC is excluded from NOAM venues. |
 | `noam_scarcity_eta` | `0.1` | Scarcity update rate. |
 | `noam_safe_budget_fraction` | `0.2` | Safe usage threshold. |
 | `noam_lambda_decay` | `0.1` | Lambda decay. |

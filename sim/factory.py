@@ -66,14 +66,18 @@ class PoolFactory:
         agent_id = self._new_agent_id()
         pool_id = self._new_pool_id()
 
-        # each agent issues its own voucher
+        role = role or self.sample_agent_role(allow_liquidity_provider=allow_liquidity_provider)
+
+        # Producer wallets issue one voucher. Non-producer agents keep an empty
+        # voucher ledger for compatibility, but their vouchers are not listed in
+        # the tradable asset universe.
         voucher_id = f"VCHR:{agent_id}"
         v_spec = VoucherSpec(voucher_id=voucher_id, issuer_id=agent_id, redeem_prob_base=cfg.base_redeem_prob)
-        self.voucher_specs[voucher_id] = v_spec
-        self.asset_universe[voucher_id] = Asset(voucher_id, "voucher", issuer_id=agent_id)
+        if role == "producer":
+            self.voucher_specs[voucher_id] = v_spec
+            self.asset_universe[voucher_id] = Asset(voucher_id, "voucher", issuer_id=agent_id)
 
         issuer = IssuerLedger(voucher_id=voucher_id)
-        role = role or self.sample_agent_role(allow_liquidity_provider=allow_liquidity_provider)
         agent = Agent(agent_id=agent_id, pool_id=pool_id, role=role, issuer=issuer, voucher_spec=v_spec)
 
         if role == "liquidity_provider":

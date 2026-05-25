@@ -8,10 +8,28 @@ The per-pool calibration file is anonymized into synthetic template rows. It
 does not include raw transactions, addresses, report text, pool labels, or pool
 IDs. The simulator uses these templates only for tier mix, activity rates,
 repayment/return priors, backing-liquidity scale, and impact-report exposure.
-The paper calibration cohort is Kenyan KSh/KES individual voucher pools:
-cash/stable tokens and KSh/KES-denominated individual vouchers are retained,
-while USD/non-KSh/global voucher systems are excluded from the public paper
-cohort or handled separately in private review files.
+The paper calibration cohort is Kenyan KSh/KES community lending pools. Pools
+must have KSh/KES accepted-voucher membership evidence, must not be identified
+as non-Kenya by metadata, must not be in the exact named non-community
+exclusion list, and must have at least four distinct active swap weeks.
+The current exported cohort has 73 lender-pool templates,
+1247 accepted-voucher member slots, 996 unique
+producer-voucher wallets, and 462 recommended external
+non-producer consumer wallets. Stable-side pool interaction has
+950 address-pool slots; this is an interaction
+count, not the consumer-wallet count used by the Monte Carlo topology.
+Accepted voucher counts are exported as `accepted_voucher_members`; these are
+pool membership slots. Unique producer-voucher wallet counts and multi-pool
+membership degree are exported in the voucher-pool overlap calibration. Active
+interactors remain `total_users`. The stable actor demographics file separates
+external non-producer stable-side users from producer addresses that also use
+stable-side interactions. Raw included/excluded pool-address audits remain
+local-only in the research workspace.
+In the simulator, these empirical pools are open lender pools. Producer and
+consumer wallets are private source/sink wallets: they can start or receive a
+route, but other agents cannot traverse or clear through them. A producer's
+voucher can be accepted by multiple lender pools according to the exported
+overlap calibration.
 The settlement reliability anchor file adds aggregate ROLA-like voucher
 circulation, ROSCA-like stable-credit, same-token return, submitted-swap
 execution, and current cluster-topology metrics. The unit-normalization file
