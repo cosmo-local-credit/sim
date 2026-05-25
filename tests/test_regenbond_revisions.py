@@ -415,6 +415,38 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(engine._producer_debt_stable_recovered_usd_tick, 0.0)
         self.assertAlmostEqual(engine._bond_service_reserved_usd_tick, 0.0)
 
+    def test_producer_credit_budget_samples_producer_wallets_first(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=5,
+                initial_consumers=8,
+                initial_liquidity_providers=0,
+                max_pools=14,
+                producer_credit_request_budget_share=1.0,
+            ),
+            seed=3,
+        )
+        pools = [
+            pool for pool in engine.pools.values()
+            if not pool.policy.system_pool and pool.policy.role != "liquidity_provider"
+        ]
+        attempted_pool_ids = []
+
+        def fake_attempt(pool):
+            attempted_pool_ids.append(pool.pool_id)
+            return True
+
+        engine._attempt_repayment = fake_attempt
+
+        remaining = engine._apply_producer_credit_request_budget(pools, 3)
+
+        self.assertEqual(remaining, 0)
+        self.assertEqual(len(attempted_pool_ids), 3)
+        self.assertTrue(
+            all(engine.pools[pool_id].policy.role == "producer" for pool_id in attempted_pool_ids)
+        )
+
     def test_voucher_loan_fallback_is_disabled_by_default(self):
         engine = SimulationEngine(
             small_config(
@@ -784,7 +816,7 @@ class RegenBondRevisionTests(unittest.TestCase):
             _frontier_quarterly_clearing_surplus_share=1.0,
             _frontier_route_requests_per_tick=1,
             _frontier_swap_floor_per_tick=0,
-            _frontier_historical_cash_backing_total_usd=0.0,
+            _frontier_historical_cash_backing_total_usd=500.0,
             _frontier_historical_voucher_backing_total_usd=0.0,
         )
 
@@ -805,6 +837,9 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.producer_stable_debt_contract_service_margin_rate, 0.0)
         self.assertAlmostEqual(cfg.producer_voucher_debt_contract_service_margin_rate, 0.0)
         self.assertAlmostEqual(cfg.producer_debt_contract_revenue_rate, 1.0)
+        self.assertFalse(cfg.offramps_enabled)
+        self.assertIsNone(cfg.historical_stable_backing_tick)
+        self.assertAlmostEqual(cfg.historical_stable_backing_total_usd, 0.0)
         self.assertTrue(cfg.productive_credit_voucher_feedback_enabled)
         self.assertAlmostEqual(cfg.productive_credit_voucher_deposit_share, 0.384157)
         self.assertAlmostEqual(cfg.productive_credit_voucher_deposit_cap_rate_per_month, 0.143206)
@@ -856,6 +891,7 @@ class RegenBondRevisionTests(unittest.TestCase):
             "enable_producer_primary_voucher_borrowing",
             "enable_ordinary_stable_spend_protection",
             "producer_primary_voucher_borrowing_attempt_share",
+            "producer_credit_request_budget_share",
             "producer_voucher_loan_max_target_candidates",
             "producer_voucher_overlap_mode",
             "enable_lender_voucher_purchase_demand",
@@ -986,10 +1022,8 @@ class RegenBondRevisionTests(unittest.TestCase):
 
         self.assertAlmostEqual(producer_pool.vault.get(engine.cfg.stable_symbol) - before, 100.0)
         self.assertAlmostEqual(engine._productive_credit_inflow_usd_tick, 100.0)
-        self.assertGreaterEqual(
-            engine._producer_deposit_value_by_voucher[producer.voucher_spec.voucher_id],
-            100.0,
-        )
+        self.assertAlmostEqual(engine._productive_credit_stable_retained_usd_tick, 100.0)
+        self.assertNotIn(producer.voucher_spec.voucher_id, engine._producer_deposit_value_by_voucher)
 
     def test_contract_productive_credit_uses_revenue_rate_when_larger(self):
         engine = SimulationEngine(
@@ -1028,10 +1062,18 @@ class RegenBondRevisionTests(unittest.TestCase):
         )
         producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
         producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
         voucher_id = producer.voucher_spec.voucher_id
         value = engine._asset_value(producer_pool, voucher_id)
+        required_units = 40.0 / value
+        current_units = producer_pool.vault.get(voucher_id)
+        if current_units < required_units:
+            top_up = required_units - current_units
+            engine._vault_add(producer_pool, voucher_id, top_up, "test_seed", "test")
+            producer.issuer.issue(top_up)
         before_stable = producer_pool.vault.get(engine.cfg.stable_symbol)
         before_voucher = producer_pool.vault.get(voucher_id)
+        before_lender_voucher = lender_pool.vault.get(voucher_id)
         before_capacity = engine._producer_deposit_credit_capacity_usd()
 
         engine.tick = 1
@@ -1043,10 +1085,11 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(engine._productive_credit_stable_retained_usd_tick, 60.0)
         self.assertAlmostEqual(engine._productive_credit_voucher_deposit_usd_tick, 40.0)
         self.assertAlmostEqual(producer_pool.vault.get(engine.cfg.stable_symbol) - before_stable, 60.0)
-        self.assertAlmostEqual(producer_pool.vault.get(voucher_id) - before_voucher, 40.0 / value)
+        self.assertAlmostEqual(producer_pool.vault.get(voucher_id) - before_voucher, -required_units)
+        self.assertAlmostEqual(lender_pool.vault.get(voucher_id) - before_lender_voucher, 40.0 / value)
         self.assertAlmostEqual(
             engine._producer_deposit_credit_capacity_usd() - before_capacity,
-            100.0 * engine.cfg.lender_voucher_cap_deposit_multiple,
+            40.0 * engine.cfg.lender_voucher_cap_deposit_multiple,
         )
 
     def test_productive_credit_voucher_feedback_cap_bounds_issued_vouchers(self):
@@ -1109,7 +1152,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(after[0], before[0])
         self.assertAlmostEqual(after[1], before[1] * 2.0)
 
-    def test_historical_voucher_backing_is_recorded_as_producer_deposit(self):
+    def test_historical_voucher_backing_is_deposited_with_lender_pool(self):
         engine = SimulationEngine(
             small_config(
                 kes_per_usd=100.0,
@@ -1120,8 +1163,16 @@ class RegenBondRevisionTests(unittest.TestCase):
         )
         producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
         producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
         voucher_id = producer.voucher_spec.voucher_id
+        required_units = 25_000.0
+        current_units = producer_pool.vault.get(voucher_id)
+        if current_units < required_units:
+            top_up = required_units - current_units
+            engine._vault_add(producer_pool, voucher_id, top_up, "test_seed", "test")
+            producer.issuer.issue(top_up)
         before_units = producer_pool.vault.get(voucher_id)
+        before_lender_units = lender_pool.vault.get(voucher_id)
         before_deposit_value = engine._producer_deposit_value_by_voucher.get(voucher_id, 0.0)
         before_credit_capacity = engine._producer_deposit_credit_capacity_usd()
 
@@ -1133,7 +1184,8 @@ class RegenBondRevisionTests(unittest.TestCase):
             engine._producer_deposit_value_by_voucher[voucher_id] - before_deposit_value,
             250.0,
         )
-        self.assertAlmostEqual(producer_pool.vault.get(voucher_id) - before_units, 25_000.0)
+        self.assertAlmostEqual(producer_pool.vault.get(voucher_id) - before_units, -25_000.0)
+        self.assertAlmostEqual(lender_pool.vault.get(voucher_id) - before_lender_units, 25_000.0)
         self.assertAlmostEqual(
             engine._producer_deposit_credit_capacity_usd() - before_credit_capacity,
             1_250.0,

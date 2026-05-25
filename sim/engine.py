@@ -828,6 +828,143 @@ class SimulationEngine:
                 window_len = rule.window_len_ticks if rule else int(self.cfg.default_window_len or 1)
                 p.limiter.set_rule(asset_id, LimitRule(window_len_ticks=window_len, cap_in_global=cap_in))
 
+    def _producer_voucher_lender_deposit_targets(self, voucher_id: str) -> list["Pool"]:
+        self._assign_producer_voucher_to_lender(voucher_id)
+        lender_ids = sorted(self._producer_voucher_lender_assignments.get(voucher_id, set()))
+        targets: list["Pool"] = []
+        for lender_id in lender_ids:
+            pool = self.pools.get(lender_id)
+            if pool is None or pool.policy.system_pool or pool.policy.role != "lender":
+                continue
+            if not pool.registry.is_listed(voucher_id):
+                self._list_producer_voucher_on_lender(pool, voucher_id)
+            targets.append(pool)
+        return targets
+
+    def _deposit_producer_voucher_with_lenders(
+        self,
+        *,
+        producer_pool: "Pool",
+        agent: "Agent",
+        voucher_id: str,
+        voucher_value_usd: float,
+        source: str,
+    ) -> bool:
+        voucher_value_usd = max(0.0, float(voucher_value_usd))
+        if voucher_value_usd <= 1e-9:
+            return False
+        value = self._asset_value(producer_pool, voucher_id)
+        if value <= 1e-12:
+            return False
+        targets = self._producer_voucher_lender_deposit_targets(voucher_id)
+        if not targets:
+            targets = [producer_pool]
+            if not producer_pool.registry.is_listed(voucher_id):
+                producer_pool.list_asset_with_value_and_limit(
+                    voucher_id,
+                    value=value,
+                    window_len=self.cfg.default_window_len,
+                    cap_in=self.cfg.producer_voucher_cap_in,
+                )
+
+        total_units = voucher_value_usd / value
+        if all(target.pool_id != producer_pool.pool_id for target in targets):
+            available_units = max(0.0, producer_pool.vault.get(voucher_id))
+            transferred_units = min(available_units, total_units)
+            if transferred_units > 1e-9:
+                self._vault_sub(
+                    producer_pool,
+                    voucher_id,
+                    transferred_units,
+                    f"{source}_transfer_out",
+                    agent.agent_id,
+                )
+            issued_units = total_units - transferred_units
+        else:
+            issued_units = total_units
+        if issued_units > 1e-9:
+            agent.issuer.issue(issued_units)
+        units_per_target = total_units / float(len(targets))
+        value_per_target = voucher_value_usd / float(len(targets))
+        for target in targets:
+            self._vault_add(target, voucher_id, units_per_target, source, agent.agent_id)
+            self.log.add(Event(
+                self.tick,
+                "PRODUCER_VOUCHER_DEPOSIT",
+                actor_id=agent.agent_id,
+                pool_id=target.pool_id,
+                asset_id=voucher_id,
+                amount=value_per_target,
+                meta={
+                    "source": source,
+                    "producer_pool_id": producer_pool.pool_id,
+                    "voucher_units": units_per_target,
+                },
+            ))
+        self._record_producer_deposit_value(voucher_id, voucher_value_usd)
+        self._producer_deposit_voucher_usd_tick += voucher_value_usd
+        self._producer_deposit_voucher_usd_total += voucher_value_usd
+        return True
+
+    def _deposit_producer_stable_with_lenders(
+        self,
+        *,
+        producer_pool: "Pool",
+        agent: "Agent",
+        voucher_id: str,
+        stable_value_usd: float,
+        source: str,
+    ) -> bool:
+        stable_value_usd = max(0.0, float(stable_value_usd))
+        if stable_value_usd <= 1e-9:
+            return False
+        stable_id = self.cfg.stable_symbol
+        stable_value = self._asset_value(producer_pool, stable_id)
+        if stable_value <= 1e-12:
+            stable_value = 1.0
+        stable_units = stable_value_usd / stable_value
+        targets = self._producer_voucher_lender_deposit_targets(voucher_id)
+        if not targets:
+            targets = [producer_pool]
+
+        if all(target.pool_id != producer_pool.pool_id for target in targets):
+            available_units = max(0.0, producer_pool.vault.get(stable_id))
+            transferred_units = min(available_units, stable_units)
+            if transferred_units > 1e-9:
+                self._vault_sub(
+                    producer_pool,
+                    stable_id,
+                    transferred_units,
+                    f"{source}_transfer_out",
+                    agent.agent_id,
+                )
+            onramp_units = stable_units - transferred_units
+        else:
+            onramp_units = stable_units
+        if onramp_units > 1e-9:
+            self._stable_onramp_usd_tick += onramp_units * stable_value
+
+        units_per_target = stable_units / float(len(targets))
+        value_per_target = stable_value_usd / float(len(targets))
+        for target in targets:
+            self._vault_add(target, stable_id, units_per_target, source, agent.agent_id)
+            self.log.add(Event(
+                self.tick,
+                "PRODUCER_STABLE_DEPOSIT",
+                actor_id=agent.agent_id,
+                pool_id=target.pool_id,
+                asset_id=stable_id,
+                amount=value_per_target,
+                meta={
+                    "source": source,
+                    "producer_pool_id": producer_pool.pool_id,
+                },
+            ))
+        self._record_producer_deposit_value(voucher_id, stable_value_usd)
+        self._producer_deposit_stable_usd_tick += stable_value_usd
+        self._producer_deposit_stable_usd_total += stable_value_usd
+        return True
+
     def _pool_total_value(self, pool: "Pool") -> float:
         cached = self._pool_value_cache.get(pool.pool_id)
         if cached is None:
@@ -2058,6 +2195,33 @@ class SimulationEngine:
             attempts = min(attempts, max_attempts)
         return max(0, attempts)
 
+    def _apply_producer_credit_request_budget(
+        self,
+        pools: list["Pool"],
+        remaining_requests: int | None,
+    ) -> int | None:
+        if remaining_requests is None or remaining_requests <= 0:
+            return remaining_requests
+        share = max(0.0, min(1.0, float(self.cfg.producer_credit_request_budget_share or 0.0)))
+        if share <= 0.0:
+            return remaining_requests
+        producers = [
+            pool for pool in pools
+            if not pool.policy.system_pool and pool.policy.role == "producer"
+        ]
+        if not producers:
+            return remaining_requests
+        budget = min(len(producers), max(1, int(math.ceil(remaining_requests * share))))
+        if budget <= 0:
+            return remaining_requests
+        sampled = self.rng.sample(producers, k=budget) if budget < len(producers) else list(producers)
+        for pool in sampled:
+            if remaining_requests <= 0:
+                break
+            self._attempt_repayment(pool)
+            remaining_requests -= 1
+        return remaining_requests
+
     def _record_swap_attempt(self, pool_id: str, success: bool) -> None:
         if not pool_id:
             return
@@ -3046,12 +3210,12 @@ class SimulationEngine:
             if own_amt > 0:
                 self._vault_add(pool, own_v, own_amt, "seed_voucher", agent.agent_id)
                 agent.issuer.issue(own_amt)
-                self._record_producer_deposit_value(
-                    own_v,
-                    own_amt * self._asset_value(pool, own_v),
-                )
                 supply_updates.add(own_v)
             self._assign_producer_voucher_to_lender(own_v)
+            producer_count = max(1, int(cfg.initial_producers or 1))
+            stable_seed = max(0.0, float(cfg.producer_initial_stable_total_usd or 0.0)) / producer_count
+            if stable_seed > 0.0:
+                self._vault_add(pool, cfg.stable_symbol, stable_seed, "seed_stable", "system")
 
         elif role == "liquidity_provider":
             self._lp_pending_contribution_tick[pool.pool_id] = self.tick + 1
@@ -3060,7 +3224,12 @@ class SimulationEngine:
                 self._vault_add(pool, cfg.stable_symbol, stable_seed, "seed_stable", "system")
 
         else:  # consumer
-            stable_seed = float(max(0.0, np.random.exponential(cfg.initial_stable_per_pool_mean * 0.25)))
+            consumer_count = max(1, int(cfg.initial_consumers or 1))
+            consumer_seed_total = max(0.0, float(cfg.consumer_initial_stable_total_usd or 0.0))
+            if consumer_seed_total > 0.0:
+                stable_seed = consumer_seed_total / consumer_count
+            else:
+                stable_seed = float(max(0.0, np.random.exponential(cfg.initial_stable_per_pool_mean * 0.25)))
             self._vault_add(pool, cfg.stable_symbol, stable_seed, "seed_stable", "system")
 
         self.log.add(Event(self.tick, "POOL_CONFIGURED", actor_id=agent.agent_id, pool_id=pool.pool_id,
@@ -3547,10 +3716,7 @@ class SimulationEngine:
             )
             if stable_amount > 1e-9:
                 self._vault_add(pool, stable_id, stable_amount, "productive_credit_inflow", "business")
-                self._record_producer_deposit_value(voucher_id, stable_amount)
                 self._stable_onramp_usd_tick += stable_amount
-                self._producer_deposit_stable_usd_tick += stable_amount
-                self._producer_deposit_stable_usd_total += stable_amount
                 self._productive_credit_stable_retained_usd_tick += stable_amount
                 self._productive_credit_stable_retained_usd_total += stable_amount
                 self._productive_credit_stable_retained_usd_by_pool[pool_id] = (
@@ -3559,32 +3725,26 @@ class SimulationEngine:
                 )
             if voucher_value > 1e-9:
                 agent = self.agents.get(pool.steward_id)
-                value = self._asset_value(pool, voucher_id)
-                voucher_units = voucher_value / max(1e-12, value)
-                if not pool.registry.is_listed(voucher_id):
-                    pool.list_asset_with_value_and_limit(
-                        voucher_id,
-                        value=value,
-                        window_len=self.cfg.default_window_len,
-                        cap_in=self.cfg.producer_voucher_cap_in,
-                    )
-                self._vault_add(pool, voucher_id, voucher_units, "productive_credit_voucher_deposit", "business")
                 if agent is not None:
-                    agent.issuer.issue(voucher_units)
-                self._record_producer_deposit_value(voucher_id, voucher_value)
-                self._producer_deposit_voucher_usd_tick += voucher_value
-                self._producer_deposit_voucher_usd_total += voucher_value
-                self._productive_credit_voucher_deposit_usd_tick += voucher_value
-                self._productive_credit_voucher_deposit_usd_total += voucher_value
-                self._productive_credit_voucher_deposit_usd_by_pool[pool_id] = (
-                    self._productive_credit_voucher_deposit_usd_by_pool.get(pool_id, 0.0)
-                    + voucher_value
-                )
-                self._productive_credit_voucher_deposit_usd_by_pool_tick[pool_id] = (
-                    self._productive_credit_voucher_deposit_usd_by_pool_tick.get(pool_id, 0.0)
-                    + voucher_value
-                )
-                self._mark_productive_credit_voucher_activity(pool_id, voucher_id)
+                    deposited = self._deposit_producer_voucher_with_lenders(
+                        producer_pool=pool,
+                        agent=agent,
+                        voucher_id=voucher_id,
+                        voucher_value_usd=voucher_value,
+                        source="productive_credit_voucher_deposit",
+                    )
+                    if deposited:
+                        self._productive_credit_voucher_deposit_usd_tick += voucher_value
+                        self._productive_credit_voucher_deposit_usd_total += voucher_value
+                        self._productive_credit_voucher_deposit_usd_by_pool[pool_id] = (
+                            self._productive_credit_voucher_deposit_usd_by_pool.get(pool_id, 0.0)
+                            + voucher_value
+                        )
+                        self._productive_credit_voucher_deposit_usd_by_pool_tick[pool_id] = (
+                            self._productive_credit_voucher_deposit_usd_by_pool_tick.get(pool_id, 0.0)
+                            + voucher_value
+                        )
+                        self._mark_productive_credit_voucher_activity(pool_id, voucher_id)
             if clipped_value > 1e-9:
                 self._productive_credit_voucher_deposit_cap_clipped_usd_tick += clipped_value
                 self._productive_credit_voucher_deposit_cap_clipped_usd_total += clipped_value
@@ -4131,47 +4291,27 @@ class SimulationEngine:
             if agent is None:
                 continue
             voucher_id = agent.voucher_spec.voucher_id
-            value = self._asset_value(pool, voucher_id)
             base_value = max(self._pool_total_value(pool), float(self.cfg.random_request_amount_mean or 1.0))
             stable_amount = (base_value * stable_rate / float(MONTH_TICKS)) * stride
             if stable_amount > 1e-9:
-                self._vault_add(pool, stable_id, stable_amount, "producer_stable_deposit", "business")
-                self._record_producer_deposit_value(voucher_id, stable_amount)
-                self._stable_onramp_usd_tick += stable_amount
-                self._producer_deposit_stable_usd_tick += stable_amount
-                self._producer_deposit_stable_usd_total += stable_amount
-                self.log.add(Event(
-                    self.tick,
-                    "PRODUCER_STABLE_DEPOSIT",
-                    pool_id=pool.pool_id,
-                    asset_id=stable_id,
-                    amount=stable_amount,
-                ))
+                self._deposit_producer_stable_with_lenders(
+                    producer_pool=pool,
+                    agent=agent,
+                    voucher_id=voucher_id,
+                    stable_value_usd=stable_amount,
+                    source="producer_stable_deposit",
+                )
             voucher_value = (base_value * voucher_rate / float(MONTH_TICKS)) * stride
             if voucher_value > 1e-9:
-                amount = voucher_value / max(1e-9, value)
-                if not pool.registry.is_listed(voucher_id):
-                    pool.list_asset_with_value_and_limit(
-                        voucher_id,
-                        value=value,
-                        window_len=self.cfg.default_window_len,
-                        cap_in=self.cfg.producer_voucher_cap_in,
-                    )
-                self._vault_add(pool, voucher_id, amount, "producer_voucher_deposit", agent.agent_id)
-                agent.issuer.issue(amount)
-                self._record_producer_deposit_value(voucher_id, voucher_value)
-                self._producer_deposit_voucher_usd_tick += voucher_value
-                self._producer_deposit_voucher_usd_total += voucher_value
-                updated_vouchers.add(voucher_id)
-                self.log.add(Event(
-                    self.tick,
-                    "PRODUCER_VOUCHER_DEPOSIT",
-                    actor_id=agent.agent_id,
-                    pool_id=pool.pool_id,
-                    asset_id=voucher_id,
-                    amount=voucher_value,
-                    meta={"voucher_units": amount},
-                ))
+                deposited = self._deposit_producer_voucher_with_lenders(
+                    producer_pool=pool,
+                    agent=agent,
+                    voucher_id=voucher_id,
+                    voucher_value_usd=voucher_value,
+                    source="producer_voucher_deposit",
+                )
+                if deposited:
+                    updated_vouchers.add(voucher_id)
         if updated_vouchers:
             self._refresh_lender_voucher_limits(updated_vouchers)
             self.rebuild_indexes()
@@ -4210,33 +4350,15 @@ class SimulationEngine:
             voucher_value = total * (weight / weight_total)
             if voucher_value <= 1e-9:
                 continue
-            value = self._asset_value(pool, voucher_id)
-            amount = voucher_value / max(1e-9, value)
-            if not pool.registry.is_listed(voucher_id):
-                pool.list_asset_with_value_and_limit(
-                    voucher_id,
-                    value=value,
-                    window_len=self.cfg.default_window_len,
-                    cap_in=self.cfg.producer_voucher_cap_in,
-                )
-            self._vault_add(pool, voucher_id, amount, "historical_voucher_backing", agent.agent_id)
-            agent.issuer.issue(amount)
-            self._record_producer_deposit_value(voucher_id, voucher_value)
-            self._producer_deposit_voucher_usd_tick += voucher_value
-            self._producer_deposit_voucher_usd_total += voucher_value
-            updated_vouchers.add(voucher_id)
-            self.log.add(Event(
-                self.tick,
-                "PRODUCER_VOUCHER_DEPOSIT",
-                actor_id=agent.agent_id,
-                pool_id=pool.pool_id,
-                asset_id=voucher_id,
-                amount=voucher_value,
-                meta={
-                    "source": "historical_voucher_backing",
-                    "voucher_units": amount,
-                },
-            ))
+            deposited = self._deposit_producer_voucher_with_lenders(
+                producer_pool=pool,
+                agent=agent,
+                voucher_id=voucher_id,
+                voucher_value_usd=voucher_value,
+                source="historical_voucher_backing",
+            )
+            if deposited:
+                updated_vouchers.add(voucher_id)
         if updated_vouchers:
             self._refresh_lender_voucher_limits(updated_vouchers)
             self.rebuild_indexes()
@@ -5039,6 +5161,8 @@ class SimulationEngine:
             self.log.add(Event(self.tick, "OFFRAMP_APPLIED", amount=total_offramp))
 
     def _apply_monthly_pool_offramp(self) -> None:
+        if not bool(self.cfg.offramps_enabled):
+            return
         rate_producer = max(0.0, float(self.cfg.producer_offramp_rate_per_month or 0.0))
         rate_consumer = max(0.0, float(self.cfg.consumer_offramp_rate_per_month or 0.0))
         if self.cfg.stable_growth_mode == "per_pool":
@@ -5090,6 +5214,8 @@ class SimulationEngine:
             ))
 
     def _apply_monthly_offramp_balancer(self) -> None:
+        if not bool(self.cfg.offramps_enabled):
+            return
         net_onramp = self._stable_onramp_usd_month - self._stable_offramp_usd_month
         if net_onramp <= 1e-9:
             return
@@ -6105,13 +6231,17 @@ class SimulationEngine:
             remaining_requests = int(self.cfg.swap_requests_budget_per_tick or 0)
             if remaining_requests <= 0:
                 remaining_requests = None
+            producer_credit_budget_reserved = (
+                max(0.0, float(self.cfg.producer_credit_request_budget_share or 0.0)) > 0.0
+            )
+            remaining_requests = self._apply_producer_credit_request_budget(pools, remaining_requests)
             for p in pools:
                 if remaining_requests is not None and remaining_requests <= 0:
                     break
                 remaining = self._swap_attempts_for_pool(p)
                 if remaining <= 0:
                     continue
-                if p.policy.role == "producer":
+                if p.policy.role == "producer" and not producer_credit_budget_reserved:
                     attempted = self._attempt_repayment(p)
                     if attempted:
                         remaining -= 1
@@ -6763,13 +6893,22 @@ class SimulationEngine:
             if not in_phase:
                 return False
             return self._attempt_contract_cash_service_repayment(source_pool, voucher_id, period)
+        active_obligations = [
+            obligation
+            for obligation in self._producer_debt_obligations
+            if obligation.producer_pool_id == source_pool.pool_id
+            and obligation.voucher_id == voucher_id
+            and obligation.remaining_voucher_units > 1e-9
+        ]
         lender_pools = {
-            pid for pid, p in self.pools.items()
-            if p.policy.role == "lender" and p.vault.get(voucher_id) > 1e-9 and p.registry.is_listed(voucher_id)
+            obligation.lender_pool_id
+            for obligation in active_obligations
+            if obligation.lender_pool_id in self.pools
+            and self.pools[obligation.lender_pool_id].policy.role == "lender"
         }
-        debt = sum(self.pools[pid].vault.get(voucher_id) for pid in lender_pools)
+        debt = sum(obligation.remaining_voucher_units for obligation in active_obligations)
         if debt <= 1e-9:
-            if not in_phase and source_pool.vault.get(self.cfg.stable_symbol) > 1e-9:
+            if not in_phase:
                 return False
             if bool(getattr(self.cfg, "producer_primary_voucher_borrowing_enabled", False)):
                 share = max(
@@ -6913,12 +7052,14 @@ class SimulationEngine:
             return 0.0
         voucher_id = agent.voucher_spec.voucher_id
         debt = 0.0
-        for p in self.pools.values():
-            if p.policy.role != "lender":
+        for obligation in self._producer_debt_obligations:
+            if obligation.producer_pool_id != source_pool.pool_id:
                 continue
-            if not p.registry.is_listed(voucher_id):
+            if obligation.voucher_id != voucher_id:
                 continue
-            debt += p.vault.get(voucher_id)
+            if obligation.remaining_voucher_units <= 1e-9:
+                continue
+            debt += obligation.remaining_voucher_units
         return debt
 
     def _voucher_loan_target_candidates(

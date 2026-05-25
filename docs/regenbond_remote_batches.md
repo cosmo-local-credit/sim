@@ -36,17 +36,21 @@ pipeline. That pipeline uses `RegenBonds/cleaned_data/data/csv` and should be
 run in the private research workspace, then exported into this repo as the
 public-safe `analysis/sarafu_calibration/` bundle before pushing.
 
-The current exported calibration is the Kenya KES/KSh community lending-pool
-cohort: `73` open lender pools, `996` unique producer-voucher wallets,
+The current exported calibration is the Kenya KES/KSh community-pool cohort:
+`73` open pools, `996` unique producer-voucher wallets,
 `1,247` accepted-voucher member slots, and `462` recommended external
 non-producer consumer wallets. Stable-side pool interaction has `950`
 address-pool slots; that is an interaction count, not the consumer-wallet
 count. Producer and consumer wallets are private source/sink wallets, while
-open routing and NOAM clearing venues are lender pools only.
+open routing and NOAM clearing venues are pools only. In code, these open
+automatic-swap venues still use the `lender` role; in paper-facing language
+they are simply `pools`. Producer, consumer, issuer, and bondholder holdings
+are `wallets`: they can initiate or receive swaps and routes, but other agents
+cannot swap through them.
 
 Current paper-facing interpretation uses `sarafu_engine_validation` as the
-no-bond gate and `bond_issuer_frontier` as the issuer/lender-pool frontier.
-The frontier deploys gross bond principal directly into eligible lender pools,
+no-bond gate and `bond_issuer_frontier` as the issuer/pool frontier.
+The frontier deploys gross bond principal directly into eligible pools,
 uses producer own-voucher-in/stable-out borrowing, and evaluates scheduled
 bondholder payment separately from recovered-stable cash headroom. Current
 frontier runs also include bounded productive-credit feedback: loan-enabled
@@ -55,7 +59,7 @@ within aggregate calibration shares and growth caps.
 
 The current ROLA/frontier-pilot configuration also enables producer primary
 voucher borrowing, voucher-loan fallback, voucher-loan activity boost, and
-bounded consumer/third-party stable purchases of lender-held producer vouchers.
+bounded consumer/third-party stable purchases of pool-held producer vouchers.
 The earlier 20-run `frontier-rola-regeneration-probe` passed all tested
 current-scale low-principal cells from `0` to `0.05` principal ratio with
 scheduled bond service paid and voucher-to-voucher circulation preserved. That
@@ -67,7 +71,7 @@ Terminology note: `frontier-rola-regeneration-probe` is a historical batch
 name. In the current documentation it means a voucher-capable ROSCA-like
 credit-pool mechanism probe. It starts from a Sarafu-calibrated substrate with
 stable-credit logic, borrowing rights, credit limits, repayment obligations,
-producer voucher identities, lender acceptance rules, and routing. The
+producer voucher identities, pool acceptance rules, and routing. The
 separate no-voucher ROSCA-to-ROLA regeneration counterfactual is future work
 and is not run by this target.
 
@@ -75,14 +79,20 @@ Current frontier defaults are calibration-backed where possible:
 
 - producer debt maturity recovery uses the mature borrow-proxy value support
   rate, currently `0.673`;
+- producer credit attempts reserve a calibrated slice of the route-request
+  budget for producer wallets before ordinary pool traffic. The current
+  voucher-source budget share is `0.936905`;
 - producer primary voucher-borrowing attempts use the recent voucher-source
-  motif share, currently `0.863292`, unless explicitly overridden;
+  motif share, currently `0.868845`, unless explicitly overridden;
 - producer-voucher overlap uses the empirical aggregate pool-degree
   distribution;
-- the visible lender-held voucher purchase budget is a current-network
-  `$184.061305` per weekly tick, not a per-consumer allowance; this is the
-  direct pool-era stable-to-voucher purchase cash mean and frontier runs scale
-  it by network size;
+- external stable-to-voucher purchase capacity is seeded in private
+  producer/consumer wallets from the empirical stable-to-voucher purchase
+  value, not injected into pools. The current 260-week default is `2`
+  purchase attempts per tick, external-consumer share `0.977324`, inventory
+  share `0.05`, and no per-tick purchase-budget onramp unless explicitly
+  overridden. Private producer/consumer stable is not swept out in validation;
+  frontier runs scale the initial private stable balances by network size;
 - productive-credit voucher-source boost coefficients are loaded from the
   post-borrow event-window calibration artifact. In the current artifact the
   same-voucher source boost is `0.0` and the source-size multiplier is `1.0`,
@@ -93,8 +103,11 @@ Current frontier defaults are calibration-backed where possible:
 - frontier runs treat producer/consumer stable balances as transactional
   money, not savings reserves, so ordinary stable-spend reserve protection is
   off by default;
-- the main pilot uses fee-service share `1.0`, so eligible fee cash reserves
-  into the lockbox before excess goes to the waterfall.
+- the main pilot uses fee-service share `1.0`: stable swap fees reserve into the
+  bond-service lockbox first; voucher swap fees move to the CLC fee-conversion
+  wallet, which attempts to route them through open pools into stable for
+  additional bond-service reservation. Only post-service headroom should be read
+  as available for mandates, insurance, operations, or other discretionary uses.
 
 For later runs:
 
@@ -266,13 +279,19 @@ passed the low-principal probe:
 ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK=1
 ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST=1
 ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING=1
-# Leave unset for the calibrated default, currently 0.863292.
-# PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE=0.863292
+# Leave unset for the calibrated defaults, currently 0.868845 primary
+# voucher-borrowing share and 0.936905 producer-credit route-budget share.
+# PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE=0.868845
+# PRODUCER_CREDIT_REQUEST_BUDGET_SHARE=0.936905
 ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND=1
-LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK=5
-LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE=0.75
-LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE=0.05
-LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK=184.061305
+# Leave these unset for calibrated defaults: currently 2 attempts per tick,
+# consumer share 0.977324, inventory share 0.05, and no per-tick purchase
+# budget onramp. Private consumer/producer stable balances are seeded from
+# empirical stable-to-voucher purchase value instead.
+# LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK=2
+# LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE=0.977324
+# LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE=0.05
+# LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK=0
 ```
 
 These remain ordinary environment overrides. Set them explicitly only for
@@ -293,10 +312,49 @@ The revised Monte Carlo also reads aggregate tables for:
 - stable-to-voucher debt-removal purchase motifs;
 - voucher-fee-to-stable conversion capacity;
 - fee-service reservation into the bond-service lockbox;
-- quarterly lender-pool clearing capacity;
+- quarterly pool clearing capacity;
 - route-substitution diagnostics.
 - unit normalization for KES/KSh vouchers against USD stable, including the
   simulator convention `1 voucher = 1 KSh`.
+
+Current topology and flow semantics:
+
+- empirical community pools are modeled as open pools;
+- producers and consumers have private wallets that can initiate or receive
+  routes but are not traversable NOAM/clearing venues;
+- producer wallets start with their own vouchers; those private seed vouchers
+  do not create credit capacity until deposited into pools;
+- producer deposits in pools create credit capacity and lending limits;
+  they are not treated as outstanding debt until the producer executes a
+  stable-loan or voucher-loan route against the pool;
+- calibrated producer voucher and stable deposits are transferred into assigned
+  pools, with producer voucher acceptance following the empirical
+  multi-pool overlap distribution;
+- private producer/consumer stable balances are seeded from empirical
+  stable-to-voucher purchase value, split by the calibrated external-consumer
+  versus producer-self event mix;
+- validation/no-bond runs include historical philanthropic/programmatic stable
+  backing as pool deposits, while bond-frontier runs omit that
+  historical stable backing and use bond principal as the modeled pool
+  stable injection;
+- the frontier keeps the same private-wallet, deposit, swap, and 2% fee
+  mechanics, plus issuer/bondholder accounting and bond capital deployment.
+
+Empirical integrity audit:
+
+```bash
+cd /home/wor/src/ge/clc
+python3 RegenBonds/analysis/producer_voucher_integrity_audit.py \
+  --sim-output-dir sim/analysis/monte_carlo/behavior_alignment_smoke52
+```
+
+The tracked summary is
+`RegenBonds/analysis/producer_voucher_integrity_summary.csv`. The local detail
+file is `RegenBonds/analysis_outputs/producer_voucher_integrity_detail.local.csv`
+and contains raw voucher addresses for audit only. The audit makes the
+pool/wallet boundary explicit: mints start in producer wallets, deposits move
+assets into pools, credit limits are pool-token records, and debt is proxied by
+swap-originated producer voucher exposure above deposit backing.
 
 These route-substitution diagnostics are scenario anchors, not observed
 failed-route denominators. Regenerate the public bundle from the private
@@ -524,6 +582,7 @@ Frontier-specific parameters:
 | `ROUTE_SUCCESS_FLOOR` | p05 route-success safety floor, binding only when `ROUTE_SUCCESS_MODE=absolute`. | `0.85` |
 | `BOND_TERM` | Frontier term in ticks. Do not use `TERM`. | `260` |
 | `ENABLE_ORDINARY_STABLE_SPEND_PROTECTION` | Optional control run: restore producer/consumer stable reserve and voucher-buffer preservation for ordinary stable-source spending. | `0` |
+| `PRODUCER_CREDIT_REQUEST_BUDGET_SHARE` | Optional control run: override the calibrated producer-wallet credit-attempt share of each tick's route-request budget. | calibrated |
 
 Do not use `TERM` for bond terms; shells and `tmux` use `TERM` for terminal
 type values such as `tmux-256color`.
@@ -1167,7 +1226,7 @@ and voucher deposits, deposit-based credit capacity, productive-credit inflow,
 net circulating voucher obligation, producer-debt maturity/repaid/defaulted
 principal, contract cash-service due/paid, producer debt closed by circulation,
 voucher-fee conversion, fee-service lockbox reservation, quarterly clearing,
-lender liquidity impact, fixed-target route success, and substituted route
+pool liquidity impact, fixed-target route success, and substituted route
 success.
 
 `--no-png` skips PNG generation but still writes CSV, LaTeX, Markdown, partial

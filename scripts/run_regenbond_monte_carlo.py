@@ -363,6 +363,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--producer-credit-request-budget-share",
+        type=float,
+        default=None,
+        help=(
+            "Share of the calibrated route-request budget reserved for producer "
+            "credit attempts. Defaults to the calibrated voucher-source swap share "
+            "among recent empirical motifs."
+        ),
+    )
+    parser.add_argument(
         "--producer-voucher-loan-max-target-candidates",
         type=int,
         default=3,
@@ -389,28 +399,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lender-voucher-purchase-attempts-per-tick",
         type=int,
-        default=5,
-        help="Experimental stable-to-voucher purchase attempts per tick when purchase demand is enabled.",
+        default=None,
+        help=(
+            "Experimental stable-to-voucher purchase attempts per tick when purchase "
+            "demand is enabled. Defaults to the calibrated event rate."
+        ),
     )
     parser.add_argument(
         "--lender-voucher-purchase-consumer-share",
         type=float,
-        default=0.75,
-        help="Share of purchase-demand attempts assigned to consumer stable buyers.",
+        default=None,
+        help=(
+            "Share of purchase-demand attempts assigned to external consumer stable "
+            "buyers. Defaults to the calibrated external/producers split."
+        ),
     )
     parser.add_argument(
         "--lender-voucher-purchase-inventory-share",
         type=float,
-        default=0.05,
-        help="Maximum share of a target lender-held voucher inventory considered in one purchase attempt.",
+        default=None,
+        help=(
+            "Maximum share of a target lender-held voucher inventory considered in one "
+            "purchase attempt. Defaults to the calibrated frontier setting."
+        ),
     )
     parser.add_argument(
         "--lender-voucher-purchase-stable-budget-usd-per-tick",
         type=float,
-        default=0.0,
+        default=None,
         help=(
             "Experimental calibrated stable purchase budget injected per tick for "
-            "consumer/third-party purchases of lender-held producer vouchers."
+            "consumer/third-party purchases of lender-held producer vouchers. Defaults "
+            "to the empirical stable-to-voucher purchase value spread over the horizon."
         ),
     )
     parser.add_argument(
@@ -641,6 +661,7 @@ SHARD_CONFIG_KEYS = (
     "enable_producer_voucher_loan_activity_boost",
     "enable_producer_primary_voucher_borrowing",
     "producer_primary_voucher_borrowing_attempt_share",
+    "producer_credit_request_budget_share",
     "producer_voucher_loan_max_target_candidates",
     "producer_voucher_overlap_mode",
     "enable_lender_voucher_purchase_demand",
@@ -1402,10 +1423,63 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
             current_circulation.get("voucher_to_voucher_share"),
             0.50,
         )
+    circulation_total_swaps = safe_float(current_circulation.get("total_swaps"))
+    if circulation_total_swaps > 1e-9:
+        producer_credit_request_budget_share = voucher_source_borrowing_count / circulation_total_swaps
+    else:
+        producer_credit_request_budget_share = 0.0
     setattr(
         args,
         f"_{prefix}_producer_primary_voucher_borrowing_attempt_share",
         max(0.0, min(1.0, primary_voucher_borrowing_attempt_share)),
+    )
+    setattr(
+        args,
+        f"_{prefix}_producer_credit_request_budget_share",
+        max(0.0, min(0.95, producer_credit_request_budget_share)),
+    )
+    purchase_cash_value = safe_float(
+        calibration.debt_removal_calibration.get("stable_to_voucher_purchase_cash_value")
+    )
+    purchase_events = safe_float(
+        calibration.debt_removal_calibration.get("stable_to_voucher_purchase_events")
+    )
+    setattr(
+        args,
+        f"_{prefix}_lender_voucher_purchase_stable_budget_usd_per_tick",
+        0.0,
+    )
+    setattr(
+        args,
+        f"_{prefix}_lender_voucher_purchase_attempts_per_tick",
+        max(1, int(math.ceil(purchase_events / max(1, int(ticks))))) if purchase_events > 0.0 else 0,
+    )
+    purchase_external_events = safe_float(
+        calibration.stable_actor_demographics.get("stable_to_voucher_external_events")
+    )
+    purchase_producer_events = safe_float(
+        calibration.stable_actor_demographics.get("stable_to_voucher_producer_self_events")
+    )
+    purchase_classified_events = purchase_external_events + purchase_producer_events
+    if purchase_classified_events > 1e-9:
+        purchase_consumer_share = purchase_external_events / purchase_classified_events
+    else:
+        purchase_consumer_share = 0.75
+    setattr(
+        args,
+        f"_{prefix}_lender_voucher_purchase_consumer_share",
+        max(0.0, min(1.0, purchase_consumer_share)),
+    )
+    setattr(args, f"_{prefix}_lender_voucher_purchase_inventory_share", 0.05)
+    setattr(
+        args,
+        f"_{prefix}_consumer_initial_stable_total_usd",
+        max(0.0, purchase_cash_value * purchase_consumer_share),
+    )
+    setattr(
+        args,
+        f"_{prefix}_producer_initial_stable_total_usd",
+        max(0.0, purchase_cash_value * (1.0 - purchase_consumer_share)),
     )
     activity_boost = calibration.productive_credit_activity_boost_calibration
     setattr(
@@ -1544,9 +1618,20 @@ def scenario_config(
         cfg.min_stable_reserve_mean = 0.0
         cfg.stable_supply_growth_rate = 0.0
         cfg.stable_supply_noise = 0.0
+        cfg.offramps_enabled = False
+        cfg.producer_offramp_rate_per_month = 0.0
+        cfg.consumer_offramp_rate_per_month = 0.0
         cfg.initial_lenders = int(getattr(args, "_current_initial_lenders", cfg.initial_lenders))
         cfg.initial_producers = int(getattr(args, "_current_initial_producers", cfg.initial_producers))
         cfg.initial_consumers = int(getattr(args, "_current_initial_consumers", cfg.initial_consumers))
+        cfg.producer_initial_stable_total_usd = max(
+            0.0,
+            float(getattr(args, "_validation_producer_initial_stable_total_usd", 0.0) or 0.0),
+        )
+        cfg.consumer_initial_stable_total_usd = max(
+            0.0,
+            float(getattr(args, "_validation_consumer_initial_stable_total_usd", 0.0) or 0.0),
+        )
         cfg.max_pools = cfg.initial_lenders + cfg.initial_producers + cfg.initial_consumers
         cfg.random_route_requests_per_tick = int(getattr(args, "_validation_route_requests_per_tick", 2))
         cfg.swap_requests_budget_per_tick = int(getattr(args, "_validation_swap_budget_per_tick", 120))
@@ -1580,17 +1665,127 @@ def scenario_config(
             cfg.producer_deposits_enabled = True
             cfg.historical_voucher_backing_tick = 1
             cfg.historical_voucher_backing_total_usd = voucher_backing_total
+        cfg.lender_voucher_cap_deposit_multiple = 5.0
+        cfg.productive_credit_enabled = True
+        cfg.productive_credit_return_rate = max(
+            0.0, float(getattr(args, "_validation_productive_credit_return_rate", 0.0) or 0.0)
+        )
+        cfg.productive_credit_lag_ticks = max(
+            1, int(getattr(args, "_validation_productive_credit_lag_ticks", 2) or 2)
+        )
+        cfg.productive_credit_voucher_feedback_enabled = True
+        cfg.productive_credit_voucher_deposit_share = max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "_validation_productive_credit_voucher_deposit_share", 0.0) or 0.0),
+            ),
+        )
+        cfg.productive_credit_voucher_deposit_cap_rate_per_month = max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "_validation_productive_credit_voucher_deposit_cap_rate_per_month",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        cfg.productive_credit_voucher_activity_boost_enabled = True
+        cfg.productive_credit_voucher_activity_boost_window_ticks = 13
+        cfg.productive_credit_voucher_source_weight_boost = max(
+            0.0,
+            float(getattr(args, "_validation_productive_credit_voucher_source_weight_boost", 0.0) or 0.0),
+        )
+        cfg.productive_credit_voucher_source_size_multiplier = max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "_validation_productive_credit_voucher_source_size_multiplier",
+                    1.0,
+                )
+                or 1.0
+            ),
+        )
+        cfg.producer_debt_maturity_enabled = True
+        cfg.producer_debt_maturity_ticks = 13
+        cfg.producer_debt_maturity_recovery_rate = max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "_validation_producer_debt_maturity_recovery_rate", 1.0) or 1.0),
+            ),
+        )
+        cfg.producer_debt_maturity_preserve_reserve = True
+        cfg.loan_term_weeks = cfg.producer_debt_maturity_ticks
         cfg.producer_voucher_overlap_mode = "empirical_overlap"
         cfg.producer_voucher_single_lender = False
         cfg.producer_voucher_overlap_bucket_weights = dict(
             getattr(args, "_validation_voucher_pool_overlap_distribution", {}) or {}
+        )
+        cfg.producer_voucher_loan_fallback_enabled = True
+        cfg.producer_voucher_loan_activity_boost_enabled = True
+        cfg.producer_primary_voucher_borrowing_enabled = True
+        cfg.producer_primary_voucher_borrowing_attempt_share = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        args,
+                        "_validation_producer_primary_voucher_borrowing_attempt_share",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+            ),
+        )
+        producer_credit_budget_share = getattr(args, "producer_credit_request_budget_share", None)
+        if producer_credit_budget_share is None:
+            producer_credit_budget_share = getattr(
+                args,
+                "_validation_producer_credit_request_budget_share",
+                0.0,
+            )
+        cfg.producer_credit_request_budget_share = max(
+            0.0,
+            min(1.0, float(producer_credit_budget_share or 0.0)),
+        )
+        cfg.lender_voucher_purchase_demand_enabled = True
+        cfg.lender_voucher_purchase_attempts_per_tick = max(
+            0,
+            int(getattr(args, "_validation_lender_voucher_purchase_attempts_per_tick", 0) or 0),
+        )
+        cfg.lender_voucher_purchase_consumer_share = max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "_validation_lender_voucher_purchase_consumer_share", 0.75) or 0.0),
+            ),
+        )
+        cfg.lender_voucher_purchase_inventory_share = max(
+            0.0,
+            float(getattr(args, "_validation_lender_voucher_purchase_inventory_share", 0.05) or 0.0),
+        )
+        cfg.lender_voucher_purchase_stable_budget_usd_per_tick = max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "_validation_lender_voucher_purchase_stable_budget_usd_per_tick",
+                    0.0,
+                )
+                or 0.0
+            ),
         )
         cfg.consumer_stable_source_bias = 0.25
         cfg.producer_stable_source_bias = 0.05
         cfg.producer_consumer_stable_target_bias = 0.0
         cfg.stable_source_swap_size_multiplier = 2.0
         cfg.voucher_source_swap_size_multiplier = 0.5
-        cfg.stable_excess_sweep_enabled = True
+        cfg.stable_excess_sweep_enabled = False
         cfg.stable_excess_sweep_after_stable_receipt = False
         cfg.stable_excess_sweep_buffer_voucher_share = 0.05
         cfg.stable_excess_sweep_roles = ("producer", "consumer")
@@ -1615,6 +1810,14 @@ def scenario_config(
         cfg.initial_lenders = int(getattr(args, "_current_initial_lenders", cfg.initial_lenders))
         cfg.initial_producers = int(getattr(args, "_current_initial_producers", cfg.initial_producers))
         cfg.initial_consumers = int(getattr(args, "_current_initial_consumers", cfg.initial_consumers))
+        cfg.producer_initial_stable_total_usd = (
+            max(0.0, float(getattr(args, "_frontier_producer_initial_stable_total_usd", 0.0) or 0.0))
+            * factor
+        )
+        cfg.consumer_initial_stable_total_usd = (
+            max(0.0, float(getattr(args, "_frontier_consumer_initial_stable_total_usd", 0.0) or 0.0))
+            * factor
+        )
         if gross_principal > 1e-9 and cfg.initial_lenders <= 0:
             cfg.initial_lenders = 1
         cfg.initial_liquidity_providers = 0
@@ -1635,6 +1838,9 @@ def scenario_config(
         cfg.stable_inflow_per_tick = 0.0
         cfg.stable_supply_growth_rate = 0.0
         cfg.stable_supply_noise = 0.0
+        cfg.offramps_enabled = False
+        cfg.producer_offramp_rate_per_month = 0.0
+        cfg.consumer_offramp_rate_per_month = 0.0
         cfg.producer_deposits_enabled = True
         cfg.producer_deposit_stride_ticks = 4
         cfg.producer_stable_deposit_rate_per_month = max(
@@ -1799,6 +2005,17 @@ def scenario_config(
             )
         else:
             cfg.producer_primary_voucher_borrowing_attempt_share = 0.0
+        producer_credit_budget_share = getattr(args, "producer_credit_request_budget_share", None)
+        if producer_credit_budget_share is None:
+            producer_credit_budget_share = getattr(
+                args,
+                "_frontier_producer_credit_request_budget_share",
+                0.0,
+            )
+        cfg.producer_credit_request_budget_share = max(
+            0.0,
+            min(1.0, float(producer_credit_budget_share or 0.0)),
+        )
         cfg.producer_voucher_loan_max_target_candidates = max(
             1, int(getattr(args, "producer_voucher_loan_max_target_candidates", 3) or 3)
         )
@@ -1806,31 +2023,59 @@ def scenario_config(
             getattr(args, "enable_lender_voucher_purchase_demand", False)
         )
         if cfg.lender_voucher_purchase_demand_enabled:
+            configured_attempts = getattr(args, "lender_voucher_purchase_attempts_per_tick", None)
+            if configured_attempts is None:
+                configured_attempts = getattr(
+                    args,
+                    "_frontier_lender_voucher_purchase_attempts_per_tick",
+                    5,
+                )
             cfg.lender_voucher_purchase_attempts_per_tick = max(
                 0,
                 int(
                     math.ceil(
-                        int(getattr(args, "lender_voucher_purchase_attempts_per_tick", 5) or 0)
-                        * factor
+                        int(configured_attempts or 0) * factor
                     )
                 ),
             )
         else:
             cfg.lender_voucher_purchase_attempts_per_tick = 0
+        configured_consumer_share = getattr(args, "lender_voucher_purchase_consumer_share", None)
+        if configured_consumer_share is None:
+            configured_consumer_share = getattr(
+                args,
+                "_frontier_lender_voucher_purchase_consumer_share",
+                0.75,
+            )
         cfg.lender_voucher_purchase_consumer_share = max(
             0.0,
-            min(1.0, float(getattr(args, "lender_voucher_purchase_consumer_share", 0.75) or 0.0)),
+            min(1.0, float(configured_consumer_share or 0.0)),
         )
+        configured_inventory_share = getattr(args, "lender_voucher_purchase_inventory_share", None)
+        if configured_inventory_share is None:
+            configured_inventory_share = getattr(
+                args,
+                "_frontier_lender_voucher_purchase_inventory_share",
+                0.05,
+            )
         cfg.lender_voucher_purchase_inventory_share = max(
             0.0,
-            float(getattr(args, "lender_voucher_purchase_inventory_share", 0.05) or 0.0),
+            float(configured_inventory_share or 0.0),
         )
+        configured_purchase_budget = getattr(
+            args,
+            "lender_voucher_purchase_stable_budget_usd_per_tick",
+            None,
+        )
+        if configured_purchase_budget is None:
+            configured_purchase_budget = getattr(
+                args,
+                "_frontier_lender_voucher_purchase_stable_budget_usd_per_tick",
+                0.0,
+            )
         cfg.lender_voucher_purchase_stable_budget_usd_per_tick = factor * max(
             0.0,
-            float(
-                getattr(args, "lender_voucher_purchase_stable_budget_usd_per_tick", 0.0)
-                or 0.0
-            ),
+            float(configured_purchase_budget or 0.0),
         )
         cfg.liquidity_mandate_mode = "community_deficit_then_lender"
         cfg.route_substitution_enabled = True
@@ -1869,13 +2114,9 @@ def scenario_config(
             cfg.p_offer_overlap = min(0.95, cfg.p_offer_overlap + 0.06 * math.log2(factor))
             cfg.p_want_overlap = min(0.97, cfg.p_want_overlap + 0.04 * math.log2(factor))
             cfg.desired_assets_growth_per_asset = min(0.50, cfg.desired_assets_growth_per_asset + 0.05 * math.log2(factor))
-        historical_cash_backing_total = float(
-            getattr(args, "_frontier_historical_cash_backing_total_usd", 0.0)
-        )
-        if historical_cash_backing_total > 0.0:
-            cfg.historical_stable_backing_tick = 1
-            cfg.historical_stable_backing_total_usd = historical_cash_backing_total * factor
-            cfg.historical_stable_backing_roles = ("lender",)
+        # Frontier cells model bond principal as the stable injection into
+        # lender pools. Historical philanthropic/programmatic stable backing
+        # remains a validation/no-bond empirical anchor and is not added here.
         historical_voucher_backing_total = float(
             getattr(args, "_frontier_historical_voucher_backing_total_usd", 0.0)
         )
@@ -2756,6 +2997,12 @@ def run_one(
             "empirical_producer_stable_users": getattr(
                 args, "_current_empirical_producer_stable_users", 0
             ),
+            "configured_producer_initial_stable_total_usd": safe_float(
+                getattr(cfg, "producer_initial_stable_total_usd", 0.0)
+            ),
+            "configured_consumer_initial_stable_total_usd": safe_float(
+                getattr(cfg, "consumer_initial_stable_total_usd", 0.0)
+            ),
             "configured_producer_stable_deposit_rate_per_month": safe_float(
                 getattr(args, f"_{control_prefix}_producer_stable_deposit_rate_per_month", 0.0)
             ),
@@ -2801,6 +3048,9 @@ def run_one(
             ),
             "configured_producer_primary_voucher_borrowing_attempt_share": safe_float(
                 getattr(cfg, "producer_primary_voucher_borrowing_attempt_share", 0.0)
+            ),
+            "configured_producer_credit_request_budget_share": safe_float(
+                getattr(cfg, "producer_credit_request_budget_share", 0.0)
             ),
             "configured_lender_voucher_purchase_demand_enabled": int(
                 bool(getattr(cfg, "lender_voucher_purchase_demand_enabled", False))

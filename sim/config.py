@@ -31,6 +31,8 @@ class ScenarioConfig:
     stable_symbol: str = "USD"
     initial_stable_per_pool_mean: float = 2000.0
     lender_initial_stable_mean: float = 0.0
+    producer_initial_stable_total_usd: float = 0.0
+    consumer_initial_stable_total_usd: float = 0.0
     lp_initial_stable_mean: float = 400_000.0
     stable_inflow_per_tick: float = 0.0
     producer_inflow_per_tick: float | None = 0.05  # rate of current stable per month
@@ -269,6 +271,7 @@ class ScenarioConfig:
     # Loan repayment (weeks)
     loan_term_weeks: int = 4
     loan_activity_period_ticks: int = 4  # spread loan issuance/repayment across ticks
+    producer_credit_request_budget_share: float = 0.0
     producer_deposits_enabled: bool = False
     producer_deposit_stride_ticks: int = 4
     producer_stable_deposit_rate_per_month: float = 0.0
