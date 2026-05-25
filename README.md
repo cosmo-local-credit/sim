@@ -11,6 +11,12 @@ The generic UI defaults are small demonstration settings. The paper-facing
 RegenBond runner is calibrated from the exported Kenyan KSh/KES community
 lending-pool bundle: `current` scale is 73 open lender pools, 996 producer
 wallets with producer vouchers, and 462 external non-producer consumer wallets.
+The empirical producer-voucher membership count is 1,247 pool slots because a
+single producer voucher can be accepted in more than one pool. In paper-facing
+runs, `pool` means an open automatic-swap venue with listings, limits,
+inventory, fees, and routing visibility; producer, consumer, issuer, and
+bondholder holdings are private wallets that can initiate or receive routes but
+cannot be traversed by other agents.
 The matching `connected_2x` scale doubles those counts while preserving the
 empirical role mix and producer-voucher pool-overlap distribution.
 
@@ -175,9 +181,10 @@ regenerating the local voucher-obligation layer.
 The current frontier defaults are calibration driven where possible:
 producer debt maturity recovery uses the mature borrow-proxy value support rate
 (`0.673` in the current bundle); primary producer voucher-borrowing attempts
-use the recent voucher-source settlement motif share (`0.863292`, computed as
+use the recent voucher-source settlement motif share (`0.868845`, computed as
 voucher-to-voucher events divided by voucher-to-voucher plus voucher-to-stable
-events); visible lender-held voucher purchase demand uses a network-level
+events) as a behavioral prior, not as a controller that forces realized route
+composition; visible lender-held voucher purchase demand uses a network-level
 stable purchase budget of `$184.061305` per weekly tick, the direct pool-era
 stable-to-voucher purchase cash mean; productive-credit voucher-source boost
 coefficients are loaded from post-borrow event-window calibration. The current
@@ -203,8 +210,8 @@ identical.
 
 Frontier capacity-feedback behavior is controlled by calibration-backed config
 knobs. The current aggregate productive-credit calibration splits loan-enabled
-productive inflow into a stable retained share of `0.615843` and a voucher
-deposit share of `0.384157`, capped at `0.143206` voucher-deposit growth per
+productive inflow into a stable retained share of `0.244881` and a voucher
+deposit share of `0.755119`, capped at `0.189536` voucher-deposit growth per
 month. This mechanism is enabled for frontier runs and is evaluated against the
 matched no-bond baseline; it is disabled for the no-bond validation gate except
 as reported calibration diagnostics.
@@ -248,8 +255,17 @@ terminal and Streamlit outputs match when the displayed command is identical.
 ## Core model (agentic logic)
 
 ### Agents and pools
-- **One agent = one pool**. Each agent issues its own voucher asset `VCHR:<agent_id>` tracked by an issuer ledger.
-- Pools maintain:
+- The generic engine stores every actor as a `Pool` object, but the
+  paper-facing topology distinguishes open pools from private wallets.
+- **Open pools** are the empirical community lending pools. They are the only
+  automatic-swap, routing, and NOAM-clearing venues in paper-facing runs.
+- **Private wallets** belong to producers, consumers, issuers, or bondholders.
+  They can initiate or receive swaps/routes, but other agents cannot traverse
+  or clear through them.
+- Producer wallets each issue one producer voucher asset `VCHR:<agent_id>`
+  tracked by the issuer ledger. That voucher can be accepted by multiple open
+  pools according to the empirical overlap calibration.
+- Open pools maintain:
   - **Vault** (inventory), **listing registry** (what assets they accept), **value index** (prices in USD),
   - **swap limiter** (cap-in per window), **fee registry**, and **fee ledgers**.
 
@@ -260,7 +276,7 @@ terminal and Streamlit outputs match when the displayed command is identical.
   Otherwise, `initial_pools` is used with the role mix probabilities.
 
 ### Roles and policies
-**Producer pools**
+**Producer wallets**
 - **Goal**: hold the producer's private wallet, issue one producer voucher, use
   that voucher for borrowing, and hold stable for repayment or ordinary use.
 - **Listings**: stable + the producer's own voucher. Producer wallets are not
@@ -278,7 +294,9 @@ terminal and Streamlit outputs match when the displayed command is identical.
   - Own voucher seed: `exp(mean=10000)`
 
 **Lender pools**
-- **Goal**: provide stable loans; hold voucher collateral.
+- **Goal**: act as open community swap/lending venues; provide stable loans,
+  hold producer voucher exposure, and route visible voucher and stable
+  liquidity under pool limits.
 - **Listings (wants)**: stable plus producer vouchers assigned by the empirical
   overlap calibration.
 - **Inventory (offers)**: stable + offered assets seed.
@@ -290,7 +308,7 @@ terminal and Streamlit outputs match when the displayed command is identical.
 - **Liquidity**: lenders only gain stable via **liquidity mandates** and **repayment swaps**;
   vouchers via **borrowing swaps** and **voucher↔voucher** swaps.
 
-**Consumer pools**
+**Consumer wallets**
 - **Goal**: hold a private stable wallet, spend stable to acquire producer
   vouchers, and redeem acquired vouchers.
 - **Listings**: stable only. Consumers do not create tradable consumer vouchers
@@ -352,7 +370,11 @@ terminal and Streamlit outputs match when the displayed command is identical.
 ## Routing and trading
 
 ### Swap request generation (per tick)
-- Every **non-system, non-LP pool** tries to execute swaps.
+- Generic demo runs can let every **non-system, non-LP** actor submit route
+  requests. In paper-facing runs, open lender pools are the automatic-swap
+  venues; producer and consumer wallets submit their own borrowing, repayment,
+  purchase, redemption, or ordinary source requests but are not intermediate
+  venues.
 - Per pool attempts are based on:
   - `random_route_requests_per_tick`
   - value-scaled attempts `swap_attempts_value_scale_usd`
@@ -364,7 +386,7 @@ terminal and Streamlit outputs match when the displayed command is identical.
 - Target assets are chosen by `swap_target_selection_mode` and retried up to `swap_target_retry_count` times.
 - Producers avoid ordinary stable spending until debt is cleared; consumers use
   the configured stable-source bias. Frontier runs can preserve each
-  producer/consumer pool's stable reserve plus a voucher-value buffer before
+  producer/consumer wallet's stable reserve plus a voucher-value buffer before
   ordinary stable-sourced swaps.
 - If a route fails at the chosen amount, the engine retries once with a smaller **fallback amount** before giving up.
 
@@ -391,6 +413,11 @@ live pool validation:
 Producer and consumer wallets are private source/sink wallets. They can initiate
 a route and receive the final output or redeemed voucher, but they are not open
 swap venues. The executable NOAM graph traverses lender pools only.
+When configured for the Sarafu validation/frontier profiles, open lender pools
+may execute direct voucher-to-voucher swaps if both vouchers are listed and
+limits/inventory allow. If a producer or consumer route ends in a voucher, that
+voucher is redeemed to the issuer's private producer wallet; it is not retained
+as an open venue balance.
 1) **Working set** (Top-K/Top-M)
    - `noam_topk_pools_per_asset` lender pools per asset
    - `noam_topm_out_per_pool` outputs per pool/asset

@@ -74,9 +74,9 @@ Implemented changes:
 - Added producer deposits of stable and own vouchers, with producer credit capacity based on deposited value using the default `5x` multiple.
 - Added productive-credit stable inflow after producer borrowing, calibrated from aggregate borrow-return timing where available.
 - Added loan-induced voucher-deposit feedback from productive-credit inflow.
-  The current aggregate calibration retains `0.615843` as stable, allocates
-  `0.384157` to voucher deposits, and caps loan-induced voucher-deposit growth
-  at `0.143206` per month.
+  The current aggregate calibration retains `0.244881` as stable, allocates
+  `0.755119` to voucher deposits, and caps loan-induced voucher-deposit growth
+  at `0.189536` per month.
 - Added dated producer-debt obligations for frontier runs: producer voucher borrowing creates a maturity record and a contract cash-service obligation. Lender-held vouchers can close through normal circulation, but circulation alone only closes the pool-level voucher exposure; stable bond-service recovery requires borrower repayment, consumer or third-party stable purchase, or contract cash-service payment. Any remaining cash service at the 13-tick maturity is attempted from producer stable and then written off under the configured recovery/default rate.
 - Calibrated producer debt maturity recovery from the mature borrow-proxy
   value support rate. The current bundle sets this at `0.673`, replacing the
@@ -94,12 +94,17 @@ Implemented changes:
   cash-service accounting, but it is not counted as bond-service cash until
   stable is recovered.
 - Calibrated the default primary voucher-borrowing attempt share from the
-  recent voucher-source settlement motif mix. The current value is `0.863292`,
-  replacing the earlier fixed `0.50` probe assumption.
+  recent voucher-source settlement motif mix. The current value is `0.868845`,
+  replacing the earlier fixed `0.50` probe assumption. This is a decision
+  prior: producers may seek stable credit, but when redeemable goods/services
+  are available through listed vouchers, the model allows direct
+  voucher-to-voucher borrowing through open lender pools instead of forcing a
+  stable leg first.
 - Added bounded lender-held-voucher purchase demand. Consumers and third-party
   buyers can use calibrated stable purchase budgets to buy visible producer
   vouchers from lender pools, subject to route success, target inventory, and
-  reserve protection.
+  reserve protection. Consumer stable-to-voucher purchases are generated here,
+  not duplicated as generic ordinary stable-spend routes.
 - Added routed conversion attempts for voucher-denominated fees. Successful stable conversion can reserve the configured fee-service share into the bond lockbox before excess fee cash enters the CLC waterfall; failures are retained as voucher fee inventory.
 - Added quarterly clearing of eligible recovered stable from lender pools, capped by scheduled issuer need and lender surplus.
 - Added a configurable bond-service lockbox. Frontier jobs reserve recovered lender stable and eligible fee-service cash against `1.25x` remaining scheduled principal plus coupon before cash can recirculate; `next_due` remains available as a control mode. The `1.25x` value is reported as issuer operating/risk headroom and as a separate headroom frontier, not as extra scheduled bondholder service.

@@ -7,6 +7,7 @@ from pathlib import Path
 from scripts.run_regenbond_monte_carlo import (
     SHARD_CONFIG_KEYS,
     bond_metrics,
+    configure_sarafu_activity_controls,
     frontier_baseline_metrics,
     issuer_headroom_frontier_rows,
     load_calibration,
@@ -188,6 +189,89 @@ class RegenBondRevisionTests(unittest.TestCase):
         for pool_id, _asset_id in engine._noam_top_out:
             self.assertNotIn(pool_id, private_pool_ids)
             self.assertEqual(engine.pools[pool_id].policy.role, "lender")
+
+    def test_open_pool_direct_voucher_to_voucher_edges_are_config_gated(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=2,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=3,
+            )
+        )
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        producers = [agent for agent in engine.agents.values() if agent.role == "producer"]
+        voucher_in = producers[0].voucher_spec.voucher_id
+        voucher_out = producers[1].voucher_spec.voucher_id
+        for voucher_id in (voucher_in, voucher_out):
+            lender_pool.list_asset_with_value_and_limit(
+                voucher_id,
+                value=1.0,
+                window_len=10,
+                cap_in=500.0,
+            )
+            lender_pool.values.set_value(voucher_id, 1.0)
+        engine._vault_add(lender_pool, voucher_out, 50.0, "test_seed", "test")
+        engine.tick = 1
+
+        self.assertFalse(engine._noam_edge_allowed(lender_pool, voucher_in, voucher_out, 1.0))
+
+        engine.cfg.open_pool_direct_voucher_to_voucher_enabled = True
+        self.assertTrue(engine._noam_edge_allowed(lender_pool, voucher_in, voucher_out, 1.0))
+        private_pool = engine.pools[producers[0].pool_id]
+        self.assertFalse(engine._is_routable_pool(private_pool))
+
+    def test_route_motif_counts_one_economic_route_not_each_hop(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=2,
+                initial_producers=2,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=4,
+                open_pool_direct_voucher_to_voucher_enabled=True,
+                producer_voucher_single_lender=False,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        lenders = [pool for pool in engine.pools.values() if pool.policy.role == "lender"]
+        producers = [agent for agent in engine.agents.values() if agent.role == "producer"]
+        source_agent, target_agent = producers[0], producers[1]
+        source_pool = engine.pools[source_agent.pool_id]
+        voucher_in = source_agent.voucher_spec.voucher_id
+        voucher_out = target_agent.voucher_spec.voucher_id
+        for pool in [source_pool, *lenders, engine.pools[target_agent.pool_id]]:
+            for asset_id in (voucher_in, voucher_out, stable_id):
+                pool.values.set_value(asset_id, 1.0)
+        for lender in lenders:
+            lender.list_asset_with_value_and_limit(voucher_in, value=1.0, window_len=10, cap_in=500.0)
+            lender.list_asset_with_value_and_limit(voucher_out, value=1.0, window_len=10, cap_in=500.0)
+            lender.list_asset_with_value_and_limit(stable_id, value=1.0, window_len=10, cap_in=500.0)
+        for pool, asset_id in ((source_pool, voucher_in), (lenders[0], stable_id), (lenders[1], voucher_out)):
+            current = pool.vault.get(asset_id)
+            if current > 0.0:
+                engine._vault_sub(pool, asset_id, current, "test_clear", "test")
+        engine._vault_add(source_pool, voucher_in, 20.0, "test_seed", "test")
+        engine._vault_add(lenders[0], stable_id, 20.0, "test_seed", "test")
+        engine._vault_add(lenders[1], voucher_out, 20.0, "test_seed", "test")
+        plan = RoutePlan(
+            ok=True,
+            reason="test",
+            hops=[
+                Hop(lenders[0].pool_id, voucher_in, stable_id, 10.0),
+                Hop(lenders[1].pool_id, stable_id, voucher_out, 10.0),
+            ],
+        )
+
+        ok = engine.execute_route_from_pool(source_pool.pool_id, plan, 10.0)
+
+        self.assertTrue(ok)
+        self.assertEqual(engine._route_motif_count_total.get("voucher_to_voucher"), 1)
+        self.assertEqual(engine._ordinary_route_motif_count_total.get("voucher_to_voucher"), 1)
+        self.assertEqual(engine._market_route_motif_count_total.get("voucher_to_voucher"), 1)
+        self.assertEqual(engine._route_motif_stable_intermediate_count_total, 1)
+        self.assertEqual(engine._route_context_count_tick.get("ordinary"), 2)
 
     def test_execute_route_rejects_private_wallet_hop_and_refunds_source(self):
         engine = SimulationEngine(
@@ -901,6 +985,25 @@ class RegenBondRevisionTests(unittest.TestCase):
             "lender_voucher_purchase_stable_budget_usd_per_tick",
         ):
             self.assertIn(key, SHARD_CONFIG_KEYS)
+
+    def test_sarafu_activity_controls_load_settlement_motif_targets(self):
+        calibration = load_calibration(Path("analysis/sarafu_calibration"))
+        args = argparse.Namespace()
+
+        configure_sarafu_activity_controls(args, calibration, 260, "validation")
+
+        self.assertAlmostEqual(
+            args._validation_settlement_motif_voucher_to_voucher_share,
+            0.814026,
+        )
+        self.assertAlmostEqual(
+            args._validation_settlement_motif_voucher_to_stable_share,
+            0.12288,
+        )
+        self.assertAlmostEqual(
+            args._validation_settlement_motif_stable_to_voucher_share,
+            0.053786,
+        )
 
     def test_calibration_loader_reads_overlap_distribution(self):
         def write_rows(path: Path, fieldnames: list[str], rows: list[dict[str, object]]) -> None:

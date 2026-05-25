@@ -144,6 +144,11 @@ class ScenarioConfig:
     noam_failure_ttl_ticks: int = 4
     noam_route_cache_ttl_ticks: int = 6
     noam_route_cache_bucket_usd: float = 100.0
+    open_pool_direct_voucher_to_voucher_enabled: bool = False
+    settlement_motif_targeting_enabled: bool = False
+    settlement_motif_voucher_to_voucher_share: float = 0.0
+    settlement_motif_voucher_to_stable_share: float = 0.0
+    settlement_motif_stable_to_voucher_share: float = 0.0
 
     # Limits & fees
     default_window_len: int = 10

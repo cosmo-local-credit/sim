@@ -1415,6 +1415,35 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
     )
     voucher_to_voucher_count = safe_float(current_circulation.get("voucher_to_voucher_count"))
     voucher_to_stable_count = safe_float(current_circulation.get("voucher_to_stable_count"))
+    stable_to_voucher_count = safe_float(current_circulation.get("stable_to_voucher_count"))
+    motif_v2v_share = safe_float(current_circulation.get("voucher_to_voucher_share"))
+    motif_v2s_share = safe_float(current_circulation.get("voucher_to_stable_share"))
+    motif_s2v_share = safe_float(current_circulation.get("stable_to_voucher_share"))
+    if motif_v2v_share <= 0.0 and motif_v2s_share <= 0.0 and motif_s2v_share <= 0.0:
+        motif_total = safe_float(current_circulation.get("total_swaps"))
+        if motif_total <= 1e-9:
+            motif_total = voucher_to_voucher_count + voucher_to_stable_count + stable_to_voucher_count
+    else:
+        motif_total = 0.0
+    if motif_total > 1e-9:
+        motif_v2v_share = voucher_to_voucher_count / motif_total
+        motif_v2s_share = voucher_to_stable_count / motif_total
+        motif_s2v_share = stable_to_voucher_count / motif_total
+    setattr(
+        args,
+        f"_{prefix}_settlement_motif_voucher_to_voucher_share",
+        max(0.0, min(1.0, motif_v2v_share)),
+    )
+    setattr(
+        args,
+        f"_{prefix}_settlement_motif_voucher_to_stable_share",
+        max(0.0, min(1.0, motif_v2s_share)),
+    )
+    setattr(
+        args,
+        f"_{prefix}_settlement_motif_stable_to_voucher_share",
+        max(0.0, min(1.0, motif_s2v_share)),
+    )
     voucher_source_borrowing_count = voucher_to_voucher_count + voucher_to_stable_count
     if voucher_source_borrowing_count > 1e-9:
         primary_voucher_borrowing_attempt_share = voucher_to_voucher_count / voucher_source_borrowing_count
@@ -1640,6 +1669,29 @@ def scenario_config(
         cfg.noam_max_hops = 3
         cfg.noam_overlay_enabled = False
         cfg.noam_clearing_enabled = False
+        cfg.open_pool_direct_voucher_to_voucher_enabled = True
+        cfg.settlement_motif_targeting_enabled = True
+        cfg.settlement_motif_voucher_to_voucher_share = max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "_validation_settlement_motif_voucher_to_voucher_share", 0.0) or 0.0),
+            ),
+        )
+        cfg.settlement_motif_voucher_to_stable_share = max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "_validation_settlement_motif_voucher_to_stable_share", 0.0) or 0.0),
+            ),
+        )
+        cfg.settlement_motif_stable_to_voucher_share = max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "_validation_settlement_motif_stable_to_voucher_share", 0.0) or 0.0),
+            ),
+        )
         cfg.route_substitution_enabled = True
         cfg.route_substitution_max_alternatives = 3
         cfg.swap_sustain_window_ticks = 0
@@ -2080,6 +2132,29 @@ def scenario_config(
         cfg.liquidity_mandate_mode = "community_deficit_then_lender"
         cfg.route_substitution_enabled = True
         cfg.route_substitution_max_alternatives = 3
+        cfg.open_pool_direct_voucher_to_voucher_enabled = True
+        cfg.settlement_motif_targeting_enabled = True
+        cfg.settlement_motif_voucher_to_voucher_share = max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "_frontier_settlement_motif_voucher_to_voucher_share", 0.0) or 0.0),
+            ),
+        )
+        cfg.settlement_motif_voucher_to_stable_share = max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "_frontier_settlement_motif_voucher_to_stable_share", 0.0) or 0.0),
+            ),
+        )
+        cfg.settlement_motif_stable_to_voucher_share = max(
+            0.0,
+            min(
+                1.0,
+                float(getattr(args, "_frontier_settlement_motif_stable_to_voucher_share", 0.0) or 0.0),
+            ),
+        )
         route_request_base = int(getattr(args, "_frontier_route_requests_per_tick", 1))
         cfg.random_route_requests_per_tick = max(1, int(round(route_request_base * math.sqrt(factor))))
         frontier_floor = int(math.ceil(int(getattr(args, "_frontier_swap_floor_per_tick", 0)) * factor))
@@ -3052,6 +3127,21 @@ def run_one(
             "configured_producer_credit_request_budget_share": safe_float(
                 getattr(cfg, "producer_credit_request_budget_share", 0.0)
             ),
+            "configured_open_pool_direct_voucher_to_voucher_enabled": int(
+                bool(getattr(cfg, "open_pool_direct_voucher_to_voucher_enabled", False))
+            ),
+            "configured_settlement_motif_targeting_enabled": int(
+                bool(getattr(cfg, "settlement_motif_targeting_enabled", False))
+            ),
+            "configured_settlement_motif_voucher_to_voucher_share": safe_float(
+                getattr(cfg, "settlement_motif_voucher_to_voucher_share", 0.0)
+            ),
+            "configured_settlement_motif_voucher_to_stable_share": safe_float(
+                getattr(cfg, "settlement_motif_voucher_to_stable_share", 0.0)
+            ),
+            "configured_settlement_motif_stable_to_voucher_share": safe_float(
+                getattr(cfg, "settlement_motif_stable_to_voucher_share", 0.0)
+            ),
             "configured_lender_voucher_purchase_demand_enabled": int(
                 bool(getattr(cfg, "lender_voucher_purchase_demand_enabled", False))
             ),
@@ -3222,6 +3312,106 @@ def run_one(
             "loan_backfill_swap_volume_usd_total": cumulative_float[
                 "loan_backfill_swap_volume_usd_tick"
             ],
+            "route_motif_count_total": latest.get("route_motif_count_total", 0),
+            "route_motif_voucher_to_voucher_count_total": latest.get(
+                "route_motif_voucher_to_voucher_count_total", 0
+            ),
+            "route_motif_voucher_to_stable_count_total": latest.get(
+                "route_motif_voucher_to_stable_count_total", 0
+            ),
+            "route_motif_stable_to_voucher_count_total": latest.get(
+                "route_motif_stable_to_voucher_count_total", 0
+            ),
+            "route_motif_other_count_total": latest.get("route_motif_other_count_total", 0),
+            "route_motif_voucher_to_voucher_share_total": latest.get(
+                "route_motif_voucher_to_voucher_share_total", 0.0
+            ),
+            "route_motif_voucher_to_stable_share_total": latest.get(
+                "route_motif_voucher_to_stable_share_total", 0.0
+            ),
+            "route_motif_stable_to_voucher_share_total": latest.get(
+                "route_motif_stable_to_voucher_share_total", 0.0
+            ),
+            "route_motif_stable_involved_share_total": latest.get(
+                "route_motif_stable_involved_share_total", 0.0
+            ),
+            "route_motif_voucher_to_voucher_volume_usd_total": latest.get(
+                "route_motif_voucher_to_voucher_volume_usd_total", 0.0
+            ),
+            "route_motif_voucher_to_stable_volume_usd_total": latest.get(
+                "route_motif_voucher_to_stable_volume_usd_total", 0.0
+            ),
+            "route_motif_stable_to_voucher_volume_usd_total": latest.get(
+                "route_motif_stable_to_voucher_volume_usd_total", 0.0
+            ),
+            "route_motif_stable_intermediate_count_total": latest.get(
+                "route_motif_stable_intermediate_count_total", 0
+            ),
+            "route_motif_stable_intermediate_volume_usd_total": latest.get(
+                "route_motif_stable_intermediate_volume_usd_total", 0.0
+            ),
+            "ordinary_route_motif_count_total": latest.get("ordinary_route_motif_count_total", 0),
+            "ordinary_route_motif_voucher_to_voucher_count_total": latest.get(
+                "ordinary_route_motif_voucher_to_voucher_count_total", 0
+            ),
+            "ordinary_route_motif_voucher_to_stable_count_total": latest.get(
+                "ordinary_route_motif_voucher_to_stable_count_total", 0
+            ),
+            "ordinary_route_motif_stable_to_voucher_count_total": latest.get(
+                "ordinary_route_motif_stable_to_voucher_count_total", 0
+            ),
+            "ordinary_route_motif_voucher_to_voucher_share_total": latest.get(
+                "ordinary_route_motif_voucher_to_voucher_share_total", 0.0
+            ),
+            "ordinary_route_motif_voucher_to_stable_share_total": latest.get(
+                "ordinary_route_motif_voucher_to_stable_share_total", 0.0
+            ),
+            "ordinary_route_motif_stable_to_voucher_share_total": latest.get(
+                "ordinary_route_motif_stable_to_voucher_share_total", 0.0
+            ),
+            "ordinary_route_motif_stable_involved_share_total": latest.get(
+                "ordinary_route_motif_stable_involved_share_total", 0.0
+            ),
+            "ordinary_route_motif_voucher_to_voucher_volume_usd_total": latest.get(
+                "ordinary_route_motif_voucher_to_voucher_volume_usd_total", 0.0
+            ),
+            "ordinary_route_motif_voucher_to_stable_volume_usd_total": latest.get(
+                "ordinary_route_motif_voucher_to_stable_volume_usd_total", 0.0
+            ),
+            "ordinary_route_motif_stable_to_voucher_volume_usd_total": latest.get(
+                "ordinary_route_motif_stable_to_voucher_volume_usd_total", 0.0
+            ),
+            "market_route_motif_count_total": latest.get("market_route_motif_count_total", 0),
+            "market_route_motif_voucher_to_voucher_count_total": latest.get(
+                "market_route_motif_voucher_to_voucher_count_total", 0
+            ),
+            "market_route_motif_voucher_to_stable_count_total": latest.get(
+                "market_route_motif_voucher_to_stable_count_total", 0
+            ),
+            "market_route_motif_stable_to_voucher_count_total": latest.get(
+                "market_route_motif_stable_to_voucher_count_total", 0
+            ),
+            "market_route_motif_voucher_to_voucher_share_total": latest.get(
+                "market_route_motif_voucher_to_voucher_share_total", 0.0
+            ),
+            "market_route_motif_voucher_to_stable_share_total": latest.get(
+                "market_route_motif_voucher_to_stable_share_total", 0.0
+            ),
+            "market_route_motif_stable_to_voucher_share_total": latest.get(
+                "market_route_motif_stable_to_voucher_share_total", 0.0
+            ),
+            "market_route_motif_stable_involved_share_total": latest.get(
+                "market_route_motif_stable_involved_share_total", 0.0
+            ),
+            "market_route_motif_voucher_to_voucher_volume_usd_total": latest.get(
+                "market_route_motif_voucher_to_voucher_volume_usd_total", 0.0
+            ),
+            "market_route_motif_voucher_to_stable_volume_usd_total": latest.get(
+                "market_route_motif_voucher_to_stable_volume_usd_total", 0.0
+            ),
+            "market_route_motif_stable_to_voucher_volume_usd_total": latest.get(
+                "market_route_motif_stable_to_voucher_volume_usd_total", 0.0
+            ),
             "productive_boosted_voucher_swap_count_tick": latest.get(
                 "productive_boosted_voucher_swap_count_tick", 0
             ),
@@ -4961,7 +5151,43 @@ def engine_validation_moments(
         ),
         (
             "all",
-            "current_voucher_to_voucher_swap_share",
+            "market_route_motif_voucher_to_voucher_share",
+            "settlement",
+            current_circulation.get("voucher_to_voucher_share", ""),
+            [safe_float(row.get("market_route_motif_voucher_to_voucher_share_total")) for row in summaries],
+            0.35,
+            True,
+        ),
+        (
+            "all",
+            "market_route_motif_voucher_to_stable_share",
+            "settlement",
+            current_circulation.get("voucher_to_stable_share", ""),
+            [safe_float(row.get("market_route_motif_voucher_to_stable_share_total")) for row in summaries],
+            0.35,
+            True,
+        ),
+        (
+            "all",
+            "market_route_motif_stable_to_voucher_share",
+            "settlement",
+            current_circulation.get("stable_to_voucher_share", ""),
+            [safe_float(row.get("market_route_motif_stable_to_voucher_share_total")) for row in summaries],
+            0.35,
+            True,
+        ),
+        (
+            "all",
+            "market_route_motif_stable_involved_share",
+            "settlement",
+            empirical_stable_involved_swap_share,
+            [safe_float(row.get("market_route_motif_stable_involved_share_total")) for row in summaries],
+            0.35,
+            True,
+        ),
+        (
+            "all",
+            "direct_hop_voucher_to_voucher_swap_share",
             "settlement",
             current_circulation.get("voucher_to_voucher_share", ""),
             [
@@ -4974,7 +5200,7 @@ def engine_validation_moments(
         ),
         (
             "all",
-            "current_voucher_to_stable_swap_share",
+            "direct_hop_voucher_to_stable_swap_share",
             "settlement",
             current_circulation.get("voucher_to_stable_share", ""),
             [
@@ -4987,7 +5213,7 @@ def engine_validation_moments(
         ),
         (
             "all",
-            "current_stable_to_voucher_swap_share",
+            "direct_hop_stable_to_voucher_swap_share",
             "settlement",
             current_circulation.get("stable_to_voucher_share", ""),
             [
@@ -5000,7 +5226,7 @@ def engine_validation_moments(
         ),
         (
             "all",
-            "current_stable_involved_swap_share",
+            "direct_hop_stable_involved_swap_share",
             "settlement",
             empirical_stable_involved_swap_share,
             [

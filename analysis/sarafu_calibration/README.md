@@ -30,6 +30,33 @@ consumer wallets are private source/sink wallets: they can start or receive a
 route, but other agents cannot traverse or clear through them. A producer's
 voucher can be accepted by multiple lender pools according to the exported
 overlap calibration.
+
+## Paper-Facing Agent And Flow Semantics
+
+The calibration bundle maps empirical Sarafu records into four paper-facing
+roles:
+
+| Role | Calibrated count or source | Model semantics |
+| --- | ---: | --- |
+| Open pools | 73 | Kenya KES/KSh community lending pools. These are the only open automatic-swap, routing, and clearing venues. Internally they use the code role `lender`. |
+| Producer wallets | 996 | Unique KES/KSh producer-voucher issuers. Each wallet has one own voucher and private stable holdings; its voucher may be accepted by multiple open pools. |
+| Accepted producer-voucher slots | 1,247 | Pool membership/listing slots, not extra producer wallets. These calibrate multi-pool acceptance and route potential. |
+| Consumer wallets | 462 | External non-producer stable-side users recommended for the topology. Stable-side pool interaction has 950 address-pool slots, which is an interaction count rather than the consumer-wallet count. |
+
+Producer voucher and stable deposits move assets from private producer wallets
+into open pools. Deposits increase pool-side credit capacity and limits, but
+they are not outstanding debt until a producer later swaps its own voucher into
+a pool for stable or another useful voucher. Stable-to-voucher purchase value
+seeds private producer/consumer stable balances for purchase behavior; it is
+not treated as philanthropic pool backing.
+
+Validation/no-bond runs include historical stable backing into open pools as a
+calibration moment. In the current bundle, the inclusive pool stable backing
+target is `6,574.127191`, all assigned to the 73 open pools. The broader
+private-stable plus on-ramp accounting proxy is reported separately and should
+not be compared to this pool-backing target. Bond-frontier runs omit the
+historical philanthropic/programmatic backing event and instead use bond
+principal as the modeled stable liquidity injection into eligible pools.
 The settlement reliability anchor file adds aggregate ROLA-like voucher
 circulation, ROSCA-like stable-credit, same-token return, submitted-swap
 execution, and current cluster-topology metrics. The unit-normalization file
@@ -49,6 +76,13 @@ deposit proxies, productive-credit timing, debt-removal purchases, voucher-fee
 conversion, quarterly clearing, and route substitution diagnostics. These are
 empirical settlement motifs and scenario anchors, not direct pool inventory
 snapshots or a failed-route denominator.
+Validation/frontier scenarios use these motif shares as decision priors and
+diagnostics. They do not mechanically rebalance successful routes to hit the
+empirical shares; realized composition still depends on wallet balances, lender
+pool listings, limits, inventory, and route feasibility. Consumer
+stable-to-voucher behavior is represented by the calibrated purchase-demand
+channel, while generic ordinary wallet routes are kept separate from that
+purchase process.
 Voucher-pool overlap calibration is also exported as aggregate topology only:
 it reports how many KSh/KES voucher tokens appear in one or more pools, a
 bucketed degree distribution, and shared-voucher pool-pool edge counts. It does
@@ -70,6 +104,10 @@ source activity does not rise after borrow-proxy events, so the calibrated
 source-weight boost is 0.0 and the source-size multiplier is 1.0. Target-side
 voucher demand rises, which supports the purchase-demand channel rather than an
 extra uncalibrated producer source boost.
+The aggregate productive-credit calibration splits loan-enabled inflow into
+`0.244881` stable retained and `0.755119` new producer-voucher deposit capacity,
+capped at `0.189536` voucher-deposit growth per month. This is a bounded
+capacity proxy, not causal proof that every loan increases production.
 The public bundle also exports a standalone stable/cash deposit weekly series.
 That series counts ordinary successful pool-era stable/cash deposit logs and
 excludes swap-associated deposit logs, while reporting the inclusive
