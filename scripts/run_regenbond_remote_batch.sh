@@ -32,6 +32,30 @@ case "${RESUME:-1}" in
     MONTE_CARLO_EXTRA_ARGS+=(--resume)
     ;;
 esac
+
+append_optional_arg() {
+  local env_name="$1"
+  local cli_name="$2"
+  local value="${!env_name:-}"
+  if [[ -n "$value" ]]; then
+    MONTE_CARLO_EXTRA_ARGS+=("$cli_name" "$value")
+  fi
+}
+
+append_optional_arg MAX_HOPS --max-hops
+append_optional_arg NOAM_MAX_HOPS --noam-max-hops
+append_optional_arg NOAM_OVERLAY_ENABLED --noam-overlay-enabled
+append_optional_arg NOAM_CLEARING_ENABLED --noam-clearing-enabled
+append_optional_arg NOAM_CLEARING_STRIDE_TICKS --noam-clearing-stride-ticks
+append_optional_arg NOAM_CLEARING_MAX_CYCLES --noam-clearing-max-cycles
+append_optional_arg NOAM_CLEARING_MAX_HOPS --noam-clearing-max-hops
+append_optional_arg NOAM_CLEARING_EDGE_CAP_PER_ASSET --noam-clearing-edge-cap-per-asset
+append_optional_arg SWAP_SUSTAIN_MAX_EXTRA_ATTEMPTS --swap-sustain-max-extra-attempts
+append_optional_arg SWAP_SUSTAIN_MAX_ROUNDS --swap-sustain-max-rounds
+append_optional_arg SWAP_SUSTAIN_ATTEMPTS_PER_MISSING_SWAP --swap-sustain-attempts-per-missing-swap
+append_optional_arg VOUCHER_FEE_CONVERSION_MAX_SWAPS_PER_EPOCH --voucher-fee-conversion-max-swaps-per-epoch
+append_optional_arg VOUCHER_FEE_CONVERSION_MAX_USD_PER_EPOCH --voucher-fee-conversion-max-usd-per-epoch
+
 mkdir -p "$OUTPUT_ROOT"
 
 REQUIRED_CALIBRATION_FILES=(
@@ -70,6 +94,7 @@ echo "[batch] workers=$WORKERS_VALUE"
 echo "[batch] resume=${RESUME:-1}"
 echo "[batch] dry_run=${DRY_RUN:-0}"
 echo "[batch] route_success_mode=${ROUTE_SUCCESS_MODE:-diagnostic}"
+echo "[batch] routing_profile=max_hops:${MAX_HOPS:-3} noam_max_hops:${NOAM_MAX_HOPS:-3} overlay:${NOAM_OVERLAY_ENABLED:-1} clearing:${NOAM_CLEARING_ENABLED:-1} clearing_stride:${NOAM_CLEARING_STRIDE_TICKS:-13}"
 echo "[batch] kes_per_usd=${KES_PER_USD:-missing}"
 echo "[batch] voucher_kes_value=${VOUCHER_KES_VALUE:-missing}"
 
@@ -332,7 +357,7 @@ case "$JOB" in
       ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING="${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-1}" \
       ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND="${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-1}" \
       PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
-      run_frontier 20 260 bond_issuer_frontier_pilot current,connected_2x 0.05,0.10,0.15,0.20,0.25 0,0.02,0.04,0.06,0.08,0.10 1.0
+      run_frontier 20 260 bond_issuer_frontier_pilot current 0.05,0.10,0.15,0.20,0.25 0,0.02,0.04,0.06,0.08,0.10 1.0
     ;;
   frontier-publication)
     FRONTIER_MODE="${FRONTIER_MODE:-grid}" \
@@ -342,7 +367,7 @@ case "$JOB" in
       ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING="${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-1}" \
       ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND="${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-1}" \
       PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
-      run_frontier 100 260 bond_issuer_frontier current,connected_2x 0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50 0,0.01,0.02,0.03,0.04,0.05,0.06,0.07,0.08,0.09,0.10,0.11,0.12 1.0
+      run_frontier 100 260 bond_issuer_frontier current 0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50 0,0.01,0.02,0.03,0.04,0.05,0.06,0.07,0.08,0.09,0.10,0.11,0.12 1.0
     ;;
   *)
     echo "Unknown job: $JOB" >&2

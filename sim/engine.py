@@ -113,6 +113,8 @@ class SimulationEngine:
         self._liquidity_tick: int = -1
         self._liquidity_by_asset: Dict[str, float] = {}
         self._liquidity_initialized: bool = False
+        self._target_asset_candidate_cache_tick: int = -1
+        self._target_asset_candidate_cache: Dict[Tuple[Optional[str], bool], Tuple[str, ...]] = {}
         self._utilization_boost: float = 1.0
         self._last_utilization_rate: float = 0.0
         self._loan_phase_by_agent: Dict[str, int] = {}
@@ -2541,6 +2543,33 @@ class SimulationEngine:
                 return [str(np.random.choice(filtered, p=probs))]
         return [self.rng.choice(filtered)]
 
+    def _target_asset_candidate_universe(
+        self,
+        preferred_class: Optional[str],
+        restrict_stable: bool,
+    ) -> Tuple[str, ...]:
+        if self._target_asset_candidate_cache_tick != self.tick:
+            self._target_asset_candidate_cache_tick = self.tick
+            self._target_asset_candidate_cache = {}
+        key = (preferred_class, bool(restrict_stable))
+        cached = self._target_asset_candidate_cache.get(key)
+        if cached is not None:
+            return cached
+
+        self._refresh_liquidity_cache()
+        candidates = []
+        for asset_id, weight in self._liquidity_by_asset.items():
+            if weight <= 0.0:
+                continue
+            if preferred_class and self._settlement_asset_class(asset_id) != preferred_class:
+                continue
+            if restrict_stable and asset_id == self.cfg.stable_symbol:
+                continue
+            candidates.append(asset_id)
+        universe = tuple(candidates)
+        self._target_asset_candidate_cache[key] = universe
+        return universe
+
     def _route_source_asset_candidates(self, source_pool: "Pool") -> list[str]:
         if source_pool.policy.system_pool:
             return []
@@ -2578,14 +2607,10 @@ class SimulationEngine:
             restrict_stable = False
             stable_target_bias = max(1.0, stable_target_bias)
         if mode == "liquidity_weighted":
-            self._refresh_liquidity_cache()
             candidates = []
-            for asset_id, weight in self._liquidity_by_asset.items():
+            for asset_id in self._target_asset_candidate_universe(preferred_class, restrict_stable):
+                weight = self._liquidity_by_asset.get(asset_id, 0.0)
                 if asset_id == asset_in or weight <= 0.0:
-                    continue
-                if preferred_class and self._settlement_asset_class(asset_id) != preferred_class:
-                    continue
-                if restrict_stable and asset_id == self.cfg.stable_symbol:
                     continue
                 if exclude is not None and asset_id in exclude:
                     continue

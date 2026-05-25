@@ -98,6 +98,42 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["producer_voucher_multi_lender_share"], 1.0)
         self.assertAlmostEqual(metrics["producer_voucher_lender_degree_p50"], 3.0)
 
+    def test_target_asset_candidate_cache_invalidates_by_tick(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                swap_target_selection_mode="liquidity_weighted",
+            ),
+            seed=19,
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        lender_pool = next(
+            pool for pool in engine.pools.values()
+            if not pool.policy.system_pool and pool.policy.role == "lender"
+        )
+        voucher_id = producer.voucher_spec.voucher_id
+        lender_pool.values.set_value(stable_id, 1.0)
+        lender_pool.values.set_value(voucher_id, 1.0)
+        engine._vault_add(lender_pool, stable_id, 10.0, "test_seed", "test")
+        engine._vault_add(lender_pool, voucher_id, 10.0, "test_seed", "test")
+
+        engine.tick = 1
+        first = engine._target_asset_candidate_universe(None, False)
+        second = engine._target_asset_candidate_universe(None, False)
+        self.assertIs(first, second)
+        self.assertIn(stable_id, first)
+        self.assertIn(voucher_id, first)
+
+        engine.tick = 2
+        third = engine._target_asset_candidate_universe(None, False)
+        self.assertIsNot(first, third)
+        self.assertEqual(set(first), set(third))
+
     def test_private_wallet_roles_do_not_create_consumer_vouchers(self):
         engine = SimulationEngine(
             small_config(
@@ -943,6 +979,32 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(cfg.lender_voucher_purchase_attempts_per_tick, 0)
         self.assertEqual(cfg.liquidity_mandate_mode, "community_deficit_then_lender")
         self.assertEqual(cfg.max_pools, 9)
+        self.assertEqual(cfg.max_hops, 3)
+        self.assertEqual(cfg.noam_max_hops, 3)
+        self.assertTrue(cfg.noam_overlay_enabled)
+        self.assertTrue(cfg.noam_clearing_enabled)
+        self.assertEqual(cfg.noam_clearing_stride_ticks, 13)
+        self.assertTrue(cfg.noam_clearing_budget_scale_by_stride)
+
+        baseline_args = argparse.Namespace(**vars(args))
+        baseline_args._current_principal_usd = 0.0
+        cfg_baseline = scenario_config("bond_issuer_frontier", 0.06, 260, baseline_args)
+        for attr in (
+            "max_hops",
+            "noam_max_hops",
+            "noam_overlay_enabled",
+            "noam_clearing_enabled",
+            "noam_clearing_stride_ticks",
+            "noam_clearing_max_cycles",
+            "noam_clearing_max_hops",
+            "noam_clearing_edge_cap_per_asset",
+            "swap_sustain_max_extra_attempts",
+            "swap_sustain_max_rounds",
+            "swap_sustain_attempts_per_missing_swap",
+            "voucher_fee_conversion_max_swaps_per_epoch",
+            "voucher_fee_conversion_max_usd_per_epoch",
+        ):
+            self.assertEqual(getattr(cfg_baseline, attr), getattr(cfg, attr))
 
         engine = SimulationEngine(cfg, seed=7)
         stable_id = cfg.stable_symbol
@@ -983,8 +1045,58 @@ class RegenBondRevisionTests(unittest.TestCase):
             "lender_voucher_purchase_consumer_share",
             "lender_voucher_purchase_inventory_share",
             "lender_voucher_purchase_stable_budget_usd_per_tick",
+            "max_hops",
+            "noam_max_hops",
+            "noam_overlay_enabled",
+            "noam_clearing_enabled",
+            "noam_clearing_stride_ticks",
+            "noam_clearing_max_cycles",
+            "noam_clearing_max_hops",
+            "noam_clearing_edge_cap_per_asset",
+            "swap_sustain_max_extra_attempts",
+            "swap_sustain_max_rounds",
+            "swap_sustain_attempts_per_missing_swap",
+            "voucher_fee_conversion_max_swaps_per_epoch",
+            "voucher_fee_conversion_max_usd_per_epoch",
         ):
             self.assertIn(key, SHARD_CONFIG_KEYS)
+
+    def test_validation_uses_current_network_routing_profile(self):
+        args = argparse.Namespace(
+            pool_metrics_stride=1,
+            max_active_pools_per_tick=None,
+            _calibration_kes_per_usd=128.0,
+            _voucher_unit_value_usd=1.0 / 128.0,
+            _current_initial_lenders=3,
+            _current_initial_producers=4,
+            _current_initial_consumers=5,
+            _validation_swap_floor_per_tick=0,
+            noam_clearing_max_cycles=17,
+            noam_clearing_max_hops=3,
+            noam_clearing_edge_cap_per_asset=9,
+            swap_sustain_max_extra_attempts=23,
+            swap_sustain_max_rounds=4,
+            swap_sustain_attempts_per_missing_swap=1.5,
+            voucher_fee_conversion_max_swaps_per_epoch=7,
+            voucher_fee_conversion_max_usd_per_epoch=250.0,
+        )
+
+        cfg = scenario_config("sarafu_engine_validation", 0.0, 260, args)
+
+        self.assertEqual(cfg.max_hops, 3)
+        self.assertEqual(cfg.noam_max_hops, 3)
+        self.assertTrue(cfg.noam_overlay_enabled)
+        self.assertTrue(cfg.noam_clearing_enabled)
+        self.assertEqual(cfg.noam_clearing_stride_ticks, 13)
+        self.assertTrue(cfg.noam_clearing_budget_scale_by_stride)
+        self.assertEqual(cfg.noam_clearing_max_cycles, 17)
+        self.assertEqual(cfg.noam_clearing_max_hops, 3)
+        self.assertEqual(cfg.noam_clearing_edge_cap_per_asset, 9)
+        self.assertEqual(cfg.swap_sustain_max_extra_attempts, 23)
+        self.assertEqual(cfg.swap_sustain_max_rounds, 4)
+        self.assertAlmostEqual(cfg.swap_sustain_attempts_per_missing_swap, 1.5)
+        self.assertEqual(cfg.voucher_fee_conversion_max_swaps_per_epoch, 7)
+        self.assertAlmostEqual(cfg.voucher_fee_conversion_max_usd_per_epoch, 250.0)
 
     def test_sarafu_activity_controls_load_settlement_motif_targets(self):
         calibration = load_calibration(Path("analysis/sarafu_calibration"))

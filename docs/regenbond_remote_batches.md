@@ -57,6 +57,13 @@ frontier runs also include bounded productive-credit feedback: loan-enabled
 productive inflow can increase stable retained and producer voucher deposits
 within aggregate calibration shares and growth caps.
 
+Validation, matched no-bond frontier baselines, `frontier-pilot`, and
+`frontier-publication` now use the same current-network routing profile:
+`max_hops=3`, `noam_max_hops=3`, NOAM overlay enabled, NOAM clearing enabled,
+and quarterly NOAM clearing every 13 weekly ticks. `connected_2x` remains
+available through `NETWORK_SCALES=connected_2x`, but it is no longer a
+paper-facing default.
+
 The current ROLA/frontier-pilot configuration also enables producer primary
 voucher borrowing, voucher-loan fallback, voucher-loan activity boost, and
 bounded consumer/third-party stable purchases of pool-held producer vouchers.
@@ -245,8 +252,8 @@ is set.
 | `frontier-maturity-smoke` | Fast full-maturity lockbox check | 2 runs by default, 260 ticks, current scale; use `RUNS=10` for the pre-pilot gate | `analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/` | `analysis/monte_carlo/frontier-maturity-smoke.log` |
 | `frontier-feedback-probe` | Focused capacity-feedback principal probe | 2 runs, 260 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_feedback_probe/` | `analysis/monte_carlo/frontier-feedback-probe.log` |
 | `frontier-rola-regeneration-probe` | Current-scale low-principal ROLA/voucher-purchase probe | 5 runs by default, 260 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/` | `analysis/monte_carlo/frontier-rola-regeneration-probe.log` |
-| `frontier-pilot` | Full-horizon focused frontier pilot | 20 runs, 260 ticks, `current` and `connected_2x` | `analysis/monte_carlo/bond_issuer_frontier_pilot/` | `analysis/monte_carlo/frontier-pilot.log` |
-| `frontier-publication` | 100-run paper-facing expansion of the `frontier-pilot` setup with a denser coupon/principal grid | 100 runs, 260 ticks, `current` and `connected_2x`, 260 positive-principal cells | `analysis/monte_carlo/bond_issuer_frontier/` | `analysis/monte_carlo/frontier-publication.log` |
+| `frontier-pilot` | Full-horizon focused frontier pilot | 20 runs, 260 ticks, current scale | `analysis/monte_carlo/bond_issuer_frontier_pilot/` | `analysis/monte_carlo/frontier-pilot.log` |
+| `frontier-publication` | 100-run paper-facing expansion of the `frontier-pilot` setup with a denser coupon/principal grid | 100 runs, 260 ticks, current scale, 130 positive-principal cells | `analysis/monte_carlo/bond_issuer_frontier/` | `analysis/monte_carlo/frontier-publication.log` |
 
 `frontier-*` jobs read the full validation gate at
 `analysis/monte_carlo/engine_validation/engine_validation_summary.csv`. If it
@@ -577,6 +584,25 @@ Common wrapper parameters:
 | `PROGRESS_STRIDE` | Per-run progress log stride. | `13` in wrapper |
 | `DRY_RUN` | `1` prints the resolved Python command after calibration-file checks without running it. | `0` |
 
+Routing and hotspot controls are common to validation and frontier. Leave them
+unset for the paper-facing current-network profile.
+
+| Env var | Meaning | Default |
+| --- | --- | --- |
+| `MAX_HOPS` | Generic route max-hop override. | `3` |
+| `NOAM_MAX_HOPS` | NOAM route max-hop override. | `3` |
+| `NOAM_OVERLAY_ENABLED` | `1` enables the NOAM overlay, `0` disables it. | `1` |
+| `NOAM_CLEARING_ENABLED` | `1` enables NOAM clearing, `0` disables it. | `1` |
+| `NOAM_CLEARING_STRIDE_TICKS` | NOAM clearing cadence in weekly ticks. | `13` |
+| `NOAM_CLEARING_MAX_CYCLES` | Cap on clearing cycles per clearing epoch. | config default |
+| `NOAM_CLEARING_MAX_HOPS` | Cap on clearing cycle path length. | config default |
+| `NOAM_CLEARING_EDGE_CAP_PER_ASSET` | Cap on clearing candidate edges per asset. | config default |
+| `SWAP_SUSTAIN_MAX_EXTRA_ATTEMPTS` | Cap on extra sustain attempts. | calibrated |
+| `SWAP_SUSTAIN_MAX_ROUNDS` | Cap on sustain passes per tick. | calibrated |
+| `SWAP_SUSTAIN_ATTEMPTS_PER_MISSING_SWAP` | Missing-swap sustain multiplier. | calibrated |
+| `VOUCHER_FEE_CONVERSION_MAX_SWAPS_PER_EPOCH` | Cap on routed voucher-fee conversion swaps per waterfall epoch. | config default |
+| `VOUCHER_FEE_CONVERSION_MAX_USD_PER_EPOCH` | Optional USD cap on routed voucher-fee conversion per waterfall epoch. | unset |
+
 Frontier-specific parameters:
 
 | Env var | Meaning | Default |
@@ -849,12 +875,13 @@ realized productive-credit voucher-deposit share.
 
 ### `frontier-pilot`
 
-Full-horizon 20-run focused frontier pilot across `current` and
-`connected_2x`. The default grid is principal ratios
+Full-horizon 20-run focused frontier pilot on the `current` network. The
+default grid is principal ratios
 `0.05,0.10,0.15,0.20,0.25`, coupon targets
-`0,0.02,0.04,0.06,0.08,0.10`, and fee-service share `1.0`. `connected_5x` is no
-longer part of the main pilot because it is too slow for routine iteration;
-use it only as an explicit scaling stress test.
+`0,0.02,0.04,0.06,0.08,0.10`, and fee-service share `1.0`. `connected_2x` and
+`connected_5x` are no longer part of the main pilot because they are too slow
+for routine paper-facing iteration; use them only as explicit scaling stress
+tests.
 
 The previously reviewed focused pilot is a guardrail frontier, not a blanket
 safety or pricing recommendation. It was generated before the current Kenya
@@ -894,11 +921,11 @@ cat analysis/monte_carlo/bond_issuer_frontier_pilot/paper_integration_notes.md
 
 Paper-facing frontier grid. Run only after `validation-full` passes and the
 `frontier-pilot` output is acceptable. This job is the 100-run expansion of the
-`frontier-pilot` setup used so far in the paper: same `current` and
-`connected_2x` scales, but a denser coupon/principal grid. It excludes
+`frontier-pilot` setup used so far in the paper: the same `current` network
+routing/clearing profile, but a denser coupon/principal grid. It excludes
 `principal_ratio=0` because matched no-bond baselines are generated separately,
 and tests 13 annual coupon targets from 0% through 12% against 10 positive
-principal ratios from 0.05 through 0.50. The resulting grid has 260 frontier
+principal ratios from 0.05 through 0.50. The resulting grid has 130 frontier
 cells, plus built-in no-bond baselines.
 
 ```bash
@@ -941,8 +968,8 @@ print("min principal ratio:", min(float(r["principal_ratio"]) for r in rows))
 PY
 ```
 
-Expected: 260 safety rows, scales `current` and `connected_2x`, 13 coupon
-targets, 10 principal ratios, and minimum principal ratio 0.05.
+Expected: 130 safety rows, scale `current`, 13 coupon targets, 10 principal
+ratios, and minimum principal ratio 0.05.
 
 ## Sensitivity Runs
 

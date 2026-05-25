@@ -485,6 +485,86 @@ def parse_args() -> argparse.Namespace:
         help="Optional performance cap passed to ScenarioConfig.",
     )
     parser.add_argument(
+        "--max-hops",
+        type=int,
+        default=None,
+        help="Optional route max-hop override for validation/frontier current-network runs.",
+    )
+    parser.add_argument(
+        "--noam-max-hops",
+        type=int,
+        default=None,
+        help="Optional NOAM route max-hop override for validation/frontier current-network runs.",
+    )
+    parser.add_argument(
+        "--noam-overlay-enabled",
+        type=int,
+        choices=(0, 1),
+        default=None,
+        help="Set to 0/1 to override NOAM overlay use in validation/frontier runs.",
+    )
+    parser.add_argument(
+        "--noam-clearing-enabled",
+        type=int,
+        choices=(0, 1),
+        default=None,
+        help="Set to 0/1 to override NOAM clearing use in validation/frontier runs.",
+    )
+    parser.add_argument(
+        "--noam-clearing-stride-ticks",
+        type=int,
+        default=None,
+        help="NOAM clearing cadence in weekly ticks; current paper profile defaults to 13.",
+    )
+    parser.add_argument(
+        "--noam-clearing-max-cycles",
+        type=int,
+        default=None,
+        help="Optional cap on NOAM clearing cycles per clearing epoch.",
+    )
+    parser.add_argument(
+        "--noam-clearing-max-hops",
+        type=int,
+        default=None,
+        help="Optional cap on NOAM clearing cycle path length.",
+    )
+    parser.add_argument(
+        "--noam-clearing-edge-cap-per-asset",
+        type=int,
+        default=None,
+        help="Optional cap on clearing candidate edges per asset.",
+    )
+    parser.add_argument(
+        "--swap-sustain-max-extra-attempts",
+        type=int,
+        default=None,
+        help="Optional cap on extra swap-sustain route attempts.",
+    )
+    parser.add_argument(
+        "--swap-sustain-max-rounds",
+        type=int,
+        default=None,
+        help="Optional cap on swap-sustain passes per tick.",
+    )
+    parser.add_argument(
+        "--swap-sustain-attempts-per-missing-swap",
+        type=float,
+        default=None,
+        help="Optional multiplier for missing-swap sustain attempts.",
+    )
+    parser.add_argument(
+        "--voucher-fee-conversion-max-swaps-per-epoch",
+        type=int,
+        default=None,
+        help="Optional cap on routed voucher-fee conversion swaps per waterfall epoch.",
+    )
+    parser.add_argument(
+        "--voucher-fee-conversion-max-usd-per-epoch",
+        type=float,
+        default=None,
+        help="Optional USD cap on routed voucher-fee conversion per waterfall epoch.",
+    )
+    parser.add_argument(
         "--pool-metrics-stride",
         type=int,
         default=1,
@@ -676,6 +756,19 @@ SHARD_CONFIG_KEYS = (
     "calibration_dir",
     "calibration_hash",
     "max_active_pools_per_tick",
+    "max_hops",
+    "noam_max_hops",
+    "noam_overlay_enabled",
+    "noam_clearing_enabled",
+    "noam_clearing_stride_ticks",
+    "noam_clearing_max_cycles",
+    "noam_clearing_max_hops",
+    "noam_clearing_edge_cap_per_asset",
+    "swap_sustain_max_extra_attempts",
+    "swap_sustain_max_rounds",
+    "swap_sustain_attempts_per_missing_swap",
+    "voucher_fee_conversion_max_swaps_per_epoch",
+    "voucher_fee_conversion_max_usd_per_epoch",
     "pool_metrics_stride",
     "analysis_stride",
     "progress_stride",
@@ -1554,6 +1647,58 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
     )
 
 
+def _optional_flag(args: argparse.Namespace, name: str, default: bool) -> bool:
+    value = getattr(args, name, None)
+    if value is None:
+        return default
+    return bool(int(value))
+
+
+def apply_current_network_routing_profile(cfg: ScenarioConfig, args: argparse.Namespace) -> None:
+    """Shared routing/clearing profile for validation and current frontier cells."""
+    cfg.max_hops = max(1, int(getattr(args, "max_hops", None) or 3))
+    cfg.noam_max_hops = max(1, int(getattr(args, "noam_max_hops", None) or 3))
+    cfg.noam_overlay_enabled = _optional_flag(args, "noam_overlay_enabled", True)
+    cfg.noam_clearing_enabled = _optional_flag(args, "noam_clearing_enabled", True)
+    cfg.noam_clearing_stride_ticks = max(
+        1,
+        int(getattr(args, "noam_clearing_stride_ticks", None) or 13),
+    )
+    cfg.noam_clearing_budget_scale_by_stride = True
+
+    if getattr(args, "noam_clearing_max_cycles", None) is not None:
+        cfg.noam_clearing_max_cycles = max(1, int(args.noam_clearing_max_cycles))
+    if getattr(args, "noam_clearing_max_hops", None) is not None:
+        cfg.noam_clearing_max_hops = max(2, int(args.noam_clearing_max_hops))
+    if getattr(args, "noam_clearing_edge_cap_per_asset", None) is not None:
+        cfg.noam_clearing_edge_cap_per_asset = max(
+            1,
+            int(args.noam_clearing_edge_cap_per_asset),
+        )
+    if getattr(args, "swap_sustain_max_extra_attempts", None) is not None:
+        cfg.swap_sustain_max_extra_attempts = max(
+            0,
+            int(args.swap_sustain_max_extra_attempts),
+        )
+    if getattr(args, "swap_sustain_max_rounds", None) is not None:
+        cfg.swap_sustain_max_rounds = max(1, int(args.swap_sustain_max_rounds))
+    if getattr(args, "swap_sustain_attempts_per_missing_swap", None) is not None:
+        cfg.swap_sustain_attempts_per_missing_swap = max(
+            0.0,
+            float(args.swap_sustain_attempts_per_missing_swap),
+        )
+    if getattr(args, "voucher_fee_conversion_max_swaps_per_epoch", None) is not None:
+        cfg.voucher_fee_conversion_max_swaps_per_epoch = max(
+            0,
+            int(args.voucher_fee_conversion_max_swaps_per_epoch),
+        )
+    if getattr(args, "voucher_fee_conversion_max_usd_per_epoch", None) is not None:
+        cfg.voucher_fee_conversion_max_usd_per_epoch = max(
+            0.0,
+            float(args.voucher_fee_conversion_max_usd_per_epoch),
+        )
+
+
 def certified_pool_capacity(calibration: Calibration, network_scale: str, policy: str) -> dict[str, float]:
     factor = NETWORK_SCALE_FACTORS.get(network_scale, 1.0)
     strong_allocations = [
@@ -1665,10 +1810,6 @@ def scenario_config(
         cfg.random_route_requests_per_tick = int(getattr(args, "_validation_route_requests_per_tick", 2))
         cfg.swap_requests_budget_per_tick = int(getattr(args, "_validation_swap_budget_per_tick", 120))
         cfg.swap_attempts_max_per_pool = int(getattr(args, "_validation_swap_attempts_max_per_pool", 2))
-        cfg.max_hops = 3
-        cfg.noam_max_hops = 3
-        cfg.noam_overlay_enabled = False
-        cfg.noam_clearing_enabled = False
         cfg.open_pool_direct_voucher_to_voucher_enabled = True
         cfg.settlement_motif_targeting_enabled = True
         cfg.settlement_motif_voucher_to_voucher_share = max(
@@ -1841,6 +1982,7 @@ def scenario_config(
         cfg.stable_excess_sweep_after_stable_receipt = False
         cfg.stable_excess_sweep_buffer_voucher_share = 0.05
         cfg.stable_excess_sweep_roles = ("producer", "consumer")
+        apply_current_network_routing_profile(cfg, args)
         cfg.calibration_profile = "sarafu_engine_validation"
     elif scenario == "regenbond_lp_injection":
         cfg.initial_liquidity_providers = 1
@@ -2180,12 +2322,7 @@ def scenario_config(
         cfg.noam_topm_out_per_pool = max(cfg.noam_topm_out_per_pool, int(round(16 * math.sqrt(factor))))
         cfg.noam_beam_width = max(cfg.noam_beam_width, int(round(40 * math.sqrt(factor))))
         cfg.noam_clearing_budget_usd = float(cfg.noam_clearing_budget_usd) * factor
-        if factor <= 1.0 + 1e-9:
-            cfg.max_hops = 2
-            cfg.noam_max_hops = 2
-            cfg.noam_overlay_enabled = False
-            cfg.noam_clearing_enabled = False
-        else:
+        if factor > 1.0 + 1e-9:
             cfg.p_offer_overlap = min(0.95, cfg.p_offer_overlap + 0.06 * math.log2(factor))
             cfg.p_want_overlap = min(0.97, cfg.p_want_overlap + 0.04 * math.log2(factor))
             cfg.desired_assets_growth_per_asset = min(0.50, cfg.desired_assets_growth_per_asset + 0.05 * math.log2(factor))
@@ -2198,6 +2335,7 @@ def scenario_config(
         if historical_voucher_backing_total > 0.0:
             cfg.historical_voucher_backing_tick = 1
             cfg.historical_voucher_backing_total_usd = historical_voucher_backing_total * factor
+        apply_current_network_routing_profile(cfg, args)
         cfg.calibration_profile = "bond_issuer_frontier"
     elif scenario == "stress_weak_pool_repayment":
         cfg.initial_liquidity_providers = 1
@@ -3168,6 +3306,49 @@ def run_one(
             ),
             "configured_empirical_voucher_pool_overlap_degree_p90": safe_float(
                 getattr(args, f"_{control_prefix}_voucher_pool_overlap_degree_p90", 0.0)
+            ),
+            "configured_max_hops": int(getattr(cfg, "max_hops", 0) or 0),
+            "configured_noam_max_hops": int(getattr(cfg, "noam_max_hops", 0) or 0),
+            "configured_noam_overlay_enabled": int(
+                bool(getattr(cfg, "noam_overlay_enabled", False))
+            ),
+            "configured_noam_clearing_enabled": int(
+                bool(getattr(cfg, "noam_clearing_enabled", False))
+            ),
+            "configured_noam_clearing_stride_ticks": int(
+                getattr(cfg, "noam_clearing_stride_ticks", 0) or 0
+            ),
+            "configured_noam_clearing_max_cycles": int(
+                getattr(cfg, "noam_clearing_max_cycles", 0) or 0
+            ),
+            "configured_noam_clearing_max_hops": int(
+                getattr(cfg, "noam_clearing_max_hops", 0) or 0
+            ),
+            "configured_noam_clearing_edge_cap_per_asset": int(
+                getattr(cfg, "noam_clearing_edge_cap_per_asset", 0) or 0
+            ),
+            "configured_noam_clearing_budget_scale_by_stride": int(
+                bool(getattr(cfg, "noam_clearing_budget_scale_by_stride", False))
+            ),
+            "configured_swap_sustain_max_extra_attempts": int(
+                getattr(cfg, "swap_sustain_max_extra_attempts", 0) or 0
+            ),
+            "configured_swap_sustain_max_rounds": int(
+                getattr(cfg, "swap_sustain_max_rounds", 0) or 0
+            ),
+            "configured_swap_sustain_attempts_per_missing_swap": safe_float(
+                getattr(cfg, "swap_sustain_attempts_per_missing_swap", 0.0)
+            ),
+            "configured_voucher_fee_conversion_enabled": int(
+                bool(getattr(cfg, "voucher_fee_conversion_enabled", False))
+            ),
+            "configured_voucher_fee_conversion_max_swaps_per_epoch": int(
+                getattr(cfg, "voucher_fee_conversion_max_swaps_per_epoch", 0) or 0
+            ),
+            "configured_voucher_fee_conversion_max_usd_per_epoch": (
+                ""
+                if getattr(cfg, "voucher_fee_conversion_max_usd_per_epoch", None) is None
+                else safe_float(getattr(cfg, "voucher_fee_conversion_max_usd_per_epoch", 0.0))
             ),
             "stable_symbol": unit_diagnostics.get("stable_symbol", ""),
             "stable_unit_value_usd": unit_diagnostics.get("stable_unit_value_usd", 1.0),
