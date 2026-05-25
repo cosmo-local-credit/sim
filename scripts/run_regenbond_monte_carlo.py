@@ -3978,11 +3978,18 @@ def run_one(
         ]
         report_by_tier[tier], _ = expected_report_exposure_from_counts(calibration, counts)
     total_active_pools = sum(tier_counts.values()) or 1
-    backing_proxy_total = (
+    broad_stable_liquidity_proxy_total = (
         float(getattr(engine, "initial_stable_total", 0.0))
         + safe_float(final.get("stable_onramp_usd_total"))
         + safe_float(final.get("bond_principal_usd"))
     )
+    backing_proxy_total = broad_stable_liquidity_proxy_total
+    if scenario == "sarafu_engine_validation":
+        # Compare the binding backing target like-for-like against stable value
+        # actually injected into lender pools, not private initial stable wallets.
+        backing_proxy_total = safe_float(final.get("historical_stable_backing_lender_usd_total"))
+        if backing_proxy_total <= 1e-9:
+            backing_proxy_total = safe_float(final.get("historical_stable_backing_usd_total"))
     if scenario == "sarafu_engine_validation":
         targets = {row["tier"]: row for row in empirical_tier_targets(calibration, int(args.ticks))}
         empirical_total_swaps = sum(safe_float(row.get("total_swap_events_horizon")) for row in targets.values())
@@ -4116,6 +4123,8 @@ def run_one(
             "top_impact_activity": max(impact_latest, key=impact_latest.get) if impact_latest else "",
             "top_impact_expected_exposure": max(impact_latest.values()) if impact_latest else 0.0,
             "initial_stable_total": float(getattr(engine, "initial_stable_total", 0.0)),
+            "broad_stable_liquidity_proxy_usd": broad_stable_liquidity_proxy_total,
+            "engine_validation_pool_stable_backing_usd": backing_proxy_total,
             "lender_recovered_stable_by_pool_json": json.dumps(
                 getattr(engine, "_lender_recovered_stable_total_by_pool", {}),
                 sort_keys=True,
@@ -5149,13 +5158,31 @@ def engine_validation_moments(
             "liquidity",
             empirical_backing,
             [
-                safe_float(row.get("initial_stable_total"))
-                + safe_float(row.get("stable_onramp_usd_total"))
-                + safe_float(row.get("bond_principal_usd"))
+                safe_float(row.get("historical_stable_backing_lender_usd_total"))
+                if safe_float(row.get("historical_stable_backing_lender_usd_total")) > 1e-9
+                else safe_float(row.get("historical_stable_backing_usd_total"))
                 for row in summaries
             ],
             0.30,
             True,
+        ),
+        (
+            "all",
+            "broad_stable_liquidity_proxy",
+            "liquidity",
+            "",
+            [
+                safe_float(row.get("broad_stable_liquidity_proxy_usd"))
+                if safe_float(row.get("broad_stable_liquidity_proxy_usd")) > 1e-9
+                else (
+                    safe_float(row.get("initial_stable_total"))
+                    + safe_float(row.get("stable_onramp_usd_total"))
+                    + safe_float(row.get("bond_principal_usd"))
+                )
+                for row in summaries
+            ],
+            None,
+            False,
         ),
         (
             "all",
