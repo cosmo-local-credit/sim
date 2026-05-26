@@ -88,13 +88,15 @@ it reports how many KSh/KES voucher tokens appear in one or more pools, a
 bucketed degree distribution, and shared-voucher pool-pool edge counts. It does
 not include raw token or pool addresses and should be read as route potential,
 not participant intent.
-The current ROLA/frontier-pilot purchase-demand setting uses a network-level
-weekly stable budget, not a per-consumer allowance. It is set to the direct
-pool-era empirical mean stable-to-voucher purchase cash value per week. In the
-research workspace, the aggregate stable-to-voucher purchase value is also
-exported as a weekly distribution and figure so the flat budget can later be
-replaced by a dynamic purchase-timing model once buyer-income moments are
-added.
+The current ROLA/frontier purchase-demand setting uses network-level stable
+budgets, not per-consumer allowances. The paper-facing default uses the
+trailing-52-week actor split: original-issuer self purchases, other-producer
+stable-to-voucher purchases, and external non-producer purchases are exported
+separately. external_nonproducer is not automatically "consumer"; it only means
+the initiating wallet is not linked to a cohort producer voucher. Producer
+stable reuse is separately calibrated from producer voucher-to-stable receipts
+versus producer stable-to-voucher spending, with the residual treated as stable
+that exits the local network.
 The productive-credit voucher activity boost calibration uses privacy-safe
 post-borrow event windows around voucher-to-stable borrow-proxy events. It
 reports same-voucher source activity and target-side voucher demand before and

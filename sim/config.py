@@ -209,6 +209,10 @@ class ScenarioConfig:
     lender_voucher_purchase_target_usd: float | None = None
     lender_voucher_purchase_max_usd: float | None = None
     lender_voucher_purchase_stable_budget_usd_per_tick: float = 0.0
+    external_nonproducer_stable_to_voucher_budget_usd_per_tick: float = 0.0
+    other_producer_stable_to_voucher_budget_usd_per_tick: float = 0.0
+    producer_stable_reuse_share: float = 1.0
+    producer_stable_exit_share: float = 0.0
     lender_voucher_purchase_empirical_window: str = ""
     lender_voucher_purchase_empirical_s2v_events: float = 0.0
     lender_voucher_purchase_empirical_s2v_per_week: float = 0.0

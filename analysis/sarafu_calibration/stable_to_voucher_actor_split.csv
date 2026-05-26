@@ -1,0 +1,13 @@
+window,days,weeks,actor_role,events,stable_input_value_usd,voucher_output_value_usd,unique_initiators,stable_input_usd_per_week,claim_boundary
+pool_era,758,108.29,original_issuer_self,10,41.250000,41.407106,4,0.380937,external_nonproducer is not automatically consumer; other_producer is a cohort producer wallet that is not the output voucher issuer
+pool_era,758,108.29,other_producer,121,987.067780,851.159835,18,9.115402,external_nonproducer is not automatically consumer; other_producer is a cohort producer wallet that is not the output voucher issuer
+pool_era,758,108.29,external_nonproducer,310,9347.680041,8739.827297,151,86.324222,external_nonproducer is not automatically consumer; other_producer is a cohort producer wallet that is not the output voucher issuer
+trailing_52w,366,52.29,original_issuer_self,3,10.650000,10.463618,2,0.203689,external_nonproducer is not automatically consumer; other_producer is a cohort producer wallet that is not the output voucher issuer
+trailing_52w,366,52.29,other_producer,88,415.747780,407.797229,11,7.951460,external_nonproducer is not automatically consumer; other_producer is a cohort producer wallet that is not the output voucher issuer
+trailing_52w,366,52.29,external_nonproducer,205,1790.510041,1681.263035,139,34.244728,external_nonproducer is not automatically consumer; other_producer is a cohort producer wallet that is not the output voucher issuer
+trailing_90d,91,13.0,original_issuer_self,2,7.800000,7.657811,1,0.600000,external_nonproducer is not automatically consumer; other_producer is a cohort producer wallet that is not the output voucher issuer
+trailing_90d,91,13.0,other_producer,84,395.577780,387.991729,10,30.429060,external_nonproducer is not automatically consumer; other_producer is a cohort producer wallet that is not the output voucher issuer
+trailing_90d,91,13.0,external_nonproducer,174,1605.236760,1572.048370,123,123.479751,external_nonproducer is not automatically consumer; other_producer is a cohort producer wallet that is not the output voucher issuer
+trailing_30d,31,4.43,original_issuer_self,0,0.000000,0.000000,0,0.000000,external_nonproducer is not automatically consumer; other_producer is a cohort producer wallet that is not the output voucher issuer
+trailing_30d,31,4.43,other_producer,30,128.609281,126.147254,2,29.040805,external_nonproducer is not automatically consumer; other_producer is a cohort producer wallet that is not the output voucher issuer
+trailing_30d,31,4.43,external_nonproducer,62,711.725212,695.441836,59,160.712145,external_nonproducer is not automatically consumer; other_producer is a cohort producer wallet that is not the output voucher issuer

@@ -313,12 +313,17 @@ class SimulationEngine:
         self._third_party_voucher_purchase_voucher_value_acquired_usd_tick: float = 0.0
         self._third_party_voucher_purchase_voucher_value_acquired_usd_total: float = 0.0
         self._lender_voucher_purchase_stable_budget_remaining_usd_tick: float = 0.0
+        self._lender_voucher_purchase_stable_budget_remaining_by_kind_tick: Dict[str, float] = {}
         self._lender_voucher_purchase_stable_budget_onramp_usd_tick: float = 0.0
         self._lender_voucher_purchase_stable_budget_onramp_usd_total: float = 0.0
         self._consumer_voucher_purchase_stable_budget_onramp_usd_tick: float = 0.0
         self._consumer_voucher_purchase_stable_budget_onramp_usd_total: float = 0.0
         self._third_party_voucher_purchase_stable_budget_onramp_usd_tick: float = 0.0
         self._third_party_voucher_purchase_stable_budget_onramp_usd_total: float = 0.0
+        self._producer_stable_exited_usd_tick: float = 0.0
+        self._producer_stable_exited_usd_total: float = 0.0
+        self._producer_stable_reuse_budget_usd_tick: float = 0.0
+        self._producer_stable_reuse_budget_usd_total: float = 0.0
         self._route_context_count_tick: Dict[str, int] = {}
         self._route_context_count_total: Dict[str, int] = {}
         self._route_context_volume_usd_tick: Dict[str, float] = {}
@@ -374,14 +379,26 @@ class SimulationEngine:
         self._lender_recovered_stable_by_pool: Dict[str, float] = {}
         self._lender_recovered_stable_total_by_pool: Dict[str, float] = {}
         self._lender_recovered_stable_total_by_pool_reason: Dict[Tuple[str, str], float] = {}
+        self._lender_producer_voucher_exposure_usd_by_pool_voucher: Dict[Tuple[str, str], float] = {}
+        self._bond_recovery_budget_remaining_by_reason_tick: Dict[str, float] = {}
         self._lender_recovered_stable_usd_tick: float = 0.0
         self._lender_recovered_stable_usd_total: float = 0.0
+        self._bond_eligible_pool_exposure_recovered_stable_usd_tick: float = 0.0
+        self._bond_eligible_pool_exposure_recovered_stable_usd_total: float = 0.0
+        self._lender_inventory_turnover_stable_usd_tick: float = 0.0
+        self._lender_inventory_turnover_stable_usd_total: float = 0.0
+        self._lender_recovered_stable_borrower_self_usd_tick: float = 0.0
+        self._lender_recovered_stable_borrower_self_usd_total: float = 0.0
         self._lender_recovered_stable_borrower_regular_usd_tick: float = 0.0
         self._lender_recovered_stable_borrower_regular_usd_total: float = 0.0
         self._lender_recovered_stable_borrower_maturity_usd_tick: float = 0.0
         self._lender_recovered_stable_borrower_maturity_usd_total: float = 0.0
         self._lender_recovered_stable_consumer_purchase_usd_tick: float = 0.0
         self._lender_recovered_stable_consumer_purchase_usd_total: float = 0.0
+        self._lender_recovered_stable_external_nonproducer_purchase_usd_tick: float = 0.0
+        self._lender_recovered_stable_external_nonproducer_purchase_usd_total: float = 0.0
+        self._lender_recovered_stable_other_producer_purchase_usd_tick: float = 0.0
+        self._lender_recovered_stable_other_producer_purchase_usd_total: float = 0.0
         self._lender_recovered_stable_third_party_purchase_usd_tick: float = 0.0
         self._lender_recovered_stable_third_party_purchase_usd_total: float = 0.0
         self._lender_recovered_stable_other_usd_tick: float = 0.0
@@ -1046,6 +1063,13 @@ class SimulationEngine:
         value_per_target = voucher_value_usd / float(len(targets))
         for target in targets:
             self._vault_add(target, voucher_id, units_per_target, source, agent.agent_id)
+            if target.policy.role == "lender":
+                self._increase_lender_producer_voucher_exposure(
+                    target.pool_id,
+                    voucher_id,
+                    value_per_target,
+                    source,
+                )
             self.log.add(Event(
                 self.tick,
                 "PRODUCER_VOUCHER_DEPOSIT",
@@ -4086,15 +4110,177 @@ class SimulationEngine:
         )
         return max(base_rate, contract_rate)
 
-    def _record_lender_recovered_stable(self, pool_id: str, amount_usd: float, reason: str) -> None:
+    def _increase_lender_producer_voucher_exposure(
+        self,
+        pool_id: str,
+        voucher_id: str,
+        amount_usd: float,
+        reason: str,
+    ) -> None:
+        amount = max(0.0, float(amount_usd))
+        if amount <= 1e-9:
+            return
+        pool = self.pools.get(pool_id)
+        if pool is None or pool.policy.role != "lender" or not self._is_producer_voucher(voucher_id):
+            return
+        key = (pool_id, voucher_id)
+        self._lender_producer_voucher_exposure_usd_by_pool_voucher[key] = (
+            self._lender_producer_voucher_exposure_usd_by_pool_voucher.get(key, 0.0) + amount
+        )
+        self.log.add(Event(
+            self.tick,
+            "LENDER_PRODUCER_VOUCHER_EXPOSURE_INCREASED",
+            pool_id=pool_id,
+            asset_id=voucher_id,
+            amount=amount,
+            meta={"reason": reason},
+        ))
+
+    def _reduce_lender_producer_voucher_exposure(
+        self,
+        pool_id: str,
+        voucher_id: str,
+        amount_usd: float,
+        reason: str,
+    ) -> float:
+        amount = max(0.0, float(amount_usd))
+        if amount <= 1e-9:
+            return 0.0
+        key = (pool_id, voucher_id)
+        outstanding = max(0.0, self._lender_producer_voucher_exposure_usd_by_pool_voucher.get(key, 0.0))
+        reduced = min(outstanding, amount)
+        if reduced <= 1e-9:
+            return 0.0
+        remaining = outstanding - reduced
+        if remaining > 1e-9:
+            self._lender_producer_voucher_exposure_usd_by_pool_voucher[key] = remaining
+        else:
+            self._lender_producer_voucher_exposure_usd_by_pool_voucher.pop(key, None)
+        self.log.add(Event(
+            self.tick,
+            "LENDER_PRODUCER_VOUCHER_EXPOSURE_REDUCED",
+            pool_id=pool_id,
+            asset_id=voucher_id,
+            amount=reduced,
+            meta={"reason": reason},
+        ))
+        return reduced
+
+    def _stable_purchase_recovery_reason(self, source_pool: "Pool", voucher_id: str) -> str:
+        spec = self.factory.voucher_specs.get(voucher_id)
+        if (
+            source_pool.policy.role == "producer"
+            and spec is not None
+            and source_pool.steward_id == spec.issuer_id
+        ):
+            return "borrower_stable_repayment"
+        if source_pool.policy.role == "consumer":
+            return "external_nonproducer_stable_purchase"
+        if source_pool.policy.role == "producer":
+            return "other_producer_stable_purchase"
+        return "inventory_turnover_stable_purchase"
+
+    def _apply_producer_stable_exit(
+        self,
+        producer_pool: "Pool",
+        amount_usd: float,
+        reason: str,
+    ) -> float:
+        if producer_pool.policy.role != "producer":
+            return 0.0
+        exit_share = max(
+            0.0,
+            min(1.0, float(getattr(self.cfg, "producer_stable_exit_share", 0.0) or 0.0)),
+        )
+        if exit_share <= 1e-9 or amount_usd <= 1e-9:
+            return 0.0
+        stable_id = self.cfg.stable_symbol
+        stable_value = self._asset_value(producer_pool, stable_id)
+        if stable_value <= 1e-12:
+            stable_value = 1.0
+        exit_usd = max(0.0, float(amount_usd) * exit_share)
+        exit_units = min(producer_pool.vault.get(stable_id), exit_usd / stable_value)
+        if exit_units <= 1e-9:
+            return 0.0
+        if not self._vault_sub(producer_pool, stable_id, exit_units, "producer_stable_exit", "outside_network"):
+            return 0.0
+        exited_usd = exit_units * stable_value
+        self._producer_stable_exited_usd_tick += exited_usd
+        self._producer_stable_exited_usd_total += exited_usd
+        self._stable_offramp_usd_tick += exited_usd
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_STABLE_EXITED",
+            pool_id=producer_pool.pool_id,
+            asset_id=stable_id,
+            amount=exited_usd,
+            meta={"reason": reason, "exit_share": exit_share},
+        ))
+        return exited_usd
+
+    def _refresh_bond_recovery_budget_caps(self) -> None:
+        external_budget = max(
+            0.0,
+            float(
+                getattr(
+                    self.cfg,
+                    "external_nonproducer_stable_to_voucher_budget_usd_per_tick",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        other_producer_budget = max(
+            0.0,
+            float(
+                getattr(
+                    self.cfg,
+                    "other_producer_stable_to_voucher_budget_usd_per_tick",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        if external_budget <= 1e-9 and other_producer_budget <= 1e-9:
+            self._bond_recovery_budget_remaining_by_reason_tick = {}
+            return
+        self._bond_recovery_budget_remaining_by_reason_tick = {
+            "consumer_stable_purchase": external_budget,
+            "external_nonproducer_stable_purchase": external_budget,
+            "other_producer_stable_purchase": other_producer_budget,
+            "third_party_stable_purchase": 0.0,
+            "inventory_turnover_stable_purchase": 0.0,
+        }
+
+    def _cap_lender_recovered_stable_eligibility(self, reason: str, eligible_amount: float) -> float:
+        eligible = max(0.0, float(eligible_amount))
+        if eligible <= 1e-9 or not self._bond_recovery_budget_remaining_by_reason_tick:
+            return eligible
+        if reason not in self._bond_recovery_budget_remaining_by_reason_tick:
+            return eligible
+        remaining = max(0.0, self._bond_recovery_budget_remaining_by_reason_tick.get(reason, 0.0))
+        capped = min(eligible, remaining)
+        self._bond_recovery_budget_remaining_by_reason_tick[reason] = max(0.0, remaining - capped)
+        return capped
+
+    def _record_lender_recovered_stable(
+        self,
+        pool_id: str,
+        amount_usd: float,
+        reason: str,
+        eligible_amount_usd: float | None = None,
+    ) -> None:
         if amount_usd <= 1e-9:
             return
         pool = self.pools.get(pool_id)
         if pool is None or pool.policy.role != "lender":
             return
         amount = float(amount_usd)
-        reserved = self._reserve_lender_recovered_stable_for_bond_service(pool, amount, reason)
-        pending = max(0.0, amount - reserved)
+        eligible_amount = amount if eligible_amount_usd is None else max(0.0, min(amount, float(eligible_amount_usd)))
+        eligible_amount = self._cap_lender_recovered_stable_eligibility(reason, eligible_amount)
+        inventory_turnover = max(0.0, amount - eligible_amount)
+        reserved = self._reserve_lender_recovered_stable_for_bond_service(pool, eligible_amount, reason)
+        pending = max(0.0, eligible_amount - reserved)
         if pending > 1e-9:
             self._lender_recovered_stable_by_pool[pool_id] = (
                 self._lender_recovered_stable_by_pool.get(pool_id, 0.0) + pending
@@ -4108,15 +4294,26 @@ class SimulationEngine:
         )
         self._lender_recovered_stable_usd_tick += amount
         self._lender_recovered_stable_usd_total += amount
+        self._bond_eligible_pool_exposure_recovered_stable_usd_tick += eligible_amount
+        self._bond_eligible_pool_exposure_recovered_stable_usd_total += eligible_amount
+        self._lender_inventory_turnover_stable_usd_tick += inventory_turnover
+        self._lender_inventory_turnover_stable_usd_total += inventory_turnover
         if reason == "borrower_stable_repayment":
+            self._lender_recovered_stable_borrower_self_usd_tick += amount
+            self._lender_recovered_stable_borrower_self_usd_total += amount
             self._lender_recovered_stable_borrower_regular_usd_tick += amount
             self._lender_recovered_stable_borrower_regular_usd_total += amount
         elif reason == "producer_debt_maturity_repayment":
             self._lender_recovered_stable_borrower_maturity_usd_tick += amount
             self._lender_recovered_stable_borrower_maturity_usd_total += amount
-        elif reason == "consumer_stable_purchase":
+        elif reason in {"consumer_stable_purchase", "external_nonproducer_stable_purchase"}:
             self._lender_recovered_stable_consumer_purchase_usd_tick += amount
             self._lender_recovered_stable_consumer_purchase_usd_total += amount
+            self._lender_recovered_stable_external_nonproducer_purchase_usd_tick += amount
+            self._lender_recovered_stable_external_nonproducer_purchase_usd_total += amount
+        elif reason == "other_producer_stable_purchase":
+            self._lender_recovered_stable_other_producer_purchase_usd_tick += amount
+            self._lender_recovered_stable_other_producer_purchase_usd_total += amount
         elif reason == "third_party_stable_purchase":
             self._lender_recovered_stable_third_party_purchase_usd_tick += amount
             self._lender_recovered_stable_third_party_purchase_usd_total += amount
@@ -4128,7 +4325,12 @@ class SimulationEngine:
             "LENDER_STABLE_RECOVERED",
             pool_id=pool_id,
             amount=amount,
-            meta={"reason": reason, "reserved_for_bond_service": reserved},
+            meta={
+                "reason": reason,
+                "eligible_for_bond_service": eligible_amount,
+                "inventory_turnover_usd": inventory_turnover,
+                "reserved_for_bond_service": reserved,
+            },
         ))
 
     def _producer_debt_obligation_sort_key(self, obligation: ProducerDebtObligation) -> Tuple[int, int, int]:
@@ -4212,6 +4414,12 @@ class SimulationEngine:
         self._producer_debt_originated_usd_total += float(borrowed_usd)
         self._producer_debt_cash_service_due_usd_tick += cash_service_due
         self._producer_debt_cash_service_due_usd_total += cash_service_due
+        self._increase_lender_producer_voucher_exposure(
+            lender_pool_id,
+            voucher_id,
+            float(borrowed_usd),
+            f"producer_debt_{normalized_debt_kind}",
+        )
         self.log.add(Event(
             self.tick,
             "PRODUCER_DEBT_OBLIGATION_CREATED",
@@ -4260,7 +4468,10 @@ class SimulationEngine:
             if self._producer_debt_contract_repayment_enabled() and reason in {
                 "borrower_stable_repayment",
                 "consumer_stable_purchase",
+                "external_nonproducer_stable_purchase",
+                "other_producer_stable_purchase",
                 "third_party_stable_purchase",
+                "inventory_turnover_stable_purchase",
             }:
                 cash_service_reduced_usd = min(
                     max(0.0, obligation.cash_service_remaining_usd),
@@ -4288,18 +4499,30 @@ class SimulationEngine:
                 self._producer_debt_stable_recovered_usd_tick += reduced_usd
                 self._producer_debt_stable_recovered_usd_total += reduced_usd
                 event_type = "PRODUCER_DEBT_REPAID_BY_BORROWER_STABLE"
-            elif reason == "consumer_stable_purchase":
+            elif reason in {"consumer_stable_purchase", "external_nonproducer_stable_purchase"}:
                 self._producer_debt_stable_recovered_usd_tick += reduced_usd
                 self._producer_debt_stable_recovered_usd_total += reduced_usd
                 self._producer_debt_consumer_stable_purchase_usd_tick += reduced_usd
                 self._producer_debt_consumer_stable_purchase_usd_total += reduced_usd
-                event_type = "PRODUCER_DEBT_RECOVERED_BY_CONSUMER_STABLE"
-            elif reason == "third_party_stable_purchase":
+                event_type = (
+                    "PRODUCER_DEBT_RECOVERED_BY_EXTERNAL_NONPRODUCER_STABLE"
+                    if reason == "external_nonproducer_stable_purchase"
+                    else "PRODUCER_DEBT_RECOVERED_BY_CONSUMER_STABLE"
+                )
+            elif reason in {"third_party_stable_purchase", "other_producer_stable_purchase"}:
                 self._producer_debt_stable_recovered_usd_tick += reduced_usd
                 self._producer_debt_stable_recovered_usd_total += reduced_usd
                 self._producer_debt_third_party_stable_purchase_usd_tick += reduced_usd
                 self._producer_debt_third_party_stable_purchase_usd_total += reduced_usd
-                event_type = "PRODUCER_DEBT_RECOVERED_BY_THIRD_PARTY_STABLE"
+                event_type = (
+                    "PRODUCER_DEBT_RECOVERED_BY_OTHER_PRODUCER_STABLE"
+                    if reason == "other_producer_stable_purchase"
+                    else "PRODUCER_DEBT_RECOVERED_BY_THIRD_PARTY_STABLE"
+                )
+            elif reason == "inventory_turnover_stable_purchase":
+                self._producer_debt_stable_recovered_usd_tick += reduced_usd
+                self._producer_debt_stable_recovered_usd_total += reduced_usd
+                event_type = "PRODUCER_DEBT_RECOVERED_BY_INVENTORY_TURNOVER_STABLE"
             elif reason == "producer_voucher_swap_out":
                 self._producer_debt_closed_by_circulation_usd_tick += reduced_usd
                 self._producer_debt_closed_by_circulation_usd_total += reduced_usd
@@ -4564,6 +4787,12 @@ class SimulationEngine:
                 )
 
         obligation.remaining_voucher_units = max(0.0, obligation.remaining_voucher_units - close_units)
+        self._reduce_lender_producer_voucher_exposure(
+            obligation.lender_pool_id,
+            obligation.voucher_id,
+            close_units * self._producer_debt_unit_value(obligation),
+            reason,
+        )
         self.log.add(Event(
             self.tick,
             "PRODUCER_DEBT_VOUCHER_EXPOSURE_CLOSED_BY_CASH_SERVICE",
@@ -4618,11 +4847,17 @@ class SimulationEngine:
             "producer_debt_contract_service_in",
             obligation.producer_pool_id,
         )
-        self._record_lender_recovered_stable(lender_pool.pool_id, payment_usd, reason)
+        unit_value = self._producer_debt_unit_value(obligation)
+        eligible_basis_usd = max(0.0, obligation.remaining_voucher_units * unit_value)
+        self._record_lender_recovered_stable(
+            lender_pool.pool_id,
+            payment_usd,
+            reason,
+            eligible_amount_usd=min(payment_usd, eligible_basis_usd),
+        )
         obligation.cash_service_remaining_usd = max(0.0, cash_remaining - payment_usd)
         self._record_producer_debt_cash_service_paid(payment_usd)
 
-        unit_value = self._producer_debt_unit_value(obligation)
         service_multiplier = self._obligation_cash_service_multiplier(obligation)
         if unit_value > 0.0 and service_multiplier > 0.0:
             principal_closed_usd = min(
@@ -4711,6 +4946,12 @@ class SimulationEngine:
         obligation.remaining_voucher_units = max(0.0, obligation.remaining_voucher_units - default_units)
         self._producer_debt_defaulted_usd_tick += default_usd
         self._producer_debt_defaulted_usd_total += default_usd
+        self._reduce_lender_producer_voucher_exposure(
+            lender_pool.pool_id,
+            obligation.voucher_id,
+            default_usd,
+            reason,
+        )
         self.log.add(Event(
             self.tick,
             "PRODUCER_DEBT_DEFAULTED",
@@ -4813,7 +5054,18 @@ class SimulationEngine:
             kind="routing",
             swap_usd=swap_usd,
         )
-        self._record_lender_recovered_stable(lender_pool.pool_id, swap_usd, "producer_debt_maturity_repayment")
+        exposure_reduced_usd = self._reduce_lender_producer_voucher_exposure(
+            lender_pool.pool_id,
+            obligation.voucher_id,
+            gross_voucher_units * unit_value,
+            "producer_debt_maturity_repayment",
+        )
+        self._record_lender_recovered_stable(
+            lender_pool.pool_id,
+            swap_usd,
+            "producer_debt_maturity_repayment",
+            eligible_amount_usd=min(swap_usd, exposure_reduced_usd),
+        )
 
         spec = self.factory.voucher_specs.get(obligation.voucher_id)
         if spec and spec.issuer_id in self.agents and receipt.amount_out > 1e-9:
@@ -6838,9 +7090,12 @@ class SimulationEngine:
             self._third_party_voucher_purchase_stable_spent_usd_tick = 0.0
             self._third_party_voucher_purchase_voucher_value_acquired_usd_tick = 0.0
             self._lender_voucher_purchase_stable_budget_remaining_usd_tick = 0.0
+            self._lender_voucher_purchase_stable_budget_remaining_by_kind_tick = {}
             self._lender_voucher_purchase_stable_budget_onramp_usd_tick = 0.0
             self._consumer_voucher_purchase_stable_budget_onramp_usd_tick = 0.0
             self._third_party_voucher_purchase_stable_budget_onramp_usd_tick = 0.0
+            self._producer_stable_exited_usd_tick = 0.0
+            self._producer_stable_reuse_budget_usd_tick = 0.0
             self._route_context_count_tick = {}
             self._route_context_volume_usd_tick = {}
             self._route_context_source_stable_count_tick = {}
@@ -6870,11 +7125,17 @@ class SimulationEngine:
             self._bond_service_reserved_usd_tick = 0.0
             self._bond_service_paid_from_reserve_usd_tick = 0.0
             self._lender_recovered_stable_usd_tick = 0.0
+            self._bond_eligible_pool_exposure_recovered_stable_usd_tick = 0.0
+            self._lender_inventory_turnover_stable_usd_tick = 0.0
+            self._lender_recovered_stable_borrower_self_usd_tick = 0.0
             self._lender_recovered_stable_borrower_regular_usd_tick = 0.0
             self._lender_recovered_stable_borrower_maturity_usd_tick = 0.0
             self._lender_recovered_stable_consumer_purchase_usd_tick = 0.0
+            self._lender_recovered_stable_external_nonproducer_purchase_usd_tick = 0.0
+            self._lender_recovered_stable_other_producer_purchase_usd_tick = 0.0
             self._lender_recovered_stable_third_party_purchase_usd_tick = 0.0
             self._lender_recovered_stable_other_usd_tick = 0.0
+            self._refresh_bond_recovery_budget_caps()
             self._quarterly_clearing_usd_tick = 0.0
             self._quarterly_clearing_lender_liquidity_before_tick = 0.0
             self._quarterly_clearing_lender_liquidity_after_tick = 0.0
@@ -7528,6 +7789,14 @@ class SimulationEngine:
         )
         return targets[:limit]
 
+    def _lender_voucher_purchase_budget_remaining_for_kind(self, buyer_kind: str) -> float:
+        if self._lender_voucher_purchase_stable_budget_remaining_by_kind_tick:
+            return max(
+                0.0,
+                float(self._lender_voucher_purchase_stable_budget_remaining_by_kind_tick.get(buyer_kind, 0.0)),
+            )
+        return max(0.0, float(self._lender_voucher_purchase_stable_budget_remaining_usd_tick))
+
     def _voucher_purchase_source_candidates(
         self,
         buyer_kind: str,
@@ -7561,9 +7830,9 @@ class SimulationEngine:
                 sources.append(pool)
             elif stable_have > 1e-9:
                 saw_reserve_blocked = True
-                if self._lender_voucher_purchase_stable_budget_remaining_usd_tick > 1e-9:
+                if self._lender_voucher_purchase_budget_remaining_for_kind(buyer_kind) > 1e-9:
                     sources.append(pool)
-            elif self._lender_voucher_purchase_stable_budget_remaining_usd_tick > 1e-9:
+            elif self._lender_voucher_purchase_budget_remaining_for_kind(buyer_kind) > 1e-9:
                 sources.append(pool)
         return sources, saw_stable, saw_reserve_blocked
 
@@ -7574,10 +7843,7 @@ class SimulationEngine:
         needed_usd: float,
     ) -> float:
         needed_usd = max(0.0, float(needed_usd))
-        budget_usd = max(
-            0.0,
-            float(self._lender_voucher_purchase_stable_budget_remaining_usd_tick),
-        )
+        budget_usd = self._lender_voucher_purchase_budget_remaining_for_kind(buyer_kind)
         if needed_usd <= 1e-9 or budget_usd <= 1e-9:
             return 0.0
         stable_id = self.cfg.stable_symbol
@@ -7592,7 +7858,15 @@ class SimulationEngine:
             "lender_voucher_purchase_budget_income",
             "purchase_budget",
         )
-        self._lender_voucher_purchase_stable_budget_remaining_usd_tick -= applied_usd
+        if self._lender_voucher_purchase_stable_budget_remaining_by_kind_tick:
+            self._lender_voucher_purchase_stable_budget_remaining_by_kind_tick[buyer_kind] = max(
+                0.0,
+                self._lender_voucher_purchase_stable_budget_remaining_by_kind_tick.get(buyer_kind, 0.0) - applied_usd,
+            )
+        self._lender_voucher_purchase_stable_budget_remaining_usd_tick = max(
+            0.0,
+            self._lender_voucher_purchase_stable_budget_remaining_usd_tick - applied_usd,
+        )
         self._lender_voucher_purchase_stable_budget_onramp_usd_tick += applied_usd
         self._lender_voucher_purchase_stable_budget_onramp_usd_total += applied_usd
         if buyer_kind == "consumer":
@@ -7601,6 +7875,8 @@ class SimulationEngine:
         else:
             self._third_party_voucher_purchase_stable_budget_onramp_usd_tick += applied_usd
             self._third_party_voucher_purchase_stable_budget_onramp_usd_total += applied_usd
+            self._producer_stable_reuse_budget_usd_tick += applied_usd
+            self._producer_stable_reuse_budget_usd_total += applied_usd
         self._stable_onramp_usd_tick += applied_usd
         return applied_usd
 
@@ -7772,14 +8048,45 @@ class SimulationEngine:
         attempts = max(0, int(getattr(self.cfg, "lender_voucher_purchase_attempts_per_tick", 0) or 0))
         if attempts <= 0:
             return
-        self._lender_voucher_purchase_stable_budget_remaining_usd_tick = max(
+        total_budget = max(
             0.0,
             float(getattr(self.cfg, "lender_voucher_purchase_stable_budget_usd_per_tick", 0.0) or 0.0),
+        )
+        external_budget = max(
+            0.0,
+            float(
+                getattr(
+                    self.cfg,
+                    "external_nonproducer_stable_to_voucher_budget_usd_per_tick",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        other_producer_budget = max(
+            0.0,
+            float(
+                getattr(
+                    self.cfg,
+                    "other_producer_stable_to_voucher_budget_usd_per_tick",
+                    0.0,
+                )
+                or 0.0
+            ),
         )
         consumer_share = max(
             0.0,
             min(1.0, float(getattr(self.cfg, "lender_voucher_purchase_consumer_share", 0.75) or 0.0)),
         )
+        if external_budget > 1e-9 or other_producer_budget > 1e-9:
+            self._lender_voucher_purchase_stable_budget_remaining_by_kind_tick = {
+                "consumer": external_budget,
+                "third_party": other_producer_budget,
+            }
+            self._lender_voucher_purchase_stable_budget_remaining_usd_tick = external_budget + other_producer_budget
+        else:
+            self._lender_voucher_purchase_stable_budget_remaining_by_kind_tick = {}
+            self._lender_voucher_purchase_stable_budget_remaining_usd_tick = total_budget
         for _ in range(attempts):
             buyer_kind = "consumer" if self.rng.random() < consumer_share else "third_party"
             self._attempt_lender_voucher_purchase(buyer_kind)
@@ -8487,24 +8794,21 @@ class SimulationEngine:
                 and receipt.asset_in == self.cfg.stable_symbol
                 and self._is_producer_voucher(receipt.asset_out)
             ):
-                spec = self.factory.voucher_specs.get(receipt.asset_out)
-                if (
-                    source_pool.policy.role == "producer"
-                    and spec is not None
-                    and source_pool.steward_id == spec.issuer_id
-                ):
-                    debt_reduction_reason = "borrower_stable_repayment"
-                    recovered_reason = "borrower_stable_repayment"
-                elif source_pool.policy.role == "consumer":
-                    debt_reduction_reason = "consumer_stable_purchase"
-                    recovered_reason = "consumer_stable_purchase"
-                else:
-                    debt_reduction_reason = "third_party_stable_purchase"
-                    recovered_reason = "third_party_stable_purchase"
+                recovered_reason = self._stable_purchase_recovery_reason(source_pool, receipt.asset_out)
+                debt_reduction_reason = recovered_reason
+                stable_recovery_usd = float(receipt.amount_in) * self._asset_value(pool, receipt.asset_in)
+                voucher_exposure_usd = gross_out * self._asset_value(pool, receipt.asset_out)
+                eligible_recovery_usd = self._reduce_lender_producer_voucher_exposure(
+                    pool.pool_id,
+                    receipt.asset_out,
+                    voucher_exposure_usd,
+                    recovered_reason,
+                )
                 self._record_lender_recovered_stable(
                     pool.pool_id,
-                    float(receipt.amount_in) * self._asset_value(pool, receipt.asset_in),
+                    stable_recovery_usd,
                     recovered_reason,
+                    eligible_amount_usd=min(stable_recovery_usd, eligible_recovery_usd),
                 )
                 self._reduce_producer_debt_obligations(
                     pool.pool_id,
@@ -8546,6 +8850,13 @@ class SimulationEngine:
                         debt_kind="voucher",
                     )
                 if self._is_producer_voucher(receipt.asset_out):
+                    voucher_exposure_usd = gross_out * self._asset_value(pool, receipt.asset_out)
+                    self._reduce_lender_producer_voucher_exposure(
+                        pool.pool_id,
+                        receipt.asset_out,
+                        voucher_exposure_usd,
+                        "producer_voucher_swap_out",
+                    )
                     self._reduce_producer_debt_obligations(
                         pool.pool_id,
                         receipt.asset_out,
@@ -8559,6 +8870,13 @@ class SimulationEngine:
                 and receipt.asset_in != self.cfg.stable_symbol
                 and self._is_producer_voucher(receipt.asset_out)
             ):
+                voucher_exposure_usd = gross_out * self._asset_value(pool, receipt.asset_out)
+                self._reduce_lender_producer_voucher_exposure(
+                    pool.pool_id,
+                    receipt.asset_out,
+                    voucher_exposure_usd,
+                    "producer_voucher_swap_out",
+                )
                 self._reduce_producer_debt_obligations(
                     pool.pool_id,
                     receipt.asset_out,
@@ -8653,6 +8971,15 @@ class SimulationEngine:
 
         # normal asset: deposit back to source pool
         self._vault_add(source_pool, out_asset, out_amount, "route_deposit", "escrow")
+        if out_asset == self.cfg.stable_symbol and source_pool.policy.role == "producer":
+            stable_value = self._asset_value(source_pool, out_asset)
+            if stable_value <= 1e-12:
+                stable_value = 1.0
+            self._apply_producer_stable_exit(
+                source_pool,
+                out_amount * stable_value,
+                "route_stable_receipt",
+            )
         self._record_route_motif(
             route_context=route_context,
             source_pool=source_pool,
@@ -9200,6 +9527,24 @@ class SimulationEngine:
                 ),
                 "lender_recovered_stable_usd_tick": float(self._lender_recovered_stable_usd_tick),
                 "lender_recovered_stable_usd_total": float(self._lender_recovered_stable_usd_total),
+                "bond_eligible_pool_exposure_recovered_stable_usd_tick": float(
+                    self._bond_eligible_pool_exposure_recovered_stable_usd_tick
+                ),
+                "bond_eligible_pool_exposure_recovered_stable_usd_total": float(
+                    self._bond_eligible_pool_exposure_recovered_stable_usd_total
+                ),
+                "lender_inventory_turnover_stable_usd_tick": float(
+                    self._lender_inventory_turnover_stable_usd_tick
+                ),
+                "lender_inventory_turnover_stable_usd_total": float(
+                    self._lender_inventory_turnover_stable_usd_total
+                ),
+                "lender_recovered_stable_borrower_self_usd_tick": float(
+                    self._lender_recovered_stable_borrower_self_usd_tick
+                ),
+                "lender_recovered_stable_borrower_self_usd_total": float(
+                    self._lender_recovered_stable_borrower_self_usd_total
+                ),
                 "lender_recovered_stable_borrower_regular_usd_tick": float(
                     self._lender_recovered_stable_borrower_regular_usd_tick
                 ),
@@ -9217,6 +9562,18 @@ class SimulationEngine:
                 ),
                 "lender_recovered_stable_consumer_purchase_usd_total": float(
                     self._lender_recovered_stable_consumer_purchase_usd_total
+                ),
+                "lender_recovered_stable_external_nonproducer_purchase_usd_tick": float(
+                    self._lender_recovered_stable_external_nonproducer_purchase_usd_tick
+                ),
+                "lender_recovered_stable_external_nonproducer_purchase_usd_total": float(
+                    self._lender_recovered_stable_external_nonproducer_purchase_usd_total
+                ),
+                "lender_recovered_stable_other_producer_purchase_usd_tick": float(
+                    self._lender_recovered_stable_other_producer_purchase_usd_tick
+                ),
+                "lender_recovered_stable_other_producer_purchase_usd_total": float(
+                    self._lender_recovered_stable_other_producer_purchase_usd_total
                 ),
                 "lender_recovered_stable_third_party_purchase_usd_tick": float(
                     self._lender_recovered_stable_third_party_purchase_usd_tick
@@ -9443,6 +9800,14 @@ class SimulationEngine:
                 ),
                 "third_party_voucher_purchase_stable_budget_onramp_usd_total": float(
                     self._third_party_voucher_purchase_stable_budget_onramp_usd_total
+                ),
+                "producer_stable_exited_usd_tick": float(self._producer_stable_exited_usd_tick),
+                "producer_stable_exited_usd_total": float(self._producer_stable_exited_usd_total),
+                "producer_stable_reuse_budget_usd_tick": float(
+                    self._producer_stable_reuse_budget_usd_tick
+                ),
+                "producer_stable_reuse_budget_usd_total": float(
+                    self._producer_stable_reuse_budget_usd_total
                 ),
                 "producer_debt_matured_usd_tick": float(self._producer_debt_matured_usd_tick),
                 "producer_debt_matured_usd_total": float(self._producer_debt_matured_usd_total),

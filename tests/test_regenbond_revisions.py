@@ -832,6 +832,139 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(engine._consumer_voucher_purchase_stable_budget_onramp_usd_tick, 3.0)
         self.assertAlmostEqual(engine._lender_voucher_purchase_stable_budget_onramp_usd_tick, 3.0)
 
+    def test_purchase_budget_split_caps_other_producer_reuse(self):
+        engine = SimulationEngine(small_config(initial_producers=1, initial_consumers=1, max_pools=4))
+        stable_id = engine.cfg.stable_symbol
+        producer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "producer")
+        producer_before = producer_pool.vault.get(stable_id)
+        engine._lender_voucher_purchase_stable_budget_remaining_usd_tick = 12.0
+        engine._lender_voucher_purchase_stable_budget_remaining_by_kind_tick = {
+            "consumer": 10.0,
+            "third_party": 2.0,
+        }
+
+        applied = engine._apply_voucher_purchase_stable_budget("third_party", producer_pool, 5.0)
+
+        self.assertAlmostEqual(applied, 2.0)
+        self.assertAlmostEqual(engine._lender_voucher_purchase_stable_budget_remaining_usd_tick, 10.0)
+        self.assertAlmostEqual(
+            engine._lender_voucher_purchase_stable_budget_remaining_by_kind_tick["third_party"],
+            0.0,
+        )
+        self.assertAlmostEqual(engine._producer_stable_reuse_budget_usd_tick, 2.0)
+        self.assertAlmostEqual(producer_pool.vault.get(stable_id), producer_before + 2.0)
+
+    def test_stable_purchase_recovery_reason_splits_actor_roles(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_producers=2,
+                initial_consumers=1,
+                initial_liquidity_providers=0,
+                max_pools=5,
+            ),
+            seed=17,
+        )
+        producers = [agent for agent in engine.agents.values() if agent.role == "producer"]
+        issuer = producers[0]
+        other_producer = producers[1]
+        consumer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "consumer")
+
+        self.assertEqual(
+            engine._stable_purchase_recovery_reason(engine.pools[issuer.pool_id], issuer.voucher_spec.voucher_id),
+            "borrower_stable_repayment",
+        )
+        self.assertEqual(
+            engine._stable_purchase_recovery_reason(consumer_pool, issuer.voucher_spec.voucher_id),
+            "external_nonproducer_stable_purchase",
+        )
+        self.assertEqual(
+            engine._stable_purchase_recovery_reason(
+                engine.pools[other_producer.pool_id],
+                issuer.voucher_spec.voucher_id,
+            ),
+            "other_producer_stable_purchase",
+        )
+
+    def test_lender_recovered_stable_reserve_uses_exposure_cap(self):
+        engine = SimulationEngine(
+            small_config(
+                quarterly_clearing_enabled=True,
+                quarterly_clearing_stride_ticks=13,
+                bond_return_mode="issuer_cashflow",
+                bond_gross_principal_usd=1000.0,
+                bond_term_ticks=260,
+                bond_service_reserve_enabled=True,
+                bond_service_reserve_recovery_share=1.0,
+            )
+        )
+        stable_id = engine.cfg.stable_symbol
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        current_stable = lender_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(lender_pool, stable_id, current_stable, "test_clear", "test")
+        engine._vault_add(lender_pool, stable_id, 100.0, "test_recovery", "test")
+
+        engine._record_lender_recovered_stable(
+            lender_pool.pool_id,
+            100.0,
+            "other_producer_stable_purchase",
+            eligible_amount_usd=30.0,
+        )
+
+        self.assertAlmostEqual(engine._bond_service_reserved_usd_total, 30.0)
+        self.assertAlmostEqual(engine._bond_eligible_pool_exposure_recovered_stable_usd_total, 30.0)
+        self.assertAlmostEqual(engine._lender_inventory_turnover_stable_usd_total, 70.0)
+        self.assertAlmostEqual(engine._lender_recovered_stable_by_pool.get(lender_pool.pool_id, 0.0), 0.0)
+        self.assertAlmostEqual(lender_pool.vault.get(stable_id), 70.0)
+
+    def test_nonborrower_recovery_eligibility_uses_empirical_budget_cap(self):
+        engine = SimulationEngine(
+            small_config(
+                external_nonproducer_stable_to_voucher_budget_usd_per_tick=10.0,
+                other_producer_stable_to_voucher_budget_usd_per_tick=2.0,
+            )
+        )
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        engine._refresh_bond_recovery_budget_caps()
+
+        engine._record_lender_recovered_stable(
+            lender_pool.pool_id,
+            30.0,
+            "external_nonproducer_stable_purchase",
+            eligible_amount_usd=30.0,
+        )
+        engine._record_lender_recovered_stable(
+            lender_pool.pool_id,
+            5.0,
+            "other_producer_stable_purchase",
+            eligible_amount_usd=5.0,
+        )
+        engine._record_lender_recovered_stable(
+            lender_pool.pool_id,
+            7.0,
+            "third_party_stable_purchase",
+            eligible_amount_usd=7.0,
+        )
+
+        self.assertAlmostEqual(engine._bond_eligible_pool_exposure_recovered_stable_usd_total, 12.0)
+        self.assertAlmostEqual(engine._lender_inventory_turnover_stable_usd_total, 30.0)
+
+    def test_producer_stable_exit_removes_calibrated_receipt_share(self):
+        engine = SimulationEngine(small_config(producer_stable_exit_share=0.75))
+        stable_id = engine.cfg.stable_symbol
+        producer_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "producer")
+        current_stable = producer_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(producer_pool, stable_id, current_stable, "test_clear", "test")
+        engine._vault_add(producer_pool, stable_id, 100.0, "test_recovery", "test")
+
+        exited = engine._apply_producer_stable_exit(producer_pool, 100.0, "test")
+
+        self.assertAlmostEqual(exited, 75.0)
+        self.assertAlmostEqual(engine._producer_stable_exited_usd_tick, 75.0)
+        self.assertAlmostEqual(engine._stable_offramp_usd_tick, 75.0)
+        self.assertAlmostEqual(producer_pool.vault.get(stable_id), 25.0)
+
     def test_snapshot_reports_lender_stable_available_above_reserve(self):
         engine = SimulationEngine(small_config())
         stable_id = engine.cfg.stable_symbol
@@ -1227,37 +1360,66 @@ class RegenBondRevisionTests(unittest.TestCase):
         )
         self.assertEqual(
             args._validation_lender_voucher_purchase_empirical_window,
-            "trailing_90d",
+            "trailing_52w",
         )
         self.assertAlmostEqual(
             args._validation_lender_voucher_purchase_empirical_s2v_events,
-            260.0,
+            293.0,
         )
         self.assertAlmostEqual(
             args._validation_lender_voucher_purchase_empirical_s2v_per_week,
-            20.0,
+            293.0 / 52.29,
         )
         self.assertAlmostEqual(
             args._validation_lender_voucher_purchase_empirical_stable_input_usd,
-            2008.61454,
+            2206.257821,
         )
         self.assertEqual(args._validation_lender_voucher_purchase_attempts_per_tick, 6)
         self.assertAlmostEqual(
             args._validation_lender_voucher_purchase_avg_stable_spend_usd,
-            2008.61454 / 260.0,
+            2206.257821 / 293.0,
         )
         self.assertAlmostEqual(
             args._validation_lender_voucher_purchase_target_usd,
-            2008.61454 / 260.0,
+            2206.257821 / 293.0,
         )
         self.assertAlmostEqual(
             args._validation_lender_voucher_purchase_max_usd,
-            2008.61454 / 260.0,
+            2206.257821 / 293.0,
         )
         self.assertAlmostEqual(
             args._validation_lender_voucher_purchase_stable_budget_usd_per_tick,
-            6 * (2008.61454 / 260.0),
+            34.244728 + 7.951460,
         )
+        self.assertAlmostEqual(
+            args._validation_external_nonproducer_stable_to_voucher_budget_usd_per_tick,
+            34.244728,
+        )
+        self.assertAlmostEqual(
+            args._validation_other_producer_stable_to_voucher_budget_usd_per_tick,
+            7.951460,
+        )
+        self.assertAlmostEqual(args._validation_lender_voucher_purchase_consumer_share, 205 / 293)
+        self.assertAlmostEqual(args._validation_producer_stable_reuse_share, 0.032480)
+        self.assertAlmostEqual(args._validation_producer_stable_exit_share, 0.967520)
+        pool_era = calibration.stable_to_voucher_actor_split["pool_era"]
+        self.assertEqual(
+            sum(int(pool_era[role]["events"]) for role in pool_era),
+            441,
+        )
+        self.assertAlmostEqual(
+            sum(pool_era[role]["stable_input_value_usd"] for role in pool_era),
+            10375.997821,
+        )
+        trailing_52w = calibration.stable_to_voucher_actor_split["trailing_52w"]
+        self.assertAlmostEqual(trailing_52w["original_issuer_self"]["stable_input_value_usd"], 10.65)
+        self.assertAlmostEqual(trailing_52w["other_producer"]["stable_input_value_usd"], 415.74778)
+        self.assertAlmostEqual(
+            trailing_52w["external_nonproducer"]["stable_input_value_usd"],
+            1790.510041,
+        )
+        reuse = calibration.producer_stable_reuse_calibration["trailing_52w"]
+        self.assertAlmostEqual(reuse["producer_stable_reuse_share"], 0.032480)
 
     def test_calibration_loader_reads_overlap_distribution(self):
         def write_rows(path: Path, fieldnames: list[str], rows: list[dict[str, object]]) -> None:
@@ -2340,6 +2502,47 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(reduced, 40.0)
         self.assertAlmostEqual(engine._producer_debt_obligations[0].remaining_voucher_units, 60.0)
         self.assertAlmostEqual(engine._producer_debt_closed_by_circulation_usd_total, 40.0)
+
+    def test_inventory_turnover_stable_purchase_closes_loan_but_not_bond_cash(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_debt_maturity_enabled=True,
+                external_nonproducer_stable_to_voucher_budget_usd_per_tick=10.0,
+                other_producer_stable_to_voucher_budget_usd_per_tick=2.0,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        lender_pool.values.set_value(voucher_id, 1.0)
+        engine.tick = 1
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+        )
+        engine._refresh_bond_recovery_budget_caps()
+
+        reduced = engine._reduce_producer_debt_obligations(
+            lender_pool.pool_id,
+            voucher_id,
+            30.0,
+            "inventory_turnover_stable_purchase",
+        )
+        engine._record_lender_recovered_stable(
+            lender_pool.pool_id,
+            30.0,
+            "inventory_turnover_stable_purchase",
+            eligible_amount_usd=30.0,
+        )
+
+        self.assertAlmostEqual(reduced, 30.0)
+        self.assertAlmostEqual(engine._producer_debt_stable_recovered_usd_total, 30.0)
+        self.assertAlmostEqual(engine._bond_eligible_pool_exposure_recovered_stable_usd_total, 0.0)
+        self.assertAlmostEqual(engine._lender_inventory_turnover_stable_usd_total, 30.0)
 
     def test_contract_cash_service_can_recover_stable_after_voucher_circulation(self):
         engine = SimulationEngine(

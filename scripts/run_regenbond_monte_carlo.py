@@ -176,6 +176,8 @@ class Calibration:
     voucher_pool_overlap_calibration: dict[str, float]
     voucher_pool_overlap_distribution: dict[str, float]
     stable_actor_demographics: dict[str, float]
+    stable_to_voucher_actor_split: dict[str, dict[str, dict[str, float]]]
+    producer_stable_reuse_calibration: dict[str, dict[str, float]]
     unit_normalization: dict[str, float]
 
 
@@ -1286,6 +1288,33 @@ def load_calibration(calibration_dir: Path) -> Calibration:
     voucher_pool_overlap_calibration = load_metric_table("voucher_pool_overlap_calibration.csv")
     voucher_pool_overlap_distribution = load_overlap_distribution()
     stable_actor_demographics = load_metric_table("stable_actor_demographics.csv")
+
+    stable_to_voucher_actor_split: dict[str, dict[str, dict[str, float]]] = {}
+    actor_split_path = calibration_dir / "stable_to_voucher_actor_split.csv"
+    if actor_split_path.exists():
+        for row in read_csv(actor_split_path):
+            window = str(row.get("window", "")).strip()
+            role = str(row.get("actor_role", "")).strip()
+            if not window or not role:
+                continue
+            stable_to_voucher_actor_split.setdefault(window, {})[role] = {
+                key: safe_float(value)
+                for key, value in row.items()
+                if key not in {"window", "actor_role", "claim_boundary"}
+            }
+
+    producer_stable_reuse_calibration: dict[str, dict[str, float]] = {}
+    producer_reuse_path = calibration_dir / "producer_stable_reuse_calibration.csv"
+    if producer_reuse_path.exists():
+        for row in read_csv(producer_reuse_path):
+            window = str(row.get("window", "")).strip()
+            if not window:
+                continue
+            producer_stable_reuse_calibration[window] = {
+                key: safe_float(value)
+                for key, value in row.items()
+                if key not in {"window", "claim_boundary"}
+            }
     unit_normalization = load_metric_table("unit_normalization_calibration.csv")
 
     return Calibration(
@@ -1311,6 +1340,8 @@ def load_calibration(calibration_dir: Path) -> Calibration:
         voucher_pool_overlap_calibration=voucher_pool_overlap_calibration,
         voucher_pool_overlap_distribution=voucher_pool_overlap_distribution,
         stable_actor_demographics=stable_actor_demographics,
+        stable_to_voucher_actor_split=stable_to_voucher_actor_split,
+        producer_stable_reuse_calibration=producer_stable_reuse_calibration,
         unit_normalization=unit_normalization,
     )
 
@@ -1647,30 +1678,93 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
         f"_{prefix}_producer_credit_request_budget_share",
         max(0.0, min(0.95, producer_credit_request_budget_share)),
     )
-    purchase_cash_value = safe_float(
-        current_circulation.get("stable_to_voucher_stable_input_value")
-    )
-    if purchase_cash_value <= 0.0:
+    purchase_window = "trailing_52w"
+    actor_split = calibration.stable_to_voucher_actor_split.get(purchase_window, {})
+    if not actor_split:
+        purchase_window = circulation_window
+        actor_split = calibration.stable_to_voucher_actor_split.get(purchase_window, {})
+
+    external_row = actor_split.get("external_nonproducer", {})
+    other_producer_row = actor_split.get("other_producer", {})
+    self_row = actor_split.get("original_issuer_self", {})
+    external_purchase_events = safe_float(external_row.get("events"))
+    other_producer_purchase_events = safe_float(other_producer_row.get("events"))
+    external_purchase_cash_value = safe_float(external_row.get("stable_input_value_usd"))
+    other_producer_purchase_cash_value = safe_float(other_producer_row.get("stable_input_value_usd"))
+    self_purchase_events = safe_float(self_row.get("events"))
+    self_purchase_cash_value = safe_float(self_row.get("stable_input_value_usd"))
+    purchase_weeks = safe_float(external_row.get("weeks")) or safe_float(current_circulation.get("weeks"))
+
+    if external_purchase_events + other_producer_purchase_events <= 0.0:
         purchase_cash_value = safe_float(
-            calibration.debt_removal_calibration.get("stable_to_voucher_purchase_cash_value")
+            current_circulation.get("stable_to_voucher_stable_input_value")
         )
-    purchase_events = stable_to_voucher_count
-    if purchase_events <= 0.0:
-        purchase_events = safe_float(
-            calibration.debt_removal_calibration.get("stable_to_voucher_purchase_events")
+        if purchase_cash_value <= 0.0:
+            purchase_cash_value = safe_float(
+                calibration.debt_removal_calibration.get("stable_to_voucher_purchase_cash_value")
+            )
+        purchase_events = stable_to_voucher_count
+        if purchase_events <= 0.0:
+            purchase_events = safe_float(
+                calibration.debt_removal_calibration.get("stable_to_voucher_purchase_events")
+            )
+        purchase_per_week = safe_float(current_circulation.get("stable_to_voucher_per_week"))
+        purchase_avg_stable_spend = purchase_cash_value / purchase_events if purchase_events > 1e-9 else 0.0
+        if motif_s2v_share > 0.0:
+            purchase_attempts_per_tick = int(math.ceil(swap_budget * motif_s2v_share))
+        elif purchase_events > 0.0:
+            purchase_attempts_per_tick = int(math.ceil(purchase_events / max(1, int(ticks))))
+        else:
+            purchase_attempts_per_tick = 0
+        if purchase_events > 0.0:
+            purchase_attempts_per_tick = max(1, purchase_attempts_per_tick)
+        purchase_budget_per_tick = purchase_attempts_per_tick * purchase_avg_stable_spend
+        external_budget_per_tick = purchase_budget_per_tick
+        other_producer_budget_per_tick = 0.0
+        purchase_external_events = safe_float(
+            calibration.stable_actor_demographics.get("stable_to_voucher_external_events")
         )
-    purchase_per_week = safe_float(current_circulation.get("stable_to_voucher_per_week"))
-    purchase_avg_stable_spend = purchase_cash_value / purchase_events if purchase_events > 1e-9 else 0.0
-    if motif_s2v_share > 0.0:
-        purchase_attempts_per_tick = int(math.ceil(swap_budget * motif_s2v_share))
-    elif purchase_events > 0.0:
-        purchase_attempts_per_tick = int(math.ceil(purchase_events / max(1, int(ticks))))
+        purchase_producer_events = safe_float(
+            calibration.stable_actor_demographics.get("stable_to_voucher_producer_self_events")
+        )
+        purchase_classified_events = purchase_external_events + purchase_producer_events
+        purchase_consumer_share = (
+            purchase_external_events / purchase_classified_events
+            if purchase_classified_events > 1e-9
+            else 0.75
+        )
     else:
-        purchase_attempts_per_tick = 0
-    if purchase_events > 0.0:
-        purchase_attempts_per_tick = max(1, purchase_attempts_per_tick)
-    purchase_budget_per_tick = purchase_attempts_per_tick * purchase_avg_stable_spend
-    setattr(args, f"_{prefix}_lender_voucher_purchase_empirical_window", circulation_window)
+        purchase_events = external_purchase_events + other_producer_purchase_events
+        purchase_cash_value = external_purchase_cash_value + other_producer_purchase_cash_value
+        purchase_per_week = purchase_events / purchase_weeks if purchase_weeks > 1e-9 else 0.0
+        purchase_avg_stable_spend = purchase_cash_value / purchase_events if purchase_events > 1e-9 else 0.0
+        purchase_attempts_per_tick = int(math.ceil(purchase_per_week)) if purchase_per_week > 0.0 else 0
+        if purchase_events > 0.0:
+            purchase_attempts_per_tick = max(1, purchase_attempts_per_tick)
+        external_budget_per_tick = safe_float(external_row.get("stable_input_usd_per_week"))
+        if external_budget_per_tick <= 0.0:
+            external_budget_per_tick = (
+                external_purchase_cash_value / purchase_weeks if purchase_weeks > 1e-9 else 0.0
+            )
+        other_producer_budget_per_tick = safe_float(other_producer_row.get("stable_input_usd_per_week"))
+        if other_producer_budget_per_tick <= 0.0:
+            other_producer_budget_per_tick = (
+                other_producer_purchase_cash_value / purchase_weeks if purchase_weeks > 1e-9 else 0.0
+            )
+        purchase_budget_per_tick = external_budget_per_tick + other_producer_budget_per_tick
+        purchase_consumer_share = (
+            external_purchase_events / purchase_events if purchase_events > 1e-9 else 0.75
+        )
+
+    reuse_window = "trailing_52w"
+    reuse_row = calibration.producer_stable_reuse_calibration.get(reuse_window, {})
+    if not reuse_row:
+        reuse_window = purchase_window
+        reuse_row = calibration.producer_stable_reuse_calibration.get(reuse_window, {})
+    producer_stable_reuse_share = safe_float(reuse_row.get("producer_stable_reuse_share"), 1.0)
+    producer_stable_exit_share = safe_float(reuse_row.get("producer_stable_exit_share"), 0.0)
+
+    setattr(args, f"_{prefix}_lender_voucher_purchase_empirical_window", purchase_window)
     setattr(args, f"_{prefix}_lender_voucher_purchase_empirical_s2v_events", purchase_events)
     setattr(args, f"_{prefix}_lender_voucher_purchase_empirical_s2v_per_week", purchase_per_week)
     setattr(args, f"_{prefix}_lender_voucher_purchase_empirical_stable_input_usd", purchase_cash_value)
@@ -1684,35 +1778,38 @@ def configure_sarafu_activity_controls(args: argparse.Namespace, calibration: Ca
     )
     setattr(
         args,
+        f"_{prefix}_external_nonproducer_stable_to_voucher_budget_usd_per_tick",
+        external_budget_per_tick,
+    )
+    setattr(
+        args,
+        f"_{prefix}_other_producer_stable_to_voucher_budget_usd_per_tick",
+        other_producer_budget_per_tick,
+    )
+    setattr(
+        args,
         f"_{prefix}_lender_voucher_purchase_attempts_per_tick",
         purchase_attempts_per_tick,
     )
-    purchase_external_events = safe_float(
-        calibration.stable_actor_demographics.get("stable_to_voucher_external_events")
-    )
-    purchase_producer_events = safe_float(
-        calibration.stable_actor_demographics.get("stable_to_voucher_producer_self_events")
-    )
-    purchase_classified_events = purchase_external_events + purchase_producer_events
-    if purchase_classified_events > 1e-9:
-        purchase_consumer_share = purchase_external_events / purchase_classified_events
-    else:
-        purchase_consumer_share = 0.75
     setattr(
         args,
         f"_{prefix}_lender_voucher_purchase_consumer_share",
         max(0.0, min(1.0, purchase_consumer_share)),
     )
+    setattr(args, f"_{prefix}_producer_stable_reuse_share", max(0.0, min(1.0, producer_stable_reuse_share)))
+    setattr(args, f"_{prefix}_producer_stable_exit_share", max(0.0, min(1.0, producer_stable_exit_share)))
+    setattr(args, f"_{prefix}_stable_to_voucher_self_purchase_events", self_purchase_events)
+    setattr(args, f"_{prefix}_stable_to_voucher_self_purchase_usd", self_purchase_cash_value)
     setattr(args, f"_{prefix}_lender_voucher_purchase_inventory_share", 0.05)
     setattr(
         args,
         f"_{prefix}_consumer_initial_stable_total_usd",
-        max(0.0, purchase_cash_value * purchase_consumer_share),
+        max(0.0, external_purchase_cash_value if actor_split else purchase_cash_value * purchase_consumer_share),
     )
     setattr(
         args,
         f"_{prefix}_producer_initial_stable_total_usd",
-        max(0.0, purchase_cash_value * (1.0 - purchase_consumer_share)),
+        max(0.0, other_producer_purchase_cash_value if actor_split else purchase_cash_value * (1.0 - purchase_consumer_share)),
     )
     activity_boost = calibration.productive_credit_activity_boost_calibration
     setattr(
@@ -2105,6 +2202,36 @@ def scenario_config(
                 or 0.0
             ),
         )
+        cfg.external_nonproducer_stable_to_voucher_budget_usd_per_tick = max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "_validation_external_nonproducer_stable_to_voucher_budget_usd_per_tick",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        cfg.other_producer_stable_to_voucher_budget_usd_per_tick = max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "_validation_other_producer_stable_to_voucher_budget_usd_per_tick",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        cfg.producer_stable_reuse_share = max(
+            0.0,
+            min(1.0, float(getattr(args, "_validation_producer_stable_reuse_share", 1.0) or 0.0)),
+        )
+        cfg.producer_stable_exit_share = max(
+            0.0,
+            min(1.0, float(getattr(args, "_validation_producer_stable_exit_share", 0.0) or 0.0)),
+        )
         cfg.lender_voucher_purchase_empirical_window = str(
             getattr(args, "_validation_lender_voucher_purchase_empirical_window", "") or ""
         )
@@ -2442,6 +2569,36 @@ def scenario_config(
         cfg.lender_voucher_purchase_stable_budget_usd_per_tick = factor * max(
             0.0,
             float(configured_purchase_budget or 0.0),
+        )
+        cfg.external_nonproducer_stable_to_voucher_budget_usd_per_tick = factor * max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "_frontier_external_nonproducer_stable_to_voucher_budget_usd_per_tick",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        cfg.other_producer_stable_to_voucher_budget_usd_per_tick = factor * max(
+            0.0,
+            float(
+                getattr(
+                    args,
+                    "_frontier_other_producer_stable_to_voucher_budget_usd_per_tick",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        cfg.producer_stable_reuse_share = max(
+            0.0,
+            min(1.0, float(getattr(args, "_frontier_producer_stable_reuse_share", 1.0) or 0.0)),
+        )
+        cfg.producer_stable_exit_share = max(
+            0.0,
+            min(1.0, float(getattr(args, "_frontier_producer_stable_exit_share", 0.0) or 0.0)),
         )
         cfg.lender_voucher_purchase_empirical_window = str(
             getattr(args, "_frontier_lender_voucher_purchase_empirical_window", "") or ""
@@ -3228,13 +3385,20 @@ def run_one(
             "loan_issuance_volume_usd",
             "producer_debt_originated_usd_tick",
             "lender_recovered_stable_usd_tick",
+            "bond_eligible_pool_exposure_recovered_stable_usd_tick",
+            "lender_inventory_turnover_stable_usd_tick",
+            "lender_recovered_stable_borrower_self_usd_tick",
             "lender_recovered_stable_borrower_regular_usd_tick",
             "lender_recovered_stable_borrower_maturity_usd_tick",
             "lender_recovered_stable_consumer_purchase_usd_tick",
+            "lender_recovered_stable_external_nonproducer_purchase_usd_tick",
+            "lender_recovered_stable_other_producer_purchase_usd_tick",
             "lender_recovered_stable_third_party_purchase_usd_tick",
             "lender_recovered_stable_other_usd_tick",
             "stable_onramp_usd_tick",
             "stable_offramp_usd_tick",
+            "producer_stable_exited_usd_tick",
+            "producer_stable_reuse_budget_usd_tick",
             "producer_deposit_stable_usd_tick",
             "producer_deposit_voucher_usd_tick",
             "productive_credit_inflow_usd_tick",
@@ -4472,9 +4636,35 @@ def run_one(
                 "third_party_voucher_purchase_stable_budget_onramp_usd_total",
                 cumulative_float["third_party_voucher_purchase_stable_budget_onramp_usd_tick"],
             ),
+            "producer_stable_exited_usd": latest.get("producer_stable_exited_usd_tick", 0.0),
+            "producer_stable_exited_usd_total": cumulative_float["producer_stable_exited_usd_tick"],
+            "producer_stable_reuse_budget_usd": latest.get(
+                "producer_stable_reuse_budget_usd_tick", 0.0
+            ),
+            "producer_stable_reuse_budget_usd_total": cumulative_float[
+                "producer_stable_reuse_budget_usd_tick"
+            ],
             "lender_recovered_stable_usd": latest.get("lender_recovered_stable_usd_tick", 0.0),
             "lender_recovered_stable_usd_total": cumulative_float[
                 "lender_recovered_stable_usd_tick"
+            ],
+            "bond_eligible_pool_exposure_recovered_stable_usd": latest.get(
+                "bond_eligible_pool_exposure_recovered_stable_usd_tick", 0.0
+            ),
+            "bond_eligible_pool_exposure_recovered_stable_usd_total": cumulative_float[
+                "bond_eligible_pool_exposure_recovered_stable_usd_tick"
+            ],
+            "lender_inventory_turnover_stable_usd": latest.get(
+                "lender_inventory_turnover_stable_usd_tick", 0.0
+            ),
+            "lender_inventory_turnover_stable_usd_total": cumulative_float[
+                "lender_inventory_turnover_stable_usd_tick"
+            ],
+            "lender_recovered_stable_borrower_self_usd": latest.get(
+                "lender_recovered_stable_borrower_self_usd_tick", 0.0
+            ),
+            "lender_recovered_stable_borrower_self_usd_total": cumulative_float[
+                "lender_recovered_stable_borrower_self_usd_tick"
             ],
             "lender_recovered_stable_borrower_regular_usd": latest.get(
                 "lender_recovered_stable_borrower_regular_usd_tick", 0.0
@@ -4493,6 +4683,18 @@ def run_one(
             ),
             "lender_recovered_stable_consumer_purchase_usd_total": cumulative_float[
                 "lender_recovered_stable_consumer_purchase_usd_tick"
+            ],
+            "lender_recovered_stable_external_nonproducer_purchase_usd": latest.get(
+                "lender_recovered_stable_external_nonproducer_purchase_usd_tick", 0.0
+            ),
+            "lender_recovered_stable_external_nonproducer_purchase_usd_total": cumulative_float[
+                "lender_recovered_stable_external_nonproducer_purchase_usd_tick"
+            ],
+            "lender_recovered_stable_other_producer_purchase_usd": latest.get(
+                "lender_recovered_stable_other_producer_purchase_usd_tick", 0.0
+            ),
+            "lender_recovered_stable_other_producer_purchase_usd_total": cumulative_float[
+                "lender_recovered_stable_other_producer_purchase_usd_tick"
             ],
             "lender_recovered_stable_third_party_purchase_usd": latest.get(
                 "lender_recovered_stable_third_party_purchase_usd_tick", 0.0
@@ -6927,8 +7129,23 @@ def summarize_frontier_cell(
         safe_float(row.get("third_party_voucher_purchase_stable_budget_onramp_usd_total"))
         for row in rows
     ]
+    producer_stable_exited_values = [
+        safe_float(row.get("producer_stable_exited_usd_total")) for row in rows
+    ]
+    producer_stable_reuse_budget_values = [
+        safe_float(row.get("producer_stable_reuse_budget_usd_total")) for row in rows
+    ]
     lender_recovered_stable_values = [
         safe_float(row.get("lender_recovered_stable_usd_total")) for row in rows
+    ]
+    bond_eligible_recovered_stable_values = [
+        safe_float(row.get("bond_eligible_pool_exposure_recovered_stable_usd_total")) for row in rows
+    ]
+    lender_inventory_turnover_stable_values = [
+        safe_float(row.get("lender_inventory_turnover_stable_usd_total")) for row in rows
+    ]
+    lender_recovered_stable_borrower_self_values = [
+        safe_float(row.get("lender_recovered_stable_borrower_self_usd_total")) for row in rows
     ]
     lender_recovered_stable_borrower_regular_values = [
         safe_float(row.get("lender_recovered_stable_borrower_regular_usd_total")) for row in rows
@@ -6938,6 +7155,14 @@ def summarize_frontier_cell(
     ]
     lender_recovered_stable_consumer_purchase_values = [
         safe_float(row.get("lender_recovered_stable_consumer_purchase_usd_total")) for row in rows
+    ]
+    lender_recovered_stable_external_nonproducer_purchase_values = [
+        safe_float(row.get("lender_recovered_stable_external_nonproducer_purchase_usd_total"))
+        for row in rows
+    ]
+    lender_recovered_stable_other_producer_purchase_values = [
+        safe_float(row.get("lender_recovered_stable_other_producer_purchase_usd_total"))
+        for row in rows
     ]
     lender_recovered_stable_third_party_purchase_values = [
         safe_float(row.get("lender_recovered_stable_third_party_purchase_usd_total")) for row in rows
@@ -7584,7 +7809,20 @@ def summarize_frontier_cell(
         "third_party_voucher_purchase_stable_budget_onramp_usd_total_p50": percentile(
             third_party_voucher_purchase_budget_onramp_values, 0.50
         ),
+        "producer_stable_exited_usd_total_p50": percentile(producer_stable_exited_values, 0.50),
+        "producer_stable_reuse_budget_usd_total_p50": percentile(
+            producer_stable_reuse_budget_values, 0.50
+        ),
         "lender_recovered_stable_usd_total_p50": percentile(lender_recovered_stable_values, 0.50),
+        "bond_eligible_pool_exposure_recovered_stable_usd_total_p50": percentile(
+            bond_eligible_recovered_stable_values, 0.50
+        ),
+        "lender_inventory_turnover_stable_usd_total_p50": percentile(
+            lender_inventory_turnover_stable_values, 0.50
+        ),
+        "lender_recovered_stable_borrower_self_usd_total_p50": percentile(
+            lender_recovered_stable_borrower_self_values, 0.50
+        ),
         "lender_recovered_stable_borrower_regular_usd_total_p50": percentile(
             lender_recovered_stable_borrower_regular_values, 0.50
         ),
@@ -7593,6 +7831,12 @@ def summarize_frontier_cell(
         ),
         "lender_recovered_stable_consumer_purchase_usd_total_p50": percentile(
             lender_recovered_stable_consumer_purchase_values, 0.50
+        ),
+        "lender_recovered_stable_external_nonproducer_purchase_usd_total_p50": percentile(
+            lender_recovered_stable_external_nonproducer_purchase_values, 0.50
+        ),
+        "lender_recovered_stable_other_producer_purchase_usd_total_p50": percentile(
+            lender_recovered_stable_other_producer_purchase_values, 0.50
         ),
         "lender_recovered_stable_third_party_purchase_usd_total_p50": percentile(
             lender_recovered_stable_third_party_purchase_values, 0.50
@@ -8287,6 +8531,10 @@ def calibration_activity_audit_rows(
         "configured_productive_credit_voucher_deposit_cap_rate_per_month": 0.0,
         "configured_producer_stable_debt_contract_service_margin_rate": 0.0,
         "configured_producer_voucher_debt_contract_service_margin_rate": 0.0,
+        "configured_external_nonproducer_stable_to_voucher_budget_usd_per_tick": 0.0,
+        "configured_other_producer_stable_to_voucher_budget_usd_per_tick": 0.0,
+        "configured_producer_stable_reuse_share": 0.0,
+        "configured_producer_stable_exit_share": 0.0,
         "realized_productive_credit_inflow_usd_p50": 0.0,
         "realized_productive_credit_stable_retained_usd_p50": 0.0,
         "realized_productive_credit_voucher_deposit_usd_p50": 0.0,
@@ -8300,6 +8548,9 @@ def calibration_activity_audit_rows(
         "realized_ordinary_stable_source_swap_volume_usd_p50": 0.0,
         "realized_ordinary_voucher_source_swap_volume_usd_p50": 0.0,
         "realized_ordinary_stable_spend_protected_skip_value_usd_p50": 0.0,
+        "realized_producer_stable_exited_usd_p50": 0.0,
+        "realized_bond_eligible_pool_exposure_recovered_stable_usd_p50": 0.0,
+        "realized_lender_inventory_turnover_stable_usd_p50": 0.0,
     }
 
     audit_rows: list[dict[str, object]] = []
@@ -8424,6 +8675,18 @@ def calibration_activity_audit_rows(
             "configured_producer_voucher_debt_contract_service_margin_rate": safe_float(
                 configured_voucher_margin
             ),
+            "configured_external_nonproducer_stable_to_voucher_budget_usd_per_tick": safe_float(
+                getattr(args, f"_{prefix}_external_nonproducer_stable_to_voucher_budget_usd_per_tick", 0.0)
+            ),
+            "configured_other_producer_stable_to_voucher_budget_usd_per_tick": safe_float(
+                getattr(args, f"_{prefix}_other_producer_stable_to_voucher_budget_usd_per_tick", 0.0)
+            ),
+            "configured_producer_stable_reuse_share": safe_float(
+                getattr(args, f"_{prefix}_producer_stable_reuse_share", 0.0)
+            ),
+            "configured_producer_stable_exit_share": safe_float(
+                getattr(args, f"_{prefix}_producer_stable_exit_share", 0.0)
+            ),
             "realized_productive_credit_inflow_usd_p50": percentile(productive_inflow_values, 0.50),
             "realized_productive_credit_stable_retained_usd_p50": percentile(
                 productive_stable_values, 0.50
@@ -8462,6 +8725,21 @@ def calibration_activity_audit_rows(
                     safe_float(row.get("ordinary_stable_spend_protected_skip_value_usd_total"))
                     for row in rows
                 ],
+                0.50,
+            ),
+            "realized_producer_stable_exited_usd_p50": percentile(
+                [safe_float(row.get("producer_stable_exited_usd_total")) for row in rows],
+                0.50,
+            ),
+            "realized_bond_eligible_pool_exposure_recovered_stable_usd_p50": percentile(
+                [
+                    safe_float(row.get("bond_eligible_pool_exposure_recovered_stable_usd_total"))
+                    for row in rows
+                ],
+                0.50,
+            ),
+            "realized_lender_inventory_turnover_stable_usd_p50": percentile(
+                [safe_float(row.get("lender_inventory_turnover_stable_usd_total")) for row in rows],
                 0.50,
             ),
         }
