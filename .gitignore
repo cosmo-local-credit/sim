@@ -214,6 +214,9 @@ analysis/sarafu_calibrated*/
 # can be large. Commit selected paper artifacts intentionally with -f if needed.
 analysis/monte_carlo/*
 !analysis/monte_carlo/.gitkeep
+!analysis/monte_carlo/engine_validation/
+!analysis/monte_carlo/engine_validation/README.md
+!analysis/monte_carlo/engine_validation/engine_validation_summary.csv
 sim/__pycache__/__init__.cpython-312.pyc
 sim/__pycache__/__init__.cpython-312.pyc
 sim/__pycache__/config.cpython-312.pyc

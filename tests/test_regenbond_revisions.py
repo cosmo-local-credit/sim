@@ -10,6 +10,7 @@ from scripts.run_regenbond_monte_carlo import (
     configure_sarafu_activity_controls,
     engine_validation_moments,
     frontier_baseline_metrics,
+    frontier_validation_gate_status,
     issuer_headroom_frontier_rows,
     load_calibration,
     scenario_config,
@@ -769,6 +770,21 @@ class RegenBondRevisionTests(unittest.TestCase):
             ]["validation_status"],
             "pass",
         )
+
+    def test_frontier_validation_gate_uses_sim_local_summary_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "frontier_output"
+            self.assertEqual(frontier_validation_gate_status(output_dir), "pass")
+
+            sibling_validation = output_dir.parent / "engine_validation"
+            sibling_validation.mkdir()
+            with (sibling_validation / "engine_validation_summary.csv").open("w", encoding="utf-8") as handle:
+                handle.write(
+                    "scenario,runs,ticks,status,binding_pass_count,binding_review_count,binding_fail_count,reported_diagnostic_count\n"
+                )
+                handle.write("sarafu_engine_validation,1,1,fail,0,0,1,0\n")
+
+            self.assertEqual(frontier_validation_gate_status(output_dir), "fail")
 
     def test_redeem_outputs_mode_redeems_final_lender_voucher_output(self):
         engine = SimulationEngine(

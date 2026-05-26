@@ -1,0 +1,2 @@
+scenario,runs,ticks,status,binding_pass_count,binding_review_count,binding_fail_count,reported_diagnostic_count
+sarafu_engine_validation,100,260,pass,32,0,0,26

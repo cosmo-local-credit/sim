@@ -9477,14 +9477,26 @@ def frontier_cell_key(scale: str, ratio: float, coupon: float, share: float) -> 
     return (scale, round(float(ratio), 8), round(float(coupon), 8), round(float(share), 8))
 
 
+def frontier_validation_gate_summary_paths(output_dir: Path) -> list[Path]:
+    repo_root = Path(__file__).resolve().parents[1]
+    output_root_summary = output_dir.parent / "engine_validation" / "engine_validation_summary.csv"
+    sim_repo_summary = repo_root / "analysis" / "monte_carlo" / "engine_validation" / "engine_validation_summary.csv"
+    paths: list[Path] = []
+    for path in (output_root_summary, sim_repo_summary):
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
 def frontier_validation_gate_status(output_dir: Path) -> str:
-    summary_path = output_dir.parent / "engine_validation" / "engine_validation_summary.csv"
-    if not summary_path.exists():
-        return "missing"
-    rows = read_csv(summary_path)
-    if not rows:
-        return "missing"
-    return str(rows[0].get("status", "")).strip().lower() or "missing"
+    for summary_path in frontier_validation_gate_summary_paths(output_dir):
+        if not summary_path.exists():
+            continue
+        rows = read_csv(summary_path)
+        if not rows:
+            continue
+        return str(rows[0].get("status", "")).strip().lower() or "missing"
+    return "missing"
 
 
 def frontier_token(value: object) -> str:
