@@ -530,6 +530,242 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(engine._voucher_reintroduced_by_deposit_usd_total, 8.0)
         self.assertAlmostEqual(engine._voucher_new_issuance_deposit_usd_total, 2.0)
 
+    def test_producer_stable_exit_credits_debt_service_capacity_only_with_active_debt(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                producer_debt_pressure_enabled=True,
+                producer_stable_exit_share=1.0,
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+            ),
+            seed=43,
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        lender_pool.values.set_value(voucher_id, 1.0)
+        engine._vault_add(producer_pool, stable_id, 20.0, "test_seed", "test")
+
+        exited = engine._apply_producer_stable_exit(producer_pool, 10.0, "no_debt")
+
+        self.assertAlmostEqual(exited, 10.0)
+        self.assertAlmostEqual(engine._producer_stable_exited_usd_total, 10.0)
+        self.assertAlmostEqual(engine._producer_debt_service_capacity_balance_usd(), 0.0)
+
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            10.0,
+            10.0,
+        )
+        engine._vault_add(producer_pool, stable_id, 10.0, "test_seed", "test")
+
+        exited = engine._apply_producer_stable_exit(producer_pool, 10.0, "with_debt")
+
+        self.assertAlmostEqual(exited, 10.0)
+        self.assertAlmostEqual(engine._producer_stable_exited_usd_total, 20.0)
+        self.assertAlmostEqual(engine._producer_debt_service_capacity_balance_usd(), 10.0)
+        self.assertAlmostEqual(engine._producer_debt_service_capacity_credited_usd_total, 10.0)
+
+    def test_debt_pressure_repayment_draws_capacity_for_own_voucher_swap(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                producer_debt_pressure_enabled=True,
+                producer_debt_pressure_period_ticks=1,
+                producer_debt_pressure_prepay_share=0.0,
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+                producer_debt_contract_service_margin_rate=0.0,
+                producer_debt_maturity_ticks=1,
+                producer_debt_penalty_enabled=False,
+                pool_fee_rate=0.02,
+                clc_rake_rate=1.0,
+            ),
+            seed=47,
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        for pool in (producer_pool, lender_pool):
+            pool.values.set_value(stable_id, 1.0)
+            pool.values.set_value(voucher_id, 1.0)
+        lender_pool.list_asset_with_value_and_limit(stable_id, value=1.0, window_len=10, cap_in=500.0)
+        lender_pool.list_asset_with_value_and_limit(voucher_id, value=1.0, window_len=10, cap_in=500.0)
+        for pool, asset_id in (
+            (producer_pool, stable_id),
+            (producer_pool, voucher_id),
+            (lender_pool, voucher_id),
+        ):
+            current = pool.vault.get(asset_id)
+            if current > 0.0:
+                engine._vault_sub(pool, asset_id, current, "test_clear", "test")
+        engine._vault_add(lender_pool, voucher_id, 100.0, "test_seed", "test")
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+        )
+        obligation = engine._producer_debt_obligations[0]
+        engine._producer_debt_service_capacity_by_pool[producer_pool.pool_id] = 25.0
+        engine.tick = 1
+
+        attempted = engine._attempt_repayment(producer_pool)
+
+        self.assertTrue(attempted)
+        self.assertGreater(engine._producer_self_repayment_swap_volume_usd_total, 0.0)
+        self.assertAlmostEqual(
+            engine._producer_debt_service_capacity_onramp_usd_total,
+            engine._producer_self_repayment_swap_volume_usd_total,
+        )
+        self.assertAlmostEqual(producer_pool.vault.get(voucher_id), 0.0)
+        self.assertLess(lender_pool.vault.get(voucher_id), 100.0)
+        self.assertLess(obligation.cash_service_remaining_usd, 100.0)
+        self.assertLess(obligation.remaining_voucher_units, 100.0)
+        self.assertAlmostEqual(engine._lender_recovered_stable_borrower_self_usd_total, 25.0)
+        self.assertGreater(engine._voucher_fee_retained_for_service_usd_total, 0.0)
+
+    def test_debt_pressure_penalty_accrues_and_is_paid_before_prepay(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                producer_debt_pressure_enabled=True,
+                producer_debt_pressure_period_ticks=1,
+                producer_debt_pressure_prepay_share=0.0,
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+                producer_debt_contract_service_margin_rate=0.0,
+                producer_debt_maturity_ticks=1,
+                producer_debt_penalty_enabled=True,
+                producer_debt_penalty_rate_per_period=0.10,
+                pool_fee_rate=0.0,
+                clc_rake_rate=0.0,
+            ),
+            seed=53,
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        for pool in (producer_pool, lender_pool):
+            pool.values.set_value(stable_id, 1.0)
+            pool.values.set_value(voucher_id, 1.0)
+        lender_pool.list_asset_with_value_and_limit(stable_id, value=1.0, window_len=10, cap_in=500.0)
+        lender_pool.list_asset_with_value_and_limit(voucher_id, value=1.0, window_len=10, cap_in=500.0)
+        current = lender_pool.vault.get(voucher_id)
+        if current > 0.0:
+            engine._vault_sub(lender_pool, voucher_id, current, "test_clear", "test")
+        engine._vault_add(lender_pool, voucher_id, 100.0, "test_seed", "test")
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+        )
+        obligation = engine._producer_debt_obligations[0]
+        engine.tick = 1
+
+        attempted = engine._attempt_repayment(producer_pool)
+
+        self.assertTrue(attempted)
+        self.assertAlmostEqual(engine._producer_debt_penalty_accrued_usd_total, 10.0)
+        self.assertAlmostEqual(obligation.cash_service_arrears_usd, 110.0)
+        self.assertAlmostEqual(obligation.cash_service_penalty_remaining_usd, 10.0)
+
+        engine._producer_debt_service_capacity_by_pool[producer_pool.pool_id] = 50.0
+        engine.tick = 2
+        attempted = engine._attempt_repayment(producer_pool)
+
+        self.assertTrue(attempted)
+        self.assertAlmostEqual(engine._producer_debt_penalty_paid_usd_total, 10.0)
+        self.assertGreater(obligation.cash_service_arrears_usd, 0.0)
+        self.assertAlmostEqual(engine._producer_debt_pressure_prepayment_usd_total, 0.0)
+
+    def test_ordinary_own_voucher_for_other_voucher_creates_producer_debt(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=2,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=3,
+                producer_debt_maturity_enabled=True,
+                producer_debt_pressure_enabled=True,
+                pool_fee_rate=0.0,
+                clc_rake_rate=0.0,
+            ),
+            seed=61,
+        )
+        producers = [agent for agent in engine.agents.values() if agent.role == "producer"]
+        borrower = producers[0]
+        target_issuer = producers[1]
+        borrower_pool = engine.pools[borrower.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        borrower_voucher = borrower.voucher_spec.voucher_id
+        target_voucher = target_issuer.voucher_spec.voucher_id
+        for pool in (borrower_pool, lender_pool):
+            pool.values.set_value(borrower_voucher, 1.0)
+            pool.values.set_value(target_voucher, 1.0)
+        lender_pool.list_asset_with_value_and_limit(
+            borrower_voucher, value=1.0, window_len=10, cap_in=500.0
+        )
+        lender_pool.list_asset_with_value_and_limit(
+            target_voucher, value=1.0, window_len=10, cap_in=500.0
+        )
+        for pool, asset_id in (
+            (borrower_pool, borrower_voucher),
+            (lender_pool, target_voucher),
+        ):
+            current = pool.vault.get(asset_id)
+            if current > 0.0:
+                engine._vault_sub(pool, asset_id, current, "test_clear", "test")
+        engine._vault_add(borrower_pool, borrower_voucher, 20.0, "test_seed", "test")
+        engine._vault_add(lender_pool, target_voucher, 20.0, "test_seed", "test")
+        plan = RoutePlan(
+            ok=True,
+            reason="test",
+            hops=[Hop(lender_pool.pool_id, borrower_voucher, target_voucher, 10.0)],
+        )
+
+        ok = engine.execute_route_from_pool(
+            borrower_pool.pool_id,
+            plan,
+            10.0,
+            route_context="ordinary",
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(len(engine._producer_debt_obligations), 1)
+        obligation = engine._producer_debt_obligations[0]
+        self.assertEqual(obligation.producer_pool_id, borrower_pool.pool_id)
+        self.assertEqual(obligation.lender_pool_id, lender_pool.pool_id)
+        self.assertEqual(obligation.voucher_id, borrower_voucher)
+        self.assertEqual(obligation.debt_kind, "voucher")
+        self.assertAlmostEqual(obligation.borrowed_usd, 10.0)
+        self.assertAlmostEqual(obligation.remaining_voucher_units, 10.0)
+
     def test_execute_route_rejects_private_wallet_hop_and_refunds_source(self):
         engine = SimulationEngine(
             small_config(
@@ -1339,6 +1575,11 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.producer_stable_debt_contract_service_margin_rate, 0.0)
         self.assertAlmostEqual(cfg.producer_voucher_debt_contract_service_margin_rate, 0.0)
         self.assertAlmostEqual(cfg.producer_debt_contract_revenue_rate, 1.0)
+        self.assertTrue(cfg.producer_debt_pressure_enabled)
+        self.assertEqual(cfg.producer_debt_pressure_period_ticks, 4)
+        self.assertAlmostEqual(cfg.producer_debt_pressure_capacity_share, 1.0)
+        self.assertAlmostEqual(cfg.producer_debt_pressure_prepay_share, 0.25)
+        self.assertTrue(cfg.producer_debt_penalty_enabled)
         self.assertFalse(cfg.offramps_enabled)
         self.assertIsNone(cfg.historical_stable_backing_tick)
         self.assertAlmostEqual(cfg.historical_stable_backing_total_usd, 0.0)
@@ -1390,6 +1631,11 @@ class RegenBondRevisionTests(unittest.TestCase):
             "voucher_fee_conversion_max_swaps_per_epoch",
             "voucher_fee_conversion_max_usd_per_epoch",
             "voucher_settlement_mode",
+            "producer_debt_pressure_enabled",
+            "producer_debt_pressure_period_ticks",
+            "producer_debt_pressure_capacity_share",
+            "producer_debt_pressure_prepay_share",
+            "producer_debt_penalty_enabled",
         ):
             self.assertEqual(getattr(cfg_baseline, attr), getattr(cfg, attr))
 
@@ -1446,6 +1692,12 @@ class RegenBondRevisionTests(unittest.TestCase):
             "voucher_fee_conversion_max_swaps_per_epoch",
             "voucher_fee_conversion_max_usd_per_epoch",
             "voucher_settlement_mode",
+            "disable_producer_debt_pressure",
+            "producer_debt_pressure_period_ticks",
+            "producer_debt_pressure_capacity_share",
+            "producer_debt_pressure_prepay_share",
+            "disable_producer_debt_penalty",
+            "producer_debt_penalty_rate_per_period",
         ):
             self.assertIn(key, SHARD_CONFIG_KEYS)
 
@@ -1491,6 +1743,11 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.swap_sustain_attempts_per_missing_swap, 1.5)
         self.assertEqual(cfg.voucher_fee_conversion_max_swaps_per_epoch, 7)
         self.assertAlmostEqual(cfg.voucher_fee_conversion_max_usd_per_epoch, 250.0)
+        self.assertTrue(cfg.producer_debt_pressure_enabled)
+        self.assertEqual(cfg.producer_debt_pressure_period_ticks, 4)
+        self.assertAlmostEqual(cfg.producer_debt_pressure_capacity_share, 1.0)
+        self.assertAlmostEqual(cfg.producer_debt_pressure_prepay_share, 0.25)
+        self.assertTrue(cfg.producer_debt_penalty_enabled)
 
     def test_sarafu_activity_controls_load_settlement_motif_targets(self):
         calibration = load_calibration(Path("analysis/sarafu_calibration"))

@@ -66,6 +66,9 @@ class ProducerDebtObligation:
     debt_kind: str = "stable"
     cash_service_due_usd: float = 0.0
     cash_service_remaining_usd: float = 0.0
+    cash_service_arrears_usd: float = 0.0
+    cash_service_penalty_remaining_usd: float = 0.0
+    last_pressure_due_tick: int = -1
 
 class SimulationEngine:
     def __init__(self, cfg: ScenarioConfig, seed: int = 1) -> None:
@@ -241,6 +244,21 @@ class SimulationEngine:
         self._producer_debt_closed_by_voucher_swap_usd_total: float = 0.0
         self._producer_debt_closed_not_held_at_maturity_usd_tick: float = 0.0
         self._producer_debt_closed_not_held_at_maturity_usd_total: float = 0.0
+        self._producer_debt_service_capacity_by_pool: Dict[str, float] = {}
+        self._producer_debt_service_capacity_credited_usd_tick: float = 0.0
+        self._producer_debt_service_capacity_credited_usd_total: float = 0.0
+        self._producer_debt_service_capacity_onramp_usd_tick: float = 0.0
+        self._producer_debt_service_capacity_onramp_usd_total: float = 0.0
+        self._producer_self_repayment_swap_volume_usd_tick: float = 0.0
+        self._producer_self_repayment_swap_volume_usd_total: float = 0.0
+        self._producer_self_repayment_voucher_removed_usd_tick: float = 0.0
+        self._producer_self_repayment_voucher_removed_usd_total: float = 0.0
+        self._producer_debt_pressure_prepayment_usd_tick: float = 0.0
+        self._producer_debt_pressure_prepayment_usd_total: float = 0.0
+        self._producer_debt_penalty_accrued_usd_tick: float = 0.0
+        self._producer_debt_penalty_accrued_usd_total: float = 0.0
+        self._producer_debt_penalty_paid_usd_tick: float = 0.0
+        self._producer_debt_penalty_paid_usd_total: float = 0.0
         self._producer_loan_attempts_tick: int = 0
         self._producer_loan_no_lender_tick: int = 0
         self._producer_loan_no_inventory_tick: int = 0
@@ -4222,6 +4240,78 @@ class SimulationEngine:
             return "other_producer_stable_purchase"
         return "inventory_turnover_stable_purchase"
 
+    def _producer_debt_pressure_enabled(self) -> bool:
+        return bool(getattr(self.cfg, "producer_debt_pressure_enabled", False))
+
+    def _producer_debt_pressure_period_ticks(self) -> int:
+        configured = int(getattr(self.cfg, "producer_debt_pressure_period_ticks", 0) or 0)
+        if configured <= 0:
+            configured = int(getattr(self.cfg, "loan_activity_period_ticks", MONTH_TICKS) or MONTH_TICKS)
+        return max(1, configured)
+
+    def _producer_debt_arrears_usd(self) -> float:
+        return sum(
+            max(0.0, float(getattr(obligation, "cash_service_arrears_usd", 0.0) or 0.0))
+            for obligation in self._producer_debt_obligations
+        )
+
+    def _producer_debt_service_capacity_balance_usd(self) -> float:
+        return sum(max(0.0, amount) for amount in self._producer_debt_service_capacity_by_pool.values())
+
+    def _producer_has_active_own_voucher_debt(self, producer_pool: "Pool") -> bool:
+        agent = self.agents.get(producer_pool.steward_id)
+        if agent is None:
+            return False
+        voucher_id = agent.voucher_spec.voucher_id
+        for obligation in self._producer_debt_obligations:
+            if obligation.producer_pool_id != producer_pool.pool_id:
+                continue
+            if obligation.voucher_id != voucher_id:
+                continue
+            if obligation.remaining_voucher_units > 1e-9:
+                return True
+            if (
+                self._producer_debt_contract_repayment_enabled()
+                and max(0.0, obligation.cash_service_remaining_usd) > 1e-9
+            ):
+                return True
+        return False
+
+    def _credit_producer_debt_service_capacity(
+        self,
+        producer_pool: "Pool",
+        amount_usd: float,
+        reason: str,
+    ) -> float:
+        if not self._producer_debt_pressure_enabled():
+            return 0.0
+        if producer_pool.policy.role != "producer" or amount_usd <= 1e-9:
+            return 0.0
+        if not self._producer_has_active_own_voucher_debt(producer_pool):
+            return 0.0
+        share = max(
+            0.0,
+            min(1.0, float(getattr(self.cfg, "producer_debt_pressure_capacity_share", 1.0) or 0.0)),
+        )
+        credited = float(amount_usd) * share
+        if credited <= 1e-9:
+            return 0.0
+        self._producer_debt_service_capacity_by_pool[producer_pool.pool_id] = (
+            self._producer_debt_service_capacity_by_pool.get(producer_pool.pool_id, 0.0)
+            + credited
+        )
+        self._producer_debt_service_capacity_credited_usd_tick += credited
+        self._producer_debt_service_capacity_credited_usd_total += credited
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_DEBT_SERVICE_CAPACITY_CREDITED",
+            pool_id=producer_pool.pool_id,
+            asset_id=self.cfg.stable_symbol,
+            amount=credited,
+            meta={"reason": reason, "capacity_share": share},
+        ))
+        return credited
+
     def _apply_producer_stable_exit(
         self,
         producer_pool: "Pool",
@@ -4250,6 +4340,7 @@ class SimulationEngine:
         self._producer_stable_exited_usd_tick += exited_usd
         self._producer_stable_exited_usd_total += exited_usd
         self._stable_offramp_usd_tick += exited_usd
+        self._credit_producer_debt_service_capacity(producer_pool, exited_usd, reason)
         self.log.add(Event(
             self.tick,
             "PRODUCER_STABLE_EXITED",
@@ -7079,6 +7170,13 @@ class SimulationEngine:
             self._producer_debt_closed_by_circulation_usd_tick = 0.0
             self._producer_debt_closed_by_voucher_swap_usd_tick = 0.0
             self._producer_debt_closed_not_held_at_maturity_usd_tick = 0.0
+            self._producer_debt_service_capacity_credited_usd_tick = 0.0
+            self._producer_debt_service_capacity_onramp_usd_tick = 0.0
+            self._producer_self_repayment_swap_volume_usd_tick = 0.0
+            self._producer_self_repayment_voucher_removed_usd_tick = 0.0
+            self._producer_debt_pressure_prepayment_usd_tick = 0.0
+            self._producer_debt_penalty_accrued_usd_tick = 0.0
+            self._producer_debt_penalty_paid_usd_tick = 0.0
             self._producer_loan_attempts_tick = 0
             self._producer_loan_no_lender_tick = 0
             self._producer_loan_no_inventory_tick = 0
@@ -8152,6 +8250,386 @@ class SimulationEngine:
             buyer_kind = "consumer" if self.rng.random() < consumer_share else "third_party"
             self._attempt_lender_voucher_purchase(buyer_kind)
 
+    def _producer_debt_pressure_capacity_available_usd(self, producer_pool: "Pool") -> float:
+        return max(
+            0.0,
+            float(self._producer_debt_service_capacity_by_pool.get(producer_pool.pool_id, 0.0)),
+        )
+
+    def _producer_debt_pressure_stable_available_usd(self, producer_pool: "Pool") -> float:
+        stable_id = self.cfg.stable_symbol
+        stable_value = self._asset_value(producer_pool, stable_id)
+        if stable_value <= 0.0:
+            stable_value = 1.0
+        local_usd = self._producer_debt_stable_available(producer_pool) * stable_value
+        return max(0.0, local_usd) + self._producer_debt_pressure_capacity_available_usd(producer_pool)
+
+    def _consume_producer_debt_pressure_stable(
+        self,
+        producer_pool: "Pool",
+        amount_usd: float,
+        counterparty: str,
+    ) -> float:
+        amount = max(0.0, float(amount_usd))
+        if amount <= 1e-9:
+            return 0.0
+        stable_id = self.cfg.stable_symbol
+        stable_value = self._asset_value(producer_pool, stable_id)
+        if stable_value <= 0.0:
+            stable_value = 1.0
+        local_available_usd = self._producer_debt_stable_available(producer_pool) * stable_value
+        local_usd = min(amount, max(0.0, local_available_usd))
+        consumed = 0.0
+        if local_usd > 1e-9:
+            local_units = local_usd / stable_value
+            if self._vault_sub(
+                producer_pool,
+                stable_id,
+                local_units,
+                "producer_debt_pressure_repayment_out",
+                counterparty,
+            ):
+                consumed += local_usd
+            else:
+                local_usd = 0.0
+        capacity_needed = max(0.0, amount - consumed)
+        capacity_available = self._producer_debt_pressure_capacity_available_usd(producer_pool)
+        capacity_usd = min(capacity_needed, capacity_available)
+        if capacity_usd > 1e-9:
+            self._producer_debt_service_capacity_by_pool[producer_pool.pool_id] = max(
+                0.0,
+                capacity_available - capacity_usd,
+            )
+            self._producer_debt_service_capacity_onramp_usd_tick += capacity_usd
+            self._producer_debt_service_capacity_onramp_usd_total += capacity_usd
+            self._stable_onramp_usd_tick += capacity_usd
+            consumed += capacity_usd
+            self.log.add(Event(
+                self.tick,
+                "PRODUCER_DEBT_SERVICE_CAPACITY_ONRAMPED",
+                pool_id=producer_pool.pool_id,
+                asset_id=stable_id,
+                amount=capacity_usd,
+                meta={"counterparty": counterparty},
+            ))
+        return consumed
+
+    def _producer_debt_penalty_rate_per_period(self) -> float:
+        configured = getattr(self.cfg, "producer_debt_penalty_rate_per_period", None)
+        if configured is None:
+            configured = getattr(self.cfg, "pool_fee_rate", 0.0)
+        return max(0.0, float(configured or 0.0))
+
+    def _apply_producer_debt_pressure_penalty(
+        self,
+        obligation: ProducerDebtObligation,
+        missed_usd: float,
+    ) -> float:
+        missed = max(0.0, float(missed_usd))
+        if missed <= 1e-9 or not bool(getattr(self.cfg, "producer_debt_penalty_enabled", True)):
+            return 0.0
+        rate = self._producer_debt_penalty_rate_per_period()
+        penalty = missed * rate
+        if penalty <= 1e-9:
+            return 0.0
+        obligation.cash_service_remaining_usd += penalty
+        obligation.cash_service_arrears_usd += penalty
+        obligation.cash_service_penalty_remaining_usd += penalty
+        self._producer_debt_penalty_accrued_usd_tick += penalty
+        self._producer_debt_penalty_accrued_usd_total += penalty
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_DEBT_PENALTY_ACCRUED",
+            pool_id=obligation.lender_pool_id,
+            asset_id=self.cfg.stable_symbol,
+            amount=penalty,
+            meta={
+                "obligation_id": obligation.obligation_id,
+                "producer_pool_id": obligation.producer_pool_id,
+                "missed_usd": missed,
+                "rate": rate,
+            },
+        ))
+        return penalty
+
+    def _producer_debt_pressure_due_usd(
+        self,
+        obligation: ProducerDebtObligation,
+        period: int,
+    ) -> float:
+        if self._producer_debt_contract_repayment_enabled():
+            remaining_cash = max(0.0, float(obligation.cash_service_remaining_usd))
+            arrears = min(
+                remaining_cash,
+                max(0.0, float(getattr(obligation, "cash_service_arrears_usd", 0.0) or 0.0)),
+            )
+            non_arrears = max(0.0, remaining_cash - arrears)
+            remaining_ticks = max(1, obligation.due_tick - self.tick + 1)
+            remaining_periods = max(1, int(math.ceil(remaining_ticks / max(1, period))))
+            return min(remaining_cash, arrears + (non_arrears / remaining_periods))
+        unit_value = self._producer_debt_unit_value(obligation)
+        remaining_usd = max(0.0, obligation.remaining_voucher_units * unit_value)
+        remaining_ticks = max(1, obligation.due_tick - self.tick + 1)
+        remaining_periods = max(1, int(math.ceil(remaining_ticks / max(1, period))))
+        arrears = min(
+            remaining_usd,
+            max(0.0, float(getattr(obligation, "cash_service_arrears_usd", 0.0) or 0.0)),
+        )
+        return min(remaining_usd, arrears + (max(0.0, remaining_usd - arrears) / remaining_periods))
+
+    def _record_producer_debt_pressure_payment_allocation(
+        self,
+        obligation: ProducerDebtObligation,
+        paid_usd: float,
+        due_usd: float,
+    ) -> None:
+        paid = max(0.0, float(paid_usd))
+        due = max(0.0, float(due_usd))
+        penalty_paid = min(
+            max(0.0, float(getattr(obligation, "cash_service_penalty_remaining_usd", 0.0) or 0.0)),
+            paid,
+        )
+        if penalty_paid > 1e-9:
+            obligation.cash_service_penalty_remaining_usd = max(
+                0.0,
+                obligation.cash_service_penalty_remaining_usd - penalty_paid,
+            )
+            self._producer_debt_penalty_paid_usd_tick += penalty_paid
+            self._producer_debt_penalty_paid_usd_total += penalty_paid
+        missed = max(0.0, due - min(paid, due))
+        obligation.cash_service_arrears_usd = missed
+        self._apply_producer_debt_pressure_penalty(obligation, missed)
+
+    def _execute_producer_self_repayment_swap(
+        self,
+        producer_pool: "Pool",
+        obligation: ProducerDebtObligation,
+        target_usd: float,
+        purpose: str,
+    ) -> float:
+        lender_pool = self.pools.get(obligation.lender_pool_id)
+        if lender_pool is None or lender_pool.policy.role != "lender":
+            return 0.0
+        stable_id = self.cfg.stable_symbol
+        voucher_id = obligation.voucher_id
+        stable_value = self._asset_value(lender_pool, stable_id)
+        voucher_value = self._asset_value(lender_pool, voucher_id)
+        if stable_value <= 0.0:
+            stable_value = 1.0
+        if voucher_value <= 0.0:
+            voucher_value = self._producer_debt_unit_value(obligation)
+        if voucher_value <= 0.0:
+            return 0.0
+        available_usd = self._producer_debt_pressure_stable_available_usd(producer_pool)
+        if available_usd <= 1e-9:
+            return 0.0
+        max_by_inventory_usd = lender_pool.vault.get(voucher_id) * voucher_value
+        exposure_key = (lender_pool.pool_id, voucher_id)
+        max_by_exposure_usd = max(
+            0.0,
+            self._lender_producer_voucher_exposure_usd_by_pool_voucher.get(exposure_key, 0.0),
+        )
+        max_swappable_usd = max_by_inventory_usd
+        if max_by_exposure_usd > 1e-9:
+            max_swappable_usd = min(max_swappable_usd, max_by_exposure_usd)
+        spend_usd = min(max(0.0, float(target_usd)), available_usd, max_swappable_usd)
+        if spend_usd <= 1e-9:
+            return 0.0
+        amount_in = spend_usd / stable_value
+        receipt = lender_pool.execute_swap(
+            self.tick,
+            actor=f"producer_debt_pressure:{producer_pool.pool_id}",
+            asset_in=stable_id,
+            amount_in=amount_in,
+            asset_out=voucher_id,
+        )
+        if receipt.status != "executed":
+            self._noam_update_edge_after_swap(
+                lender_pool,
+                receipt.asset_in,
+                receipt.asset_out,
+                float(receipt.amount_in),
+                success=False,
+                fail_reason=receipt.fail_reason,
+            )
+            self.log.add(Event(
+                self.tick,
+                "PRODUCER_SELF_REPAYMENT_SWAP_FAILED",
+                pool_id=lender_pool.pool_id,
+                asset_id=stable_id,
+                amount=spend_usd,
+                meta={
+                    "obligation_id": obligation.obligation_id,
+                    "producer_pool_id": producer_pool.pool_id,
+                    "reason": receipt.fail_reason,
+                    "purpose": purpose,
+                },
+            ))
+            return 0.0
+        consumed_usd = self._consume_producer_debt_pressure_stable(
+            producer_pool,
+            spend_usd,
+            lender_pool.pool_id,
+        )
+        if consumed_usd + 1e-6 < spend_usd:
+            spend_usd = consumed_usd
+        gross_voucher_units = float(receipt.amount_out) + float(receipt.fees.total_fee)
+        voucher_removed_usd = gross_voucher_units * voucher_value
+        net_voucher_removed_usd = float(receipt.amount_out) * voucher_value
+        self.log.add(Event(
+            self.tick,
+            "SWAP_EXECUTED",
+            pool_id=lender_pool.pool_id,
+            meta={
+                "receipt": receipt.to_dict(),
+                "route_context": "repayment",
+                "route_source_pool_id": producer_pool.pool_id,
+                "route_source_role": producer_pool.policy.role,
+                "route_source_asset": stable_id,
+                "producer_self_repayment": True,
+            },
+        ))
+        self._update_pool_caches(lender_pool, receipt.asset_in, float(receipt.amount_in))
+        self._update_pool_caches(lender_pool, receipt.asset_out, -float(gross_voucher_units))
+        self._record_fee_cumulative(receipt)
+        self._record_voucher_fee_retained_for_service(lender_pool, receipt)
+        self._record_recent_clc_fee(lender_pool, receipt)
+        self._record_clc_swap_cumulative(receipt)
+        self._noam_update_edge_after_swap(
+            lender_pool,
+            receipt.asset_in,
+            receipt.asset_out,
+            float(receipt.amount_in),
+            success=True,
+        )
+        self._noam_routing_swaps_tick += 1
+        self._swap_volume_usd_tick += spend_usd
+        self._swap_volume_usd_by_pool[lender_pool.pool_id] = (
+            self._swap_volume_usd_by_pool.get(lender_pool.pool_id, 0.0) + spend_usd
+        )
+        self._record_noam_fee_diagnostics(
+            lender_pool,
+            receipt,
+            kind="routing",
+            swap_usd=spend_usd,
+        )
+        self._record_route_context_swap("repayment", producer_pool, stable_id, spend_usd)
+        self._update_affinity(producer_pool.pool_id, lender_pool.pool_id, spend_usd)
+        eligible_recovery_usd = self._reduce_lender_producer_voucher_exposure(
+            lender_pool.pool_id,
+            voucher_id,
+            voucher_removed_usd,
+            "borrower_stable_repayment",
+        )
+        self._record_lender_recovered_stable(
+            lender_pool.pool_id,
+            spend_usd,
+            "borrower_stable_repayment",
+            eligible_amount_usd=min(spend_usd, eligible_recovery_usd),
+        )
+        self._reduce_producer_debt_obligations(
+            lender_pool.pool_id,
+            voucher_id,
+            gross_voucher_units,
+            "borrower_stable_repayment",
+            source_pool_id=producer_pool.pool_id,
+            source_role=producer_pool.policy.role,
+        )
+        agent = self.agents.get(producer_pool.steward_id)
+        if agent is not None and float(receipt.amount_out) > 1e-9:
+            agent.issuer.return_to_issuer(float(receipt.amount_out))
+            self._mark_lender_voucher_limits_dirty(voucher_id)
+        self._producer_self_repayment_swap_volume_usd_tick += spend_usd
+        self._producer_self_repayment_swap_volume_usd_total += spend_usd
+        self._producer_self_repayment_voucher_removed_usd_tick += net_voucher_removed_usd
+        self._producer_self_repayment_voucher_removed_usd_total += net_voucher_removed_usd
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_SELF_REPAYMENT_SWAP_EXECUTED",
+            pool_id=lender_pool.pool_id,
+            asset_id=stable_id,
+            amount=spend_usd,
+            meta={
+                "obligation_id": obligation.obligation_id,
+                "producer_pool_id": producer_pool.pool_id,
+                "voucher_id": voucher_id,
+                "voucher_removed_usd": net_voucher_removed_usd,
+                "gross_voucher_removed_usd": voucher_removed_usd,
+                "purpose": purpose,
+            },
+        ))
+        return spend_usd
+
+    def _attempt_debt_pressure_repayment(
+        self,
+        source_pool: "Pool",
+        voucher_id: str,
+        period: int,
+    ) -> bool:
+        if not self._producer_debt_pressure_enabled():
+            return False
+        obligations = [
+            obligation
+            for obligation in sorted(self._producer_debt_obligations, key=self._producer_debt_obligation_sort_key)
+            if obligation.producer_pool_id == source_pool.pool_id
+            and obligation.voucher_id == voucher_id
+            and (
+                obligation.remaining_voucher_units > 1e-9
+                or max(0.0, obligation.cash_service_remaining_usd) > 1e-9
+            )
+        ]
+        if not obligations:
+            return False
+        attempted = False
+        paid_any = False
+        for obligation in obligations:
+            if obligation.last_pressure_due_tick == self.tick:
+                continue
+            due_usd = self._producer_debt_pressure_due_usd(obligation, period)
+            obligation.last_pressure_due_tick = self.tick
+            if due_usd <= 1e-9:
+                continue
+            attempted = True
+            paid = self._execute_producer_self_repayment_swap(
+                source_pool,
+                obligation,
+                due_usd,
+                "scheduled_due",
+            )
+            if paid > 1e-9:
+                paid_any = True
+            self._record_producer_debt_pressure_payment_allocation(obligation, paid, due_usd)
+        if paid_any:
+            prepay_share = max(
+                0.0,
+                min(1.0, float(getattr(self.cfg, "producer_debt_pressure_prepay_share", 0.25) or 0.0)),
+            )
+            prepay_budget = self._producer_debt_pressure_stable_available_usd(source_pool) * prepay_share
+            for obligation in obligations:
+                if prepay_budget <= 1e-9:
+                    break
+                remaining_cash = max(0.0, float(obligation.cash_service_remaining_usd))
+                remaining_voucher_usd = max(
+                    0.0,
+                    obligation.remaining_voucher_units * self._producer_debt_unit_value(obligation),
+                )
+                remaining_usd = max(remaining_cash, remaining_voucher_usd)
+                if remaining_usd <= 1e-9:
+                    continue
+                paid = self._execute_producer_self_repayment_swap(
+                    source_pool,
+                    obligation,
+                    min(prepay_budget, remaining_usd),
+                    "prepayment",
+                )
+                if paid <= 1e-9:
+                    continue
+                paid_any = True
+                prepay_budget = max(0.0, prepay_budget - paid)
+                self._producer_debt_pressure_prepayment_usd_tick += paid
+                self._producer_debt_pressure_prepayment_usd_total += paid
+        return attempted or paid_any
+
     def _producer_debt_contract_cash_due_usd(self, producer_pool_id: str, voucher_id: str) -> float:
         if not self._producer_debt_contract_repayment_enabled():
             return 0.0
@@ -8228,11 +8706,19 @@ class SimulationEngine:
         if agent is None:
             return False
         voucher_id = agent.voucher_spec.voucher_id
-        period = max(1, int(self.cfg.loan_activity_period_ticks or 1))
+        period = (
+            self._producer_debt_pressure_period_ticks()
+            if self._producer_debt_pressure_enabled()
+            else max(1, int(self.cfg.loan_activity_period_ticks or 1))
+        )
         in_phase = True
         if period > 1:
             phase = self._loan_phase_for(agent.agent_id, period)
             in_phase = (self.tick + phase) % period == 0
+        if self._producer_debt_pressure_enabled() and in_phase:
+            pressure_attempted = self._attempt_debt_pressure_repayment(source_pool, voucher_id, period)
+            if pressure_attempted:
+                return True
         if self._producer_debt_contract_cash_due_usd(source_pool.pool_id, voucher_id) > 1e-9:
             if not in_phase:
                 return False
@@ -8981,11 +9467,10 @@ class SimulationEngine:
                     debt_kind="stable",
                 )
             elif (
-                str(route_context or "") == "voucher_loan"
-                and pool.policy.role == "lender"
+                pool.policy.role == "lender"
                 and source_pool.policy.role == "producer"
                 and self._is_producer_voucher(receipt.asset_in)
-                and receipt.asset_out != self.cfg.stable_symbol
+                and str(receipt.asset_out or "").startswith("VCHR:")
             ):
                 spec = self.factory.voucher_specs.get(receipt.asset_in)
                 if spec is not None and spec.issuer_id == source_pool.steward_id:
@@ -9638,6 +10123,52 @@ class SimulationEngine:
                 "producer_debt_cash_service_paid_usd_total": float(
                     self._producer_debt_cash_service_paid_usd_total
                 ),
+                "producer_debt_service_capacity_balance_usd": float(
+                    self._producer_debt_service_capacity_balance_usd()
+                ),
+                "producer_debt_service_capacity_credited_usd_tick": float(
+                    self._producer_debt_service_capacity_credited_usd_tick
+                ),
+                "producer_debt_service_capacity_credited_usd_total": float(
+                    self._producer_debt_service_capacity_credited_usd_total
+                ),
+                "producer_debt_service_capacity_onramp_usd_tick": float(
+                    self._producer_debt_service_capacity_onramp_usd_tick
+                ),
+                "producer_debt_service_capacity_onramp_usd_total": float(
+                    self._producer_debt_service_capacity_onramp_usd_total
+                ),
+                "producer_self_repayment_swap_volume_usd_tick": float(
+                    self._producer_self_repayment_swap_volume_usd_tick
+                ),
+                "producer_self_repayment_swap_volume_usd_total": float(
+                    self._producer_self_repayment_swap_volume_usd_total
+                ),
+                "producer_self_repayment_voucher_removed_usd_tick": float(
+                    self._producer_self_repayment_voucher_removed_usd_tick
+                ),
+                "producer_self_repayment_voucher_removed_usd_total": float(
+                    self._producer_self_repayment_voucher_removed_usd_total
+                ),
+                "producer_debt_pressure_prepayment_usd_tick": float(
+                    self._producer_debt_pressure_prepayment_usd_tick
+                ),
+                "producer_debt_pressure_prepayment_usd_total": float(
+                    self._producer_debt_pressure_prepayment_usd_total
+                ),
+                "producer_debt_penalty_accrued_usd_tick": float(
+                    self._producer_debt_penalty_accrued_usd_tick
+                ),
+                "producer_debt_penalty_accrued_usd_total": float(
+                    self._producer_debt_penalty_accrued_usd_total
+                ),
+                "producer_debt_penalty_paid_usd_tick": float(
+                    self._producer_debt_penalty_paid_usd_tick
+                ),
+                "producer_debt_penalty_paid_usd_total": float(
+                    self._producer_debt_penalty_paid_usd_total
+                ),
+                "producer_debt_arrears_usd": float(self._producer_debt_arrears_usd()),
                 "lender_stable_total_usd": float(lender_stable_total_usd),
                 "lender_stable_reserve_usd": float(lender_stable_reserve_usd),
                 "lender_stable_available_above_reserve_usd": float(

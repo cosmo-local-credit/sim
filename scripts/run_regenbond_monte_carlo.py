@@ -294,6 +294,40 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--disable-producer-debt-pressure",
+        action="store_true",
+        help="Ablation: disable borrower self-repayment pressure from producer stable capacity.",
+    )
+    parser.add_argument(
+        "--producer-debt-pressure-period-ticks",
+        type=int,
+        default=4,
+        help="Producer-to-pool debt-pressure repayment cadence in weekly ticks.",
+    )
+    parser.add_argument(
+        "--producer-debt-pressure-capacity-share",
+        type=float,
+        default=1.0,
+        help="Share of exited producer stable receipts credited to debt-service capacity.",
+    )
+    parser.add_argument(
+        "--producer-debt-pressure-prepay-share",
+        type=float,
+        default=0.25,
+        help="Share of remaining debt-service capacity used for prepayment after due/arrears clear.",
+    )
+    parser.add_argument(
+        "--disable-producer-debt-penalty",
+        action="store_true",
+        help="Ablation: do not accrue cash-fee penalties on missed producer debt service.",
+    )
+    parser.add_argument(
+        "--producer-debt-penalty-rate-per-period",
+        type=float,
+        default=None,
+        help="Monthly producer debt penalty rate. Defaults to the pool fee rate when omitted.",
+    )
+    parser.add_argument(
         "--productive-credit-voucher-deposit-share",
         type=float,
         default=None,
@@ -778,6 +812,12 @@ SHARD_CONFIG_KEYS = (
     "producer_debt_contract_service_margin_rate",
     "producer_stable_debt_contract_service_margin_rate",
     "producer_voucher_debt_contract_service_margin_rate",
+    "disable_producer_debt_pressure",
+    "producer_debt_pressure_period_ticks",
+    "producer_debt_pressure_capacity_share",
+    "producer_debt_pressure_prepay_share",
+    "disable_producer_debt_penalty",
+    "producer_debt_penalty_rate_per_period",
     "productive_credit_voucher_deposit_share",
     "productive_credit_voucher_deposit_cap_rate_per_month",
     "disable_productive_credit_voucher_activity_boost",
@@ -2066,6 +2106,36 @@ def certified_pool_capacity(calibration: Calibration, network_scale: str, policy
     }
 
 
+def configure_producer_debt_pressure(cfg: ScenarioConfig, args: argparse.Namespace) -> None:
+    cfg.producer_debt_pressure_enabled = not bool(
+        getattr(args, "disable_producer_debt_pressure", False)
+    )
+    cfg.producer_debt_pressure_period_ticks = max(
+        1, int(getattr(args, "producer_debt_pressure_period_ticks", 4) or 4)
+    )
+    cfg.producer_debt_pressure_capacity_share = max(
+        0.0,
+        min(
+            1.0,
+            float(getattr(args, "producer_debt_pressure_capacity_share", 1.0) or 0.0),
+        ),
+    )
+    cfg.producer_debt_pressure_prepay_share = max(
+        0.0,
+        min(
+            1.0,
+            float(getattr(args, "producer_debt_pressure_prepay_share", 0.25) or 0.0),
+        ),
+    )
+    cfg.producer_debt_penalty_enabled = not bool(
+        getattr(args, "disable_producer_debt_penalty", False)
+    )
+    penalty_rate = getattr(args, "producer_debt_penalty_rate_per_period", None)
+    cfg.producer_debt_penalty_rate_per_period = (
+        None if penalty_rate is None else max(0.0, float(penalty_rate))
+    )
+
+
 def scenario_config(
     scenario: str,
     coupon: float,
@@ -2249,6 +2319,7 @@ def scenario_config(
         )
         cfg.producer_debt_maturity_preserve_reserve = True
         cfg.loan_term_weeks = cfg.producer_debt_maturity_ticks
+        configure_producer_debt_pressure(cfg, args)
         cfg.producer_voucher_overlap_mode = "empirical_overlap"
         cfg.producer_voucher_single_lender = False
         cfg.producer_voucher_overlap_bucket_weights = dict(
@@ -2562,6 +2633,7 @@ def scenario_config(
             cfg.productive_credit_return_rate,
             1.0 + stable_contract_margin,
         )
+        configure_producer_debt_pressure(cfg, args)
         cfg.ordinary_stable_spend_protection_enabled = bool(
             getattr(args, "enable_ordinary_stable_spend_protection", False)
         ) and not bool(getattr(args, "disable_ordinary_stable_spend_protection", False))
@@ -3520,6 +3592,13 @@ def run_one(
             "productive_credit_voucher_deposit_cap_clipped_usd_tick",
             "producer_debt_cash_service_due_usd_tick",
             "producer_debt_cash_service_paid_usd_tick",
+            "producer_debt_service_capacity_credited_usd_tick",
+            "producer_debt_service_capacity_onramp_usd_tick",
+            "producer_self_repayment_swap_volume_usd_tick",
+            "producer_self_repayment_voucher_removed_usd_tick",
+            "producer_debt_pressure_prepayment_usd_tick",
+            "producer_debt_penalty_accrued_usd_tick",
+            "producer_debt_penalty_paid_usd_tick",
             "producer_debt_matured_usd_tick",
             "producer_debt_repaid_usd_tick",
             "producer_debt_repaid_regular_usd_tick",
@@ -3836,6 +3915,26 @@ def run_one(
             ),
             "configured_producer_voucher_debt_contract_service_margin_rate": safe_float(
                 getattr(cfg, "producer_voucher_debt_contract_service_margin_rate", 0.0)
+            ),
+            "configured_producer_debt_pressure_enabled": int(
+                bool(getattr(cfg, "producer_debt_pressure_enabled", False))
+            ),
+            "configured_producer_debt_pressure_period_ticks": int(
+                getattr(cfg, "producer_debt_pressure_period_ticks", 4) or 4
+            ),
+            "configured_producer_debt_pressure_capacity_share": safe_float(
+                getattr(cfg, "producer_debt_pressure_capacity_share", 0.0)
+            ),
+            "configured_producer_debt_pressure_prepay_share": safe_float(
+                getattr(cfg, "producer_debt_pressure_prepay_share", 0.0)
+            ),
+            "configured_producer_debt_penalty_enabled": int(
+                bool(getattr(cfg, "producer_debt_penalty_enabled", False))
+            ),
+            "configured_producer_debt_penalty_rate_per_period": safe_float(
+                getattr(cfg, "producer_debt_penalty_rate_per_period", 0.0)
+                if getattr(cfg, "producer_debt_penalty_rate_per_period", None) is not None
+                else getattr(cfg, "pool_fee_rate", 0.0)
             ),
             "configured_producer_primary_voucher_borrowing_enabled": int(
                 bool(getattr(cfg, "producer_primary_voucher_borrowing_enabled", False))
@@ -4929,6 +5028,52 @@ def run_one(
             "producer_debt_cash_service_paid_usd_total": cumulative_float[
                 "producer_debt_cash_service_paid_usd_tick"
             ],
+            "producer_debt_service_capacity_balance_usd": latest.get(
+                "producer_debt_service_capacity_balance_usd", 0.0
+            ),
+            "producer_debt_service_capacity_credited_usd": latest.get(
+                "producer_debt_service_capacity_credited_usd_tick", 0.0
+            ),
+            "producer_debt_service_capacity_credited_usd_total": cumulative_float[
+                "producer_debt_service_capacity_credited_usd_tick"
+            ],
+            "producer_debt_service_capacity_onramp_usd": latest.get(
+                "producer_debt_service_capacity_onramp_usd_tick", 0.0
+            ),
+            "producer_debt_service_capacity_onramp_usd_total": cumulative_float[
+                "producer_debt_service_capacity_onramp_usd_tick"
+            ],
+            "producer_self_repayment_swap_volume_usd": latest.get(
+                "producer_self_repayment_swap_volume_usd_tick", 0.0
+            ),
+            "producer_self_repayment_swap_volume_usd_total": cumulative_float[
+                "producer_self_repayment_swap_volume_usd_tick"
+            ],
+            "producer_self_repayment_voucher_removed_usd": latest.get(
+                "producer_self_repayment_voucher_removed_usd_tick", 0.0
+            ),
+            "producer_self_repayment_voucher_removed_usd_total": cumulative_float[
+                "producer_self_repayment_voucher_removed_usd_tick"
+            ],
+            "producer_debt_pressure_prepayment_usd": latest.get(
+                "producer_debt_pressure_prepayment_usd_tick", 0.0
+            ),
+            "producer_debt_pressure_prepayment_usd_total": cumulative_float[
+                "producer_debt_pressure_prepayment_usd_tick"
+            ],
+            "producer_debt_penalty_accrued_usd": latest.get(
+                "producer_debt_penalty_accrued_usd_tick", 0.0
+            ),
+            "producer_debt_penalty_accrued_usd_total": cumulative_float[
+                "producer_debt_penalty_accrued_usd_tick"
+            ],
+            "producer_debt_penalty_paid_usd": latest.get(
+                "producer_debt_penalty_paid_usd_tick", 0.0
+            ),
+            "producer_debt_penalty_paid_usd_total": cumulative_float[
+                "producer_debt_penalty_paid_usd_tick"
+            ],
+            "producer_debt_arrears_usd": latest.get("producer_debt_arrears_usd", 0.0),
             "producer_debt_matured_usd": latest.get("producer_debt_matured_usd_tick", 0.0),
             "producer_debt_matured_usd_total": cumulative_float["producer_debt_matured_usd_tick"],
             "producer_debt_repaid_usd": latest.get("producer_debt_repaid_usd_tick", 0.0),
@@ -7071,6 +7216,33 @@ def summarize_frontier_cell(
     producer_debt_stable_recovered_values = [
         safe_float(row.get("producer_debt_stable_recovered_usd_total")) for row in rows
     ]
+    producer_debt_service_capacity_balance_values = [
+        safe_float(row.get("producer_debt_service_capacity_balance_usd")) for row in rows
+    ]
+    producer_debt_service_capacity_credited_values = [
+        safe_float(row.get("producer_debt_service_capacity_credited_usd_total")) for row in rows
+    ]
+    producer_debt_service_capacity_onramp_values = [
+        safe_float(row.get("producer_debt_service_capacity_onramp_usd_total")) for row in rows
+    ]
+    producer_self_repayment_swap_volume_values = [
+        safe_float(row.get("producer_self_repayment_swap_volume_usd_total")) for row in rows
+    ]
+    producer_self_repayment_voucher_removed_values = [
+        safe_float(row.get("producer_self_repayment_voucher_removed_usd_total")) for row in rows
+    ]
+    producer_debt_pressure_prepayment_values = [
+        safe_float(row.get("producer_debt_pressure_prepayment_usd_total")) for row in rows
+    ]
+    producer_debt_penalty_accrued_values = [
+        safe_float(row.get("producer_debt_penalty_accrued_usd_total")) for row in rows
+    ]
+    producer_debt_penalty_paid_values = [
+        safe_float(row.get("producer_debt_penalty_paid_usd_total")) for row in rows
+    ]
+    producer_debt_arrears_values = [
+        safe_float(row.get("producer_debt_arrears_usd")) for row in rows
+    ]
     producer_debt_consumer_stable_purchase_values = [
         safe_float(row.get("producer_debt_consumer_stable_purchase_usd_total")) for row in rows
     ]
@@ -7654,6 +7826,30 @@ def summarize_frontier_cell(
             "configured_producer_voucher_debt_contract_service_margin_rate",
             first.get("configured_producer_debt_contract_service_margin_rate", 0.0),
         ),
+        "producer_debt_pressure_enabled": first.get(
+            "configured_producer_debt_pressure_enabled",
+            0,
+        ),
+        "producer_debt_pressure_period_ticks": first.get(
+            "configured_producer_debt_pressure_period_ticks",
+            4,
+        ),
+        "producer_debt_pressure_capacity_share": first.get(
+            "configured_producer_debt_pressure_capacity_share",
+            0.0,
+        ),
+        "producer_debt_pressure_prepay_share": first.get(
+            "configured_producer_debt_pressure_prepay_share",
+            0.0,
+        ),
+        "producer_debt_penalty_enabled": first.get(
+            "configured_producer_debt_penalty_enabled",
+            0,
+        ),
+        "producer_debt_penalty_rate_per_period": first.get(
+            "configured_producer_debt_penalty_rate_per_period",
+            0.0,
+        ),
         "voucher_settlement_mode": first.get("configured_voucher_settlement_mode", ""),
         "principal_usd_p50": percentile(principal_values, 0.50),
         "runs": len(rows),
@@ -7829,6 +8025,39 @@ def summarize_frontier_cell(
         ),
         "producer_debt_stable_recovered_usd_total_p50": percentile(
             producer_debt_stable_recovered_values, 0.50
+        ),
+        "producer_debt_service_capacity_balance_usd_p50": percentile(
+            producer_debt_service_capacity_balance_values, 0.50
+        ),
+        "producer_debt_service_capacity_credited_usd_total_p50": percentile(
+            producer_debt_service_capacity_credited_values, 0.50
+        ),
+        "producer_debt_service_capacity_onramp_usd_total_p50": percentile(
+            producer_debt_service_capacity_onramp_values, 0.50
+        ),
+        "producer_self_repayment_swap_volume_usd_total_p50": percentile(
+            producer_self_repayment_swap_volume_values, 0.50
+        ),
+        "producer_self_repayment_voucher_removed_usd_total_p50": percentile(
+            producer_self_repayment_voucher_removed_values, 0.50
+        ),
+        "producer_debt_pressure_prepayment_usd_total_p50": percentile(
+            producer_debt_pressure_prepayment_values, 0.50
+        ),
+        "producer_debt_penalty_accrued_usd_total_p50": percentile(
+            producer_debt_penalty_accrued_values, 0.50
+        ),
+        "producer_debt_penalty_paid_usd_total_p50": percentile(
+            producer_debt_penalty_paid_values, 0.50
+        ),
+        "producer_debt_arrears_usd_p50": percentile(producer_debt_arrears_values, 0.50),
+        "producer_self_repayment_share_of_stable_recovery_p50": (
+            percentile(producer_self_repayment_swap_volume_values, 0.50)
+            / max(1e-9, percentile(lender_recovered_stable_values, 0.50))
+        ),
+        "producer_self_repayment_pressure_to_v2v_volume_ratio_p50": (
+            percentile(producer_self_repayment_voucher_removed_values, 0.50)
+            / max(1e-9, v2v_volume_p50)
         ),
         "producer_debt_consumer_stable_purchase_usd_total_p50": percentile(
             producer_debt_consumer_stable_purchase_values, 0.50

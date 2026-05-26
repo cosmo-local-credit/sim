@@ -321,6 +321,12 @@ class ScenarioConfig:
     producer_debt_maturity_ticks: int = 13
     producer_debt_maturity_recovery_rate: float = 1.0
     producer_debt_maturity_preserve_reserve: bool = True
+    producer_debt_pressure_enabled: bool = False
+    producer_debt_pressure_period_ticks: int = 4
+    producer_debt_pressure_capacity_share: float = 1.0
+    producer_debt_pressure_prepay_share: float = 0.25
+    producer_debt_penalty_enabled: bool = True
+    producer_debt_penalty_rate_per_period: float | None = None
 
     # Swap sizing (share of pool value, per attempt)
     swap_size_mean_frac: float = 0.02
