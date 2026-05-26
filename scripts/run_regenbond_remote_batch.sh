@@ -378,6 +378,16 @@ case "$JOB" in
       PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
       run_frontier 20 260 bond_issuer_frontier_current_grid_pilot current 0.10,0.20,0.30,0.40,0.50 0,0.02,0.04,0.06,0.08 1.0
     ;;
+  frontier-stress-pilot)
+    FRONTIER_MODE="${FRONTIER_MODE:-grid}" \
+      FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}" \
+      ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK="${ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK:-1}" \
+      ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST="${ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST:-1}" \
+      ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING="${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-1}" \
+      ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND="${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-1}" \
+      PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
+      run_frontier 20 260 bond_issuer_frontier_stress_pilot current 0.05,0.50,1.00,2.00 0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45 1.0
+    ;;
   frontier-publication)
     FRONTIER_MODE="${FRONTIER_MODE:-grid}" \
       FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}" \
@@ -390,7 +400,7 @@ case "$JOB" in
     ;;
   *)
     echo "Unknown job: $JOB" >&2
-    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, frontier-smoke, frontier-maturity-smoke, frontier-feedback-probe, frontier-low-principal-probe, frontier-activity-ablation-probe, frontier-rola-regeneration-probe, frontier-pilot, frontier-current-grid-pilot, frontier-publication" >&2
+    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, frontier-smoke, frontier-maturity-smoke, frontier-feedback-probe, frontier-low-principal-probe, frontier-activity-ablation-probe, frontier-rola-regeneration-probe, frontier-pilot, frontier-current-grid-pilot, frontier-stress-pilot, frontier-publication" >&2
     exit 2
     ;;
 esac
