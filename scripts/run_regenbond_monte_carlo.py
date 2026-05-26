@@ -350,6 +350,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--ordinary-own-voucher-stable-borrowing-probability",
+        type=float,
+        default=None,
+        help=(
+            "Probability that an ordinary producer own-voucher route may target stable. "
+            "Validation/frontier default to 0.75 when omitted; manual enabled mode defaults to 1.0."
+        ),
+    )
+    parser.add_argument(
         "--productive-credit-voucher-deposit-share",
         type=float,
         default=None,
@@ -843,6 +852,7 @@ SHARD_CONFIG_KEYS = (
     "disable_producer_debt_penalty",
     "producer_debt_penalty_rate_per_period",
     "enable_ordinary_own_voucher_stable_borrowing",
+    "ordinary_own_voucher_stable_borrowing_probability",
     "productive_credit_voucher_deposit_share",
     "productive_credit_voucher_deposit_cap_rate_per_month",
     "disable_productive_credit_voucher_activity_boost",
@@ -2254,6 +2264,16 @@ def apply_debt_pressure_min_swap_default(cfg: ScenarioConfig, args: argparse.Nam
     cfg.producer_debt_pressure_min_swap_usd = max(1.0, 0.25 * avg_spend)
 
 
+def ordinary_own_voucher_stable_borrowing_probability(
+    args: argparse.Namespace,
+    default: float,
+) -> float:
+    configured = getattr(args, "ordinary_own_voucher_stable_borrowing_probability", None)
+    if configured is None:
+        configured = default
+    return max(0.0, min(1.0, float(configured or 0.0)))
+
+
 def scenario_config(
     scenario: str,
     coupon: float,
@@ -2273,6 +2293,9 @@ def scenario_config(
     )
     cfg.ordinary_own_voucher_stable_borrowing_enabled = bool(
         getattr(args, "enable_ordinary_own_voucher_stable_borrowing", False)
+    )
+    cfg.ordinary_own_voucher_stable_borrowing_probability = (
+        ordinary_own_voucher_stable_borrowing_probability(args, 1.0)
     )
     cfg.max_active_pools_per_tick = args.max_active_pools_per_tick
     cfg.frontier_routing_abstraction = str(
@@ -2442,6 +2465,9 @@ def scenario_config(
         cfg.loan_term_weeks = cfg.producer_debt_maturity_ticks
         configure_producer_debt_pressure(cfg, args, batching_default=True)
         cfg.ordinary_own_voucher_stable_borrowing_enabled = True
+        cfg.ordinary_own_voucher_stable_borrowing_probability = (
+            ordinary_own_voucher_stable_borrowing_probability(args, 0.75)
+        )
         cfg.producer_voucher_overlap_mode = "empirical_overlap"
         cfg.producer_voucher_single_lender = False
         cfg.producer_voucher_overlap_bucket_weights = dict(
@@ -2758,6 +2784,9 @@ def scenario_config(
         )
         configure_producer_debt_pressure(cfg, args, batching_default=True)
         cfg.ordinary_own_voucher_stable_borrowing_enabled = True
+        cfg.ordinary_own_voucher_stable_borrowing_probability = (
+            ordinary_own_voucher_stable_borrowing_probability(args, 0.75)
+        )
         cfg.ordinary_stable_spend_protection_enabled = bool(
             getattr(args, "enable_ordinary_stable_spend_protection", False)
         ) and not bool(getattr(args, "disable_ordinary_stable_spend_protection", False))
@@ -4083,6 +4112,9 @@ def run_one(
             ),
             "configured_ordinary_own_voucher_stable_borrowing_enabled": int(
                 bool(getattr(cfg, "ordinary_own_voucher_stable_borrowing_enabled", False))
+            ),
+            "configured_ordinary_own_voucher_stable_borrowing_probability": safe_float(
+                getattr(cfg, "ordinary_own_voucher_stable_borrowing_probability", 1.0)
             ),
             "configured_producer_debt_penalty_enabled": int(
                 bool(getattr(cfg, "producer_debt_penalty_enabled", False))
@@ -8286,6 +8318,10 @@ def summarize_frontier_cell(
         "ordinary_own_voucher_stable_borrowing_enabled": first.get(
             "configured_ordinary_own_voucher_stable_borrowing_enabled",
             0,
+        ),
+        "ordinary_own_voucher_stable_borrowing_probability": first.get(
+            "configured_ordinary_own_voucher_stable_borrowing_probability",
+            1.0,
         ),
         "producer_debt_penalty_enabled": first.get(
             "configured_producer_debt_penalty_enabled",

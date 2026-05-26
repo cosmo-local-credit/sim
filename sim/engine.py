@@ -2855,15 +2855,58 @@ class SimulationEngine:
             and self._is_producer_own_voucher(source_pool, asset_in)
         )
 
+    def _ordinary_own_voucher_stable_borrowing_probability(self) -> float:
+        return max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        self.cfg,
+                        "ordinary_own_voucher_stable_borrowing_probability",
+                        1.0,
+                    )
+                    or 0.0
+                ),
+            ),
+        )
+
+    def _ordinary_own_voucher_stable_target_blocked_for_attempt(
+        self,
+        source_pool: "Pool",
+        asset_in: str,
+        route_context: str,
+    ) -> bool:
+        if (
+            str(route_context or "ordinary") != "ordinary"
+            or not self._is_producer_own_voucher(source_pool, asset_in)
+        ):
+            return False
+        if not bool(getattr(self.cfg, "ordinary_own_voucher_stable_borrowing_enabled", False)):
+            return True
+        probability = self._ordinary_own_voucher_stable_borrowing_probability()
+        if probability >= 1.0:
+            return False
+        if probability <= 0.0:
+            return True
+        return self.rng.random() >= probability
+
     def _effective_ordinary_target_class(
         self,
         source_pool: "Pool",
         asset_in: str,
         route_context: str,
         preferred_class: Optional[str],
+        stable_target_blocked: Optional[bool] = None,
     ) -> Optional[str]:
+        if stable_target_blocked is None:
+            stable_target_blocked = self._blocks_ordinary_producer_own_voucher_to_stable(
+                source_pool,
+                asset_in,
+                route_context,
+            )
         if (
-            self._blocks_ordinary_producer_own_voucher_to_stable(source_pool, asset_in, route_context)
+            stable_target_blocked
             and preferred_class in (None, "stable")
         ):
             return "voucher"
@@ -7706,7 +7749,7 @@ class SimulationEngine:
         sticky_fail_threshold = max(1, int(self.cfg.sticky_fail_threshold or 1))
 
         for asset_in in asset_candidates:
-            stable_target_blocked = self._blocks_ordinary_producer_own_voucher_to_stable(
+            stable_target_blocked = self._ordinary_own_voucher_stable_target_blocked_for_attempt(
                 source_pool,
                 asset_in,
                 route_context,
@@ -7716,6 +7759,7 @@ class SimulationEngine:
                 asset_in,
                 route_context,
                 motif_target_class,
+                stable_target_blocked=stable_target_blocked,
             )
             if route_context == "ordinary" and self._frontier_shortlist_enabled():
                 max_targets = 1

@@ -64,6 +64,7 @@ append_optional_arg PRODUCER_DEBT_PRESSURE_CAPACITY_SHARE --producer-debt-pressu
 append_optional_arg PRODUCER_DEBT_PRESSURE_PREPAY_SHARE --producer-debt-pressure-prepay-share
 append_optional_arg PRODUCER_DEBT_PRESSURE_MIN_SWAP_USD --producer-debt-pressure-min-swap-usd
 append_optional_arg PRODUCER_DEBT_PENALTY_RATE_PER_PERIOD --producer-debt-penalty-rate-per-period
+append_optional_arg ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY --ordinary-own-voucher-stable-borrowing-probability
 case "${DISABLE_PRODUCER_DEBT_PRESSURE:-0}" in
   1|true|TRUE|yes|YES)
     MONTE_CARLO_EXTRA_ARGS+=(--disable-producer-debt-pressure)
@@ -127,7 +128,7 @@ echo "[batch] route_success_mode=${ROUTE_SUCCESS_MODE:-diagnostic}"
 echo "[batch] routing_profile=max_hops:${MAX_HOPS:-3} noam_max_hops:${NOAM_MAX_HOPS:-3} overlay:${NOAM_OVERLAY_ENABLED:-1} clearing:${NOAM_CLEARING_ENABLED:-1} clearing_stride:${NOAM_CLEARING_STRIDE_TICKS:-13}"
 echo "[batch] activity_profile=decision_based:${DECISION_BASED_ACTIVITY_ENABLED:-1} repeat_partner_share:${REPEAT_PARTNER_ROUTE_SHARE:-0.70} buddy_min:${AFFINITY_BUDDY_MIN_COUNT:-1}"
 echo "[batch] voucher_settlement_mode=${VOUCHER_SETTLEMENT_MODE:-redeem_outputs}"
-echo "[batch] producer_debt_pressure=enabled:$([[ ${DISABLE_PRODUCER_DEBT_PRESSURE:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) period:${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4} capacity_share:${PRODUCER_DEBT_PRESSURE_CAPACITY_SHARE:-1.0} prepay_share:${PRODUCER_DEBT_PRESSURE_PREPAY_SHARE:-0.10} batching_enabled:$([[ ${DISABLE_PRODUCER_DEBT_PRESSURE_BATCHING:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) min_swap:${PRODUCER_DEBT_PRESSURE_MIN_SWAP_USD:-empirical_default} penalty_enabled:$([[ ${DISABLE_PRODUCER_DEBT_PENALTY:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) penalty_rate:${PRODUCER_DEBT_PENALTY_RATE_PER_PERIOD:-pool_fee_rate} own_voucher_stable_borrowing:${ENABLE_ORDINARY_OWN_VOUCHER_STABLE_BORROWING:-scenario_default}"
+echo "[batch] producer_debt_pressure=enabled:$([[ ${DISABLE_PRODUCER_DEBT_PRESSURE:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) period:${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4} capacity_share:${PRODUCER_DEBT_PRESSURE_CAPACITY_SHARE:-1.0} prepay_share:${PRODUCER_DEBT_PRESSURE_PREPAY_SHARE:-0.10} batching_enabled:$([[ ${DISABLE_PRODUCER_DEBT_PRESSURE_BATCHING:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) min_swap:${PRODUCER_DEBT_PRESSURE_MIN_SWAP_USD:-empirical_default} penalty_enabled:$([[ ${DISABLE_PRODUCER_DEBT_PENALTY:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) penalty_rate:${PRODUCER_DEBT_PENALTY_RATE_PER_PERIOD:-pool_fee_rate} own_voucher_stable_borrowing:${ENABLE_ORDINARY_OWN_VOUCHER_STABLE_BORROWING:-scenario_default} own_voucher_stable_probability:${ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY:-scenario_default}"
 echo "[batch] kes_per_usd=${KES_PER_USD:-missing}"
 echo "[batch] voucher_kes_value=${VOUCHER_KES_VALUE:-missing}"
 

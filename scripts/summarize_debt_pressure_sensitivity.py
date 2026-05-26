@@ -147,6 +147,10 @@ def summarize_cell(cell_dir: Path) -> dict[str, object] | None:
             )
             > 0.5
         ),
+        "own_voucher_stable_borrowing_probability": safe_float(
+            first_run.get("configured_ordinary_own_voucher_stable_borrowing_probability"),
+            1.0,
+        ),
         "penalty_enabled": int(
             safe_float(first_run.get("configured_producer_debt_penalty_enabled")) > 0.5
         ),

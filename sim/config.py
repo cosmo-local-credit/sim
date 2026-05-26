@@ -199,6 +199,7 @@ class ScenarioConfig:
     producer_primary_voucher_borrowing_enabled: bool = False
     producer_primary_voucher_borrowing_attempt_share: float = 0.0
     ordinary_own_voucher_stable_borrowing_enabled: bool = False
+    ordinary_own_voucher_stable_borrowing_probability: float = 1.0
     producer_voucher_loan_activity_boost_enabled: bool = False
     producer_voucher_loan_max_target_candidates: int = 3
     lender_voucher_purchase_demand_enabled: bool = False

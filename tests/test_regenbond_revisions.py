@@ -371,6 +371,78 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(latest["loan_route_motif_voucher_to_stable_count_total"], 1)
         self.assertEqual(latest["market_route_motif_voucher_to_stable_count_total"], 0)
 
+    def test_ordinary_own_voucher_stable_probability_zero_preserves_voucher_loan(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=2,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=3,
+                decision_based_activity_enabled=True,
+                repeat_partner_route_share=1.0,
+                route_substitution_enabled=False,
+                swap_target_retry_count=1,
+                ordinary_own_voucher_stable_borrowing_enabled=True,
+                ordinary_own_voucher_stable_borrowing_probability=0.0,
+                producer_debt_maturity_enabled=True,
+                pool_fee_rate=0.0,
+                clc_rake_rate=0.0,
+            ),
+            seed=133,
+        )
+        stable_id = engine.cfg.stable_symbol
+        producers = [agent for agent in engine.agents.values() if agent.role == "producer"]
+        source_agent, target_agent = producers[0], producers[1]
+        producer_pool = engine.pools[source_agent.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = source_agent.voucher_spec.voucher_id
+        target_voucher_id = target_agent.voucher_spec.voucher_id
+        for pool in (producer_pool, lender_pool):
+            for asset_id in (stable_id, voucher_id, target_voucher_id):
+                pool.values.set_value(asset_id, 1.0)
+        lender_pool.list_asset_with_value_and_limit(stable_id, value=1.0, window_len=10, cap_in=500.0)
+        lender_pool.list_asset_with_value_and_limit(voucher_id, value=1.0, window_len=10, cap_in=500.0)
+        lender_pool.list_asset_with_value_and_limit(
+            target_voucher_id,
+            value=1.0,
+            window_len=10,
+            cap_in=500.0,
+        )
+        for asset_id in (stable_id, voucher_id, target_voucher_id):
+            current = producer_pool.vault.get(asset_id)
+            if current > 0.0:
+                engine._vault_sub(producer_pool, asset_id, current, "test_clear", "test")
+        engine._vault_add(producer_pool, voucher_id, 25.0, "test_seed", "test")
+        engine._vault_add(lender_pool, stable_id, 100.0, "test_seed", "test")
+        engine._vault_add(lender_pool, target_voucher_id, 100.0, "test_seed", "test")
+        self.assertTrue(
+            engine._ordinary_own_voucher_stable_target_blocked_for_attempt(
+                producer_pool,
+                voucher_id,
+                "ordinary",
+            )
+        )
+        engine._sticky_target_by_pool[(producer_pool.pool_id, voucher_id)] = target_voucher_id
+        engine._sticky_plan_by_pool[(producer_pool.pool_id, voucher_id, target_voucher_id)] = RoutePlan(
+            ok=True,
+            reason="own_voucher_to_voucher",
+            hops=[Hop(lender_pool.pool_id, voucher_id, target_voucher_id, 10.0)],
+        )
+
+        attempted = engine._random_route_request(
+            source_pool=producer_pool,
+            max_assets=1,
+            activity_mode="repeat_partner",
+        )
+
+        self.assertEqual(attempted, 1)
+        self.assertEqual(engine._loan_route_motif_count_total.get("voucher_to_stable", 0), 0)
+        self.assertEqual(engine._loan_route_motif_count_total.get("voucher_to_voucher"), 1)
+        self.assertEqual(engine._market_route_motif_count_total.get("voucher_to_voucher", 0), 0)
+        self.assertEqual(len(engine._producer_debt_obligations), 1)
+        self.assertEqual(engine._producer_debt_obligations[0].debt_kind, "voucher")
+
     def test_private_wallet_roles_do_not_create_consumer_vouchers(self):
         engine = SimulationEngine(
             small_config(
@@ -2074,6 +2146,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertTrue(cfg.producer_debt_pressure_batching_enabled)
         self.assertAlmostEqual(cfg.producer_debt_pressure_min_swap_usd, 1.0)
         self.assertTrue(cfg.ordinary_own_voucher_stable_borrowing_enabled)
+        self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.75)
         self.assertTrue(cfg.producer_debt_penalty_enabled)
         self.assertFalse(cfg.offramps_enabled)
         self.assertIsNone(cfg.historical_stable_backing_tick)
@@ -2133,6 +2206,7 @@ class RegenBondRevisionTests(unittest.TestCase):
             "producer_debt_pressure_batching_enabled",
             "producer_debt_pressure_min_swap_usd",
             "ordinary_own_voucher_stable_borrowing_enabled",
+            "ordinary_own_voucher_stable_borrowing_probability",
             "producer_debt_penalty_enabled",
         ):
             self.assertEqual(getattr(cfg_baseline, attr), getattr(cfg, attr))
@@ -2199,6 +2273,7 @@ class RegenBondRevisionTests(unittest.TestCase):
             "disable_producer_debt_penalty",
             "producer_debt_penalty_rate_per_period",
             "enable_ordinary_own_voucher_stable_borrowing",
+            "ordinary_own_voucher_stable_borrowing_probability",
         ):
             self.assertIn(key, SHARD_CONFIG_KEYS)
 
@@ -2251,6 +2326,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertTrue(cfg.producer_debt_pressure_batching_enabled)
         self.assertAlmostEqual(cfg.producer_debt_pressure_min_swap_usd, 1.0)
         self.assertTrue(cfg.ordinary_own_voucher_stable_borrowing_enabled)
+        self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.75)
         self.assertTrue(cfg.producer_debt_penalty_enabled)
 
     def test_sarafu_activity_controls_load_settlement_motif_targets(self):
