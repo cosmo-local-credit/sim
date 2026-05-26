@@ -834,6 +834,19 @@ def resolve_workers(value: object) -> int:
         raise ValueError(f"Invalid --workers value: {value!r}") from exc
 
 
+def format_duration(seconds: float | None) -> str:
+    if seconds is None or not math.isfinite(seconds) or seconds < 0.0:
+        return "unknown"
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours:d}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes:d}m{secs:02d}s"
+    return f"{secs:d}s"
+
+
 def root_shard_dir(args: argparse.Namespace, output_dir: Path) -> Path:
     if args.shard_dir:
         return Path(args.shard_dir).resolve()
@@ -1007,8 +1020,38 @@ def run_sharded_jobs(
         f"[parallel] {label}: workers={worker_count} completed={len(completed)} pending={len(pending)}",
         flush=True,
     )
+    started_at = time.monotonic()
+    initial_done = len(completed)
     if completed and on_progress is not None:
         on_progress(completed)
+
+    def print_global_progress() -> None:
+        total = max(1, len(jobs))
+        done = len(completed) + len(failed)
+        remaining = max(0, len(jobs) - done)
+        elapsed = time.monotonic() - started_at
+        processed_this_session = max(0, done - initial_done)
+        eta_seconds = (
+            remaining * (elapsed / processed_this_session)
+            if processed_this_session > 0 and remaining > 0
+            else 0.0 if remaining == 0 else None
+        )
+        print(
+            "[parallel-progress] {label}: global={pct:5.1f}% done={done}/{total} "
+            "completed={completed} failed={failed} remaining={remaining} "
+            "elapsed={elapsed} eta={eta}".format(
+                label=label,
+                pct=100.0 * done / total,
+                done=done,
+                total=len(jobs),
+                completed=len(completed),
+                failed=len(failed),
+                remaining=remaining,
+                elapsed=format_duration(elapsed),
+                eta=format_duration(eta_seconds),
+            ),
+            flush=True,
+        )
 
     def handle_result(result: dict[str, object]) -> None:
         if result.get("status") == "completed":
@@ -1021,6 +1064,7 @@ def run_sharded_jobs(
         status = result.get("status")
         job_id = result.get("job", {}).get("job_id", "?") if isinstance(result.get("job"), dict) else "?"
         print(f"[parallel] {label}: {status} {job_id} ({done}/{len(jobs)})", flush=True)
+        print_global_progress()
 
     if worker_count == 1:
         for job in pending:
