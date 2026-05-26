@@ -382,6 +382,14 @@ class SimulationEngine:
         self._market_route_motif_count_total: Dict[str, int] = {}
         self._market_route_motif_volume_usd_tick: Dict[str, float] = {}
         self._market_route_motif_volume_usd_total: Dict[str, float] = {}
+        self._repayment_route_motif_count_tick: Dict[str, int] = {}
+        self._repayment_route_motif_count_total: Dict[str, int] = {}
+        self._repayment_route_motif_volume_usd_tick: Dict[str, float] = {}
+        self._repayment_route_motif_volume_usd_total: Dict[str, float] = {}
+        self._loan_route_motif_count_tick: Dict[str, int] = {}
+        self._loan_route_motif_count_total: Dict[str, int] = {}
+        self._loan_route_motif_volume_usd_tick: Dict[str, float] = {}
+        self._loan_route_motif_volume_usd_total: Dict[str, float] = {}
         self._productive_boosted_voucher_swap_count_tick: int = 0
         self._productive_boosted_voucher_swap_count_total: int = 0
         self._productive_boosted_voucher_swap_volume_usd_tick: float = 0.0
@@ -2513,6 +2521,25 @@ class SimulationEngine:
         context = str(route_context or "ordinary")
         return context in {"ordinary", "consumer_purchase", "third_party_purchase"}
 
+    def _is_loan_route_context(self, route_context: str) -> bool:
+        context = str(route_context or "ordinary")
+        return context in {"loan", "voucher_loan"}
+
+    def _record_route_motif_bucket(
+        self,
+        *,
+        motif: str,
+        volume_usd: float,
+        count_tick: Dict[str, int],
+        count_total: Dict[str, int],
+        volume_tick: Dict[str, float],
+        volume_total: Dict[str, float],
+    ) -> None:
+        count_tick[motif] = count_tick.get(motif, 0) + 1
+        count_total[motif] = count_total.get(motif, 0) + 1
+        volume_tick[motif] = volume_tick.get(motif, 0.0) + volume_usd
+        volume_total[motif] = volume_total.get(motif, 0.0) + volume_usd
+
     def _record_route_motif(
         self,
         *,
@@ -2526,39 +2553,49 @@ class SimulationEngine:
         motif = self._route_motif_key(asset_in, asset_out)
         value = self._asset_value(source_pool, asset_in)
         volume_usd = max(0.0, amount_in * value)
-        self._route_motif_count_tick[motif] = self._route_motif_count_tick.get(motif, 0) + 1
-        self._route_motif_count_total[motif] = self._route_motif_count_total.get(motif, 0) + 1
-        self._route_motif_volume_usd_tick[motif] = (
-            self._route_motif_volume_usd_tick.get(motif, 0.0) + volume_usd
-        )
-        self._route_motif_volume_usd_total[motif] = (
-            self._route_motif_volume_usd_total.get(motif, 0.0) + volume_usd
+        self._record_route_motif_bucket(
+            motif=motif,
+            volume_usd=volume_usd,
+            count_tick=self._route_motif_count_tick,
+            count_total=self._route_motif_count_total,
+            volume_tick=self._route_motif_volume_usd_tick,
+            volume_total=self._route_motif_volume_usd_total,
         )
         if str(route_context or "ordinary") == "ordinary":
-            self._ordinary_route_motif_count_tick[motif] = (
-                self._ordinary_route_motif_count_tick.get(motif, 0) + 1
-            )
-            self._ordinary_route_motif_count_total[motif] = (
-                self._ordinary_route_motif_count_total.get(motif, 0) + 1
-            )
-            self._ordinary_route_motif_volume_usd_tick[motif] = (
-                self._ordinary_route_motif_volume_usd_tick.get(motif, 0.0) + volume_usd
-            )
-            self._ordinary_route_motif_volume_usd_total[motif] = (
-                self._ordinary_route_motif_volume_usd_total.get(motif, 0.0) + volume_usd
+            self._record_route_motif_bucket(
+                motif=motif,
+                volume_usd=volume_usd,
+                count_tick=self._ordinary_route_motif_count_tick,
+                count_total=self._ordinary_route_motif_count_total,
+                volume_tick=self._ordinary_route_motif_volume_usd_tick,
+                volume_total=self._ordinary_route_motif_volume_usd_total,
             )
         if self._is_market_route_context(route_context):
-            self._market_route_motif_count_tick[motif] = (
-                self._market_route_motif_count_tick.get(motif, 0) + 1
+            self._record_route_motif_bucket(
+                motif=motif,
+                volume_usd=volume_usd,
+                count_tick=self._market_route_motif_count_tick,
+                count_total=self._market_route_motif_count_total,
+                volume_tick=self._market_route_motif_volume_usd_tick,
+                volume_total=self._market_route_motif_volume_usd_total,
             )
-            self._market_route_motif_count_total[motif] = (
-                self._market_route_motif_count_total.get(motif, 0) + 1
+        if str(route_context or "ordinary") == "repayment":
+            self._record_route_motif_bucket(
+                motif=motif,
+                volume_usd=volume_usd,
+                count_tick=self._repayment_route_motif_count_tick,
+                count_total=self._repayment_route_motif_count_total,
+                volume_tick=self._repayment_route_motif_volume_usd_tick,
+                volume_total=self._repayment_route_motif_volume_usd_total,
             )
-            self._market_route_motif_volume_usd_tick[motif] = (
-                self._market_route_motif_volume_usd_tick.get(motif, 0.0) + volume_usd
-            )
-            self._market_route_motif_volume_usd_total[motif] = (
-                self._market_route_motif_volume_usd_total.get(motif, 0.0) + volume_usd
+        if self._is_loan_route_context(route_context):
+            self._record_route_motif_bucket(
+                motif=motif,
+                volume_usd=volume_usd,
+                count_tick=self._loan_route_motif_count_tick,
+                count_total=self._loan_route_motif_count_total,
+                volume_tick=self._loan_route_motif_volume_usd_tick,
+                volume_total=self._loan_route_motif_volume_usd_total,
             )
         stable_id = self.cfg.stable_symbol
         stable_touched = any(
@@ -2785,6 +2822,59 @@ class SimulationEngine:
         if motif == "stable_to_voucher":
             return "stable", "voucher"
         return None, None
+
+    def _producer_own_voucher_id(self, pool: "Pool") -> Optional[str]:
+        if pool.policy.role != "producer":
+            return None
+        agent = self.agents.get(pool.steward_id)
+        if agent is None or getattr(agent, "voucher_spec", None) is None:
+            return None
+        return agent.voucher_spec.voucher_id
+
+    def _is_producer_own_voucher(self, pool: "Pool", asset_id: str) -> bool:
+        voucher_id = self._producer_own_voucher_id(pool)
+        return bool(voucher_id and asset_id == voucher_id)
+
+    def _blocks_ordinary_producer_own_voucher_to_stable(
+        self,
+        source_pool: "Pool",
+        asset_in: str,
+        route_context: str,
+    ) -> bool:
+        return (
+            str(route_context or "ordinary") == "ordinary"
+            and self._is_producer_own_voucher(source_pool, asset_in)
+        )
+
+    def _effective_ordinary_target_class(
+        self,
+        source_pool: "Pool",
+        asset_in: str,
+        route_context: str,
+        preferred_class: Optional[str],
+    ) -> Optional[str]:
+        if (
+            self._blocks_ordinary_producer_own_voucher_to_stable(source_pool, asset_in, route_context)
+            and preferred_class in (None, "stable")
+        ):
+            return "voucher"
+        return preferred_class
+
+    def _route_context_for_ordinary_own_voucher_source(
+        self,
+        source_pool: "Pool",
+        asset_in: str,
+        asset_out: Optional[str],
+        route_context: str,
+    ) -> str:
+        context = str(route_context or "ordinary")
+        if context != "ordinary" or not self._is_producer_own_voucher(source_pool, asset_in):
+            return context
+        if asset_out == self.cfg.stable_symbol:
+            return "loan"
+        if asset_out and asset_out.startswith("VCHR:"):
+            return "voucher_loan"
+        return context
 
     def _settlement_motif_target_class(self, asset_in: str) -> Optional[str]:
         if not bool(getattr(self.cfg, "settlement_motif_targeting_enabled", False)):
@@ -7256,6 +7346,10 @@ class SimulationEngine:
             self._ordinary_route_motif_volume_usd_tick = {}
             self._market_route_motif_count_tick = {}
             self._market_route_motif_volume_usd_tick = {}
+            self._repayment_route_motif_count_tick = {}
+            self._repayment_route_motif_volume_usd_tick = {}
+            self._loan_route_motif_count_tick = {}
+            self._loan_route_motif_volume_usd_tick = {}
             self._productive_boosted_voucher_swap_count_tick = 0
             self._productive_boosted_voucher_swap_volume_usd_tick = 0.0
             self._voucher_loan_boosted_voucher_swap_count_tick = 0
@@ -7588,13 +7682,26 @@ class SimulationEngine:
         sticky_fail_threshold = max(1, int(self.cfg.sticky_fail_threshold or 1))
 
         for asset_in in asset_candidates:
+            stable_target_blocked = self._blocks_ordinary_producer_own_voucher_to_stable(
+                source_pool,
+                asset_in,
+                route_context,
+            )
+            target_class = self._effective_ordinary_target_class(
+                source_pool,
+                asset_in,
+                route_context,
+                motif_target_class,
+            )
             if route_context == "ordinary" and self._frontier_shortlist_enabled():
                 max_targets = 1
             elif bool(self.cfg.route_substitution_enabled):
                 max_targets = 1 + max(0, int(self.cfg.route_substitution_max_alternatives or 0))
             else:
                 max_targets = max(1, int(self.cfg.swap_target_retry_count or 1))
-            targets_tried: Set[str] = set()
+            targets_tried: Set[str] = (
+                {self.cfg.stable_symbol} if stable_target_blocked else set()
+            )
             sticky_target = None
             if sticky_bias > 0.0:
                 sticky_target = self._sticky_target_by_pool.get((source_pool.pool_id, asset_in))
@@ -7607,8 +7714,8 @@ class SimulationEngine:
                     and sticky_target not in targets_tried
                     and sticky_target != asset_in
                     and (
-                        motif_target_class is None
-                        or self._settlement_asset_class(sticky_target) == motif_target_class
+                        target_class is None
+                        or self._settlement_asset_class(sticky_target) == target_class
                     )
                 )
                 if buddy_direct_only and not sticky_target_allowed:
@@ -7621,7 +7728,7 @@ class SimulationEngine:
                         asset_in=asset_in,
                         amount_in=amount_in,
                         buddy_pools=buddy_pools or set(),
-                        target_class=motif_target_class,
+                        target_class=target_class,
                     )
                     self._record_route_decision_attempt(
                         selected_activity_mode,
@@ -7652,6 +7759,9 @@ class SimulationEngine:
                                            }))
                         self._record_swap_attempt(source_pool.pool_id, success=False)
                         continue
+                    if stable_target_blocked and asset_out == self.cfg.stable_symbol:
+                        self._record_swap_attempt(source_pool.pool_id, success=False)
+                        continue
                     self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
                                        meta={
                                            "hops": [h.__dict__ for h in plan.hops],
@@ -7661,8 +7771,14 @@ class SimulationEngine:
                                            "route_activity_mode": selected_activity_mode,
                                            "target_selection": "buddy_direct",
                                        }))
+                    execution_context = self._route_context_for_ordinary_own_voucher_source(
+                        source_pool,
+                        asset_in,
+                        asset_out,
+                        route_context,
+                    )
                     ok = self.execute_route_from_pool(
-                        source_pool.pool_id, plan, amount_used, route_context=route_context
+                        source_pool.pool_id, plan, amount_used, route_context=execution_context
                     )
                     self._record_swap_attempt(source_pool.pool_id, success=ok)
                     if ok:
@@ -7682,10 +7798,10 @@ class SimulationEngine:
                             source_pool,
                             frontier_pool_whitelist,
                             exclude=targets_tried,
-                            preferred_class=motif_target_class,
+                            preferred_class=target_class,
                         )
                         target_selection = "steward_shortlist"
-                        if not asset_out and motif_target_class is not None:
+                        if not asset_out and target_class is not None and not stable_target_blocked:
                             asset_out = self._choose_frontier_relationship_target_asset(
                                 asset_in,
                                 source_pool,
@@ -7697,10 +7813,10 @@ class SimulationEngine:
                             asset_in,
                             source_pool,
                             exclude=targets_tried,
-                            preferred_class=motif_target_class,
+                            preferred_class=target_class,
                         )
                         target_selection = "new_search"
-                        if not asset_out and motif_target_class is None:
+                        if not asset_out and target_class is None:
                             asset_out = self._choose_target_asset(
                                 asset_in,
                                 source_pool,
@@ -7708,6 +7824,9 @@ class SimulationEngine:
                             )
                 if not asset_out or asset_out == asset_in:
                     break
+                if stable_target_blocked and asset_out == self.cfg.stable_symbol:
+                    targets_tried.add(asset_out)
+                    continue
                 targets_tried.add(asset_out)
 
                 amount_in = self._sample_amount_in(source_pool, asset_in)
@@ -7749,8 +7868,14 @@ class SimulationEngine:
                                                "route_activity_mode": selected_activity_mode,
                                                "target_selection": target_selection,
                                            }))
+                        execution_context = self._route_context_for_ordinary_own_voucher_source(
+                            source_pool,
+                            asset_in,
+                            asset_out,
+                            route_context,
+                        )
                         ok = self.execute_route_from_pool(
-                            source_pool.pool_id, sticky_plan, amount_in, route_context=route_context
+                            source_pool.pool_id, sticky_plan, amount_in, route_context=execution_context
                         )
                         self._record_swap_attempt(source_pool.pool_id, success=ok)
                         if ok:
@@ -7801,11 +7926,17 @@ class SimulationEngine:
                                                "route_activity_mode": selected_activity_mode,
                                                "target_selection": target_selection,
                                            }))
+                        execution_context = self._route_context_for_ordinary_own_voucher_source(
+                            source_pool,
+                            asset_in,
+                            direct_asset_out,
+                            route_context,
+                        )
                         ok = self.execute_route_from_pool(
                             source_pool.pool_id,
                             direct_plan,
                             direct_amount,
-                            route_context=route_context,
+                            route_context=execution_context,
                         )
                         self._record_swap_attempt(source_pool.pool_id, success=ok)
                         if ok:
@@ -7857,8 +7988,14 @@ class SimulationEngine:
                                    }))
 
                 # Execute with escrow:
+                execution_context = self._route_context_for_ordinary_own_voucher_source(
+                    source_pool,
+                    asset_in,
+                    asset_out,
+                    route_context,
+                )
                 ok = self.execute_route_from_pool(
-                    source_pool.pool_id, plan, amount_used, route_context=route_context
+                    source_pool.pool_id, plan, amount_used, route_context=execution_context
                 )
                 self._record_swap_attempt(source_pool.pool_id, success=ok)
                 if ok:
@@ -8514,6 +8651,25 @@ class SimulationEngine:
             swap_usd=spend_usd,
         )
         self._record_route_context_swap("repayment", producer_pool, stable_id, spend_usd)
+        self._record_route_motif(
+            route_context="repayment",
+            source_pool=producer_pool,
+            asset_in=stable_id,
+            asset_out=voucher_id,
+            amount_in=amount_in,
+            plan=RoutePlan(
+                ok=True,
+                reason="producer_self_repayment",
+                hops=[
+                    Hop(
+                        pool_id=lender_pool.pool_id,
+                        asset_in=stable_id,
+                        asset_out=voucher_id,
+                        amount_in=amount_in,
+                    )
+                ],
+            ),
+        )
         self._update_affinity(producer_pool.pool_id, lender_pool.pool_id, spend_usd)
         eligible_recovery_usd = self._reduce_lender_producer_voucher_exposure(
             lender_pool.pool_id,
@@ -8602,7 +8758,7 @@ class SimulationEngine:
         if paid_any:
             prepay_share = max(
                 0.0,
-                min(1.0, float(getattr(self.cfg, "producer_debt_pressure_prepay_share", 0.25) or 0.0)),
+                min(1.0, float(getattr(self.cfg, "producer_debt_pressure_prepay_share", 0.10) or 0.0)),
             )
             prepay_budget = self._producer_debt_pressure_stable_available_usd(source_pool) * prepay_share
             for obligation in obligations:
@@ -9345,6 +9501,12 @@ class SimulationEngine:
 
         source_pool = self.pools[source_pool_id]
         asset_in = plan.hops[0].asset_in
+        route_context = self._route_context_for_ordinary_own_voucher_source(
+            source_pool,
+            asset_in,
+            plan.hops[-1].asset_out,
+            route_context,
+        )
         if not self._vault_sub(source_pool, asset_in, amount_in, "route_withdraw", f"escrow:{source_pool_id}"):
             self.log.add(Event(self.tick, "EXEC_ROUTE_FAILED", pool_id=source_pool_id, meta={"reason": "source_insufficient"}))
             return False
@@ -9974,6 +10136,102 @@ class SimulationEngine:
                 )
                 return float(store.get(motif, 0.0))
 
+            def repayment_motif_count(motif: str, *, total: bool = False) -> int:
+                store = (
+                    self._repayment_route_motif_count_total
+                    if total
+                    else self._repayment_route_motif_count_tick
+                )
+                return int(store.get(motif, 0))
+
+            def repayment_motif_volume(motif: str, *, total: bool = False) -> float:
+                store = (
+                    self._repayment_route_motif_volume_usd_total
+                    if total
+                    else self._repayment_route_motif_volume_usd_tick
+                )
+                return float(store.get(motif, 0.0))
+
+            def loan_motif_count(motif: str, *, total: bool = False) -> int:
+                store = (
+                    self._loan_route_motif_count_total
+                    if total
+                    else self._loan_route_motif_count_tick
+                )
+                return int(store.get(motif, 0))
+
+            def loan_motif_volume(motif: str, *, total: bool = False) -> float:
+                store = (
+                    self._loan_route_motif_volume_usd_total
+                    if total
+                    else self._loan_route_motif_volume_usd_tick
+                )
+                return float(store.get(motif, 0.0))
+
+            def route_motif_metric_bundle(
+                prefix: str,
+                count_fn,
+                volume_fn,
+                count_tick: int,
+                count_total: int,
+            ) -> Dict[str, float | int]:
+                return {
+                    f"{prefix}_route_motif_count_tick": int(count_tick),
+                    f"{prefix}_route_motif_count_total": int(count_total),
+                    f"{prefix}_route_motif_voucher_to_voucher_count_tick": count_fn(
+                        "voucher_to_voucher"
+                    ),
+                    f"{prefix}_route_motif_voucher_to_voucher_count_total": count_fn(
+                        "voucher_to_voucher", total=True
+                    ),
+                    f"{prefix}_route_motif_voucher_to_stable_count_tick": count_fn(
+                        "voucher_to_stable"
+                    ),
+                    f"{prefix}_route_motif_voucher_to_stable_count_total": count_fn(
+                        "voucher_to_stable", total=True
+                    ),
+                    f"{prefix}_route_motif_stable_to_voucher_count_tick": count_fn(
+                        "stable_to_voucher"
+                    ),
+                    f"{prefix}_route_motif_stable_to_voucher_count_total": count_fn(
+                        "stable_to_voucher", total=True
+                    ),
+                    f"{prefix}_route_motif_voucher_to_voucher_share_total": (
+                        count_fn("voucher_to_voucher", total=True) / max(1, count_total)
+                    ),
+                    f"{prefix}_route_motif_voucher_to_stable_share_total": (
+                        count_fn("voucher_to_stable", total=True) / max(1, count_total)
+                    ),
+                    f"{prefix}_route_motif_stable_to_voucher_share_total": (
+                        count_fn("stable_to_voucher", total=True) / max(1, count_total)
+                    ),
+                    f"{prefix}_route_motif_stable_involved_share_total": (
+                        (
+                            count_fn("voucher_to_stable", total=True)
+                            + count_fn("stable_to_voucher", total=True)
+                        )
+                        / max(1, count_total)
+                    ),
+                    f"{prefix}_route_motif_voucher_to_voucher_volume_usd_tick": volume_fn(
+                        "voucher_to_voucher"
+                    ),
+                    f"{prefix}_route_motif_voucher_to_voucher_volume_usd_total": volume_fn(
+                        "voucher_to_voucher", total=True
+                    ),
+                    f"{prefix}_route_motif_voucher_to_stable_volume_usd_tick": volume_fn(
+                        "voucher_to_stable"
+                    ),
+                    f"{prefix}_route_motif_voucher_to_stable_volume_usd_total": volume_fn(
+                        "voucher_to_stable", total=True
+                    ),
+                    f"{prefix}_route_motif_stable_to_voucher_volume_usd_tick": volume_fn(
+                        "stable_to_voucher"
+                    ),
+                    f"{prefix}_route_motif_stable_to_voucher_volume_usd_total": volume_fn(
+                        "stable_to_voucher", total=True
+                    ),
+                }
+
             route_motif_count_tick = sum(int(v) for v in self._route_motif_count_tick.values())
             route_motif_count_total = sum(int(v) for v in self._route_motif_count_total.values())
             ordinary_route_motif_count_tick = sum(
@@ -9987,6 +10245,18 @@ class SimulationEngine:
             )
             market_route_motif_count_total = sum(
                 int(v) for v in self._market_route_motif_count_total.values()
+            )
+            repayment_route_motif_count_tick = sum(
+                int(v) for v in self._repayment_route_motif_count_tick.values()
+            )
+            repayment_route_motif_count_total = sum(
+                int(v) for v in self._repayment_route_motif_count_total.values()
+            )
+            loan_route_motif_count_tick = sum(
+                int(v) for v in self._loan_route_motif_count_tick.values()
+            )
+            loan_route_motif_count_total = sum(
+                int(v) for v in self._loan_route_motif_count_total.values()
             )
 
             num_system = sum(1 for p in self.pools.values() if p.policy.system_pool)
@@ -10871,6 +11141,20 @@ class SimulationEngine:
                 ),
                 "market_route_motif_stable_to_voucher_volume_usd_total": market_motif_volume(
                     "stable_to_voucher", total=True
+                ),
+                **route_motif_metric_bundle(
+                    "repayment",
+                    repayment_motif_count,
+                    repayment_motif_volume,
+                    repayment_route_motif_count_tick,
+                    repayment_route_motif_count_total,
+                ),
+                **route_motif_metric_bundle(
+                    "loan",
+                    loan_motif_count,
+                    loan_motif_volume,
+                    loan_route_motif_count_tick,
+                    loan_route_motif_count_total,
                 ),
                 "productive_boosted_voucher_swap_count_tick": int(
                     self._productive_boosted_voucher_swap_count_tick

@@ -33,6 +33,18 @@ RUN_METRICS = (
     "producer_debt_arrears_usd",
     "producer_stable_exited_usd_total",
     "producer_stable_reuse_budget_usd_total",
+    "market_route_motif_voucher_to_voucher_share_total",
+    "market_route_motif_voucher_to_stable_share_total",
+    "market_route_motif_stable_to_voucher_share_total",
+    "loan_route_motif_count_total",
+    "loan_route_motif_voucher_to_voucher_share_total",
+    "loan_route_motif_voucher_to_stable_share_total",
+    "loan_route_motif_voucher_to_voucher_volume_usd_total",
+    "loan_route_motif_voucher_to_stable_volume_usd_total",
+    "repayment_route_motif_count_total",
+    "repayment_route_motif_stable_to_voucher_share_total",
+    "repayment_route_motif_stable_involved_share_total",
+    "repayment_route_motif_stable_to_voucher_volume_usd_total",
 )
 
 
@@ -144,13 +156,14 @@ def summarize_cell(cell_dir: Path) -> dict[str, object] | None:
     out["debt_closure_present"] = int(
         safe_float(out.get("producer_debt_repaid_usd_total_p50")) > 1e-9
     )
+    out["no_binding_validation_failures"] = int(safe_float(out.get("binding_fail_count")) == 0.0)
     out["candidate"] = int(
-        out["status"] == "pass"
-        and out["v2s_accept"]
+        out["v2s_accept"]
         and out["v2v_accept"]
         and out["s2v_accept"]
         and out["self_repayment_present"]
         and out["debt_closure_present"]
+        and out["no_binding_validation_failures"]
     )
     return out
 
@@ -183,8 +196,8 @@ def main(argv: list[str]) -> int:
 
     print(f"[sensitivity-summary] wrote {output}")
     print(
-        "capacity prepay status v2s_p50 v2s_rel self_repay_p50 debt_repaid_p50 "
-        "capacity_balance_p50 candidate"
+        "capacity prepay status market_v2s loan_v2s repay_s2v self_repay_p50 "
+        "debt_repaid_p50 arrears_p50 capacity_balance_p50 candidate"
     )
     for row in rows:
         print(
@@ -192,9 +205,11 @@ def main(argv: list[str]) -> int:
             f"{safe_float(row['prepay_share']):6.2f} "
             f"{str(row['status']):6s} "
             f"{safe_float(row['market_v2s_p50']):8.4f} "
-            f"{safe_float(row['market_v2s_relative_error']):7.2%} "
+            f"{safe_float(row['loan_route_motif_voucher_to_stable_volume_usd_total_p50']):8.2f} "
+            f"{safe_float(row['repayment_route_motif_stable_to_voucher_volume_usd_total_p50']):9.2f} "
             f"{safe_float(row['producer_self_repayment_swap_volume_usd_total_p50']):15.2f} "
             f"{safe_float(row['producer_debt_repaid_usd_total_p50']):15.2f} "
+            f"{safe_float(row['producer_debt_arrears_usd_p50']):10.2f} "
             f"{safe_float(row['producer_debt_service_capacity_balance_usd_p50']):20.2f} "
             f"{int(row['candidate'])}"
         )

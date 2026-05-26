@@ -313,7 +313,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--producer-debt-pressure-prepay-share",
         type=float,
-        default=0.25,
+        default=0.10,
         help="Share of remaining debt-service capacity used for prepayment after due/arrears clear.",
     )
     parser.add_argument(
@@ -1073,6 +1073,38 @@ def frontier_completed_trajectory_count(
     return completed_runs
 
 
+def validation_completed_tick_count(
+    *,
+    jobs: list[dict[str, object]],
+    shard_root: Path,
+    total_ticks: int,
+) -> int | None:
+    if total_ticks <= 0:
+        return None
+    completed_ticks = 0
+    for job in jobs:
+        job_id = str(job.get("job_id", ""))
+        config_hash = str(job.get("config_hash", ""))
+        if not job_id or not config_hash:
+            continue
+        job_dir = shard_job_dir(shard_root, "validation", job_id)
+        manifest = read_json(job_dir / "manifest.json")
+        if (
+            manifest.get("config_hash") == config_hash
+            and manifest.get("status") in {"completed", "failed"}
+        ):
+            completed_ticks += total_ticks
+            continue
+        progress = read_json(job_dir / "progress.json")
+        if progress.get("config_hash") != config_hash:
+            continue
+        completed_ticks += max(
+            0,
+            min(total_ticks, int(safe_float(progress.get("tick")))),
+        )
+    return completed_ticks
+
+
 def run_sharded_jobs(
     *,
     label: str,
@@ -1106,6 +1138,8 @@ def run_sharded_jobs(
 
     frontier_runs_per_job = int(getattr(args, "runs", 0) or 0) if kind == "frontier" else 0
     frontier_total_trajectories = len(jobs) * max(0, frontier_runs_per_job)
+    validation_ticks_per_job = int(getattr(args, "ticks", 0) or 0) if kind == "validation" else 0
+    validation_total_ticks = len(jobs) * max(0, validation_ticks_per_job)
     initial_trajectories_done = (
         frontier_completed_trajectory_count(
             jobs=jobs,
@@ -1114,6 +1148,15 @@ def run_sharded_jobs(
             seed_base=int(getattr(args, "seed", 0) or 0),
         )
         if frontier_runs_per_job > 0
+        else None
+    )
+    initial_validation_ticks_done = (
+        validation_completed_tick_count(
+            jobs=jobs,
+            shard_root=shard_root,
+            total_ticks=validation_ticks_per_job,
+        )
+        if validation_ticks_per_job > 0
         else None
     )
     print(
@@ -1138,6 +1181,35 @@ def run_sharded_jobs(
             if processed_this_session > 0 and remaining > 0
             else 0.0 if remaining == 0 else None
         )
+        validation_text = ""
+        if validation_total_ticks > 0 and initial_validation_ticks_done is not None:
+            validation_ticks_done = validation_completed_tick_count(
+                jobs=jobs,
+                shard_root=shard_root,
+                total_ticks=validation_ticks_per_job,
+            )
+            if validation_ticks_done is not None:
+                validation_ticks_remaining = max(0, validation_total_ticks - validation_ticks_done)
+                validation_ticks_this_session = max(
+                    0,
+                    validation_ticks_done - initial_validation_ticks_done,
+                )
+                validation_eta_seconds = (
+                    validation_ticks_remaining * (elapsed / validation_ticks_this_session)
+                    if validation_ticks_this_session > 0 and validation_ticks_remaining > 0
+                    else 0.0 if validation_ticks_remaining == 0 else None
+                )
+                if eta_seconds is None and validation_eta_seconds is not None:
+                    eta_seconds = validation_eta_seconds
+                validation_text = (
+                    " run_ticks={done}/{total} work_global={pct:5.1f}% "
+                    "work_eta={eta}"
+                ).format(
+                    done=validation_ticks_done,
+                    total=validation_total_ticks,
+                    pct=100.0 * validation_ticks_done / max(1, validation_total_ticks),
+                    eta=format_duration(validation_eta_seconds),
+                )
         trajectory_text = ""
         if frontier_total_trajectories > 0 and initial_trajectories_done is not None:
             trajectories_done = frontier_completed_trajectory_count(
@@ -1166,7 +1238,7 @@ def run_sharded_jobs(
         print(
             "[parallel-progress] {label}: global={pct:5.1f}% done={done}/{total} "
             "completed={completed} failed={failed} running={running} pending={pending} "
-            "remaining={remaining} elapsed={elapsed} eta={eta}{trajectory_text}".format(
+            "remaining={remaining} elapsed={elapsed} eta={eta}{validation_text}{trajectory_text}".format(
                 label=label,
                 pct=100.0 * done / total,
                 done=done,
@@ -1178,6 +1250,7 @@ def run_sharded_jobs(
                 remaining=remaining,
                 elapsed=format_duration(elapsed),
                 eta=format_duration(eta_seconds),
+                validation_text=validation_text,
                 trajectory_text=trajectory_text,
             ),
             flush=True,
@@ -2124,7 +2197,7 @@ def configure_producer_debt_pressure(cfg: ScenarioConfig, args: argparse.Namespa
         0.0,
         min(
             1.0,
-            float(getattr(args, "producer_debt_pressure_prepay_share", 0.25) or 0.0),
+            float(getattr(args, "producer_debt_pressure_prepay_share", 0.10) or 0.0),
         ),
     )
     cfg.producer_debt_penalty_enabled = not bool(
@@ -3360,6 +3433,25 @@ def maybe_print_run_progress(
         overall_pct = 100.0 * ((run_position - 1.0) + (tick / total_ticks)) / total_runs
         overall_text = f" overall={overall_pct:5.1f}%"
     elapsed = time.monotonic() - started_at
+    progress_file = str(getattr(args, "_progress_file", "") or "")
+    if progress_file:
+        try:
+            write_json(
+                Path(progress_file),
+                {
+                    "config_hash": str(getattr(args, "_progress_config_hash", "") or ""),
+                    "job_id": str(getattr(args, "_progress_job_id", "") or ""),
+                    "scenario": scenario,
+                    "run_index": int(run_index),
+                    "tick": int(tick),
+                    "ticks": int(total_ticks),
+                    "run_pct": float(run_pct),
+                    "elapsed_seconds": float(elapsed),
+                    "updated_at": time.time(),
+                },
+            )
+        except OSError:
+            pass
     print(
         "[progress] scenario={scenario} run={run}/{runs} tick={tick}/{ticks} "
         "run_pct={run_pct:5.1f}%{overall} elapsed={elapsed:6.1f}s "
@@ -4332,6 +4424,68 @@ def run_one(
             ),
             "market_route_motif_stable_to_voucher_volume_usd_total": latest.get(
                 "market_route_motif_stable_to_voucher_volume_usd_total", 0.0
+            ),
+            "repayment_route_motif_count_total": latest.get("repayment_route_motif_count_total", 0),
+            "repayment_route_motif_voucher_to_voucher_count_total": latest.get(
+                "repayment_route_motif_voucher_to_voucher_count_total", 0
+            ),
+            "repayment_route_motif_voucher_to_stable_count_total": latest.get(
+                "repayment_route_motif_voucher_to_stable_count_total", 0
+            ),
+            "repayment_route_motif_stable_to_voucher_count_total": latest.get(
+                "repayment_route_motif_stable_to_voucher_count_total", 0
+            ),
+            "repayment_route_motif_voucher_to_voucher_share_total": latest.get(
+                "repayment_route_motif_voucher_to_voucher_share_total", 0.0
+            ),
+            "repayment_route_motif_voucher_to_stable_share_total": latest.get(
+                "repayment_route_motif_voucher_to_stable_share_total", 0.0
+            ),
+            "repayment_route_motif_stable_to_voucher_share_total": latest.get(
+                "repayment_route_motif_stable_to_voucher_share_total", 0.0
+            ),
+            "repayment_route_motif_stable_involved_share_total": latest.get(
+                "repayment_route_motif_stable_involved_share_total", 0.0
+            ),
+            "repayment_route_motif_voucher_to_voucher_volume_usd_total": latest.get(
+                "repayment_route_motif_voucher_to_voucher_volume_usd_total", 0.0
+            ),
+            "repayment_route_motif_voucher_to_stable_volume_usd_total": latest.get(
+                "repayment_route_motif_voucher_to_stable_volume_usd_total", 0.0
+            ),
+            "repayment_route_motif_stable_to_voucher_volume_usd_total": latest.get(
+                "repayment_route_motif_stable_to_voucher_volume_usd_total", 0.0
+            ),
+            "loan_route_motif_count_total": latest.get("loan_route_motif_count_total", 0),
+            "loan_route_motif_voucher_to_voucher_count_total": latest.get(
+                "loan_route_motif_voucher_to_voucher_count_total", 0
+            ),
+            "loan_route_motif_voucher_to_stable_count_total": latest.get(
+                "loan_route_motif_voucher_to_stable_count_total", 0
+            ),
+            "loan_route_motif_stable_to_voucher_count_total": latest.get(
+                "loan_route_motif_stable_to_voucher_count_total", 0
+            ),
+            "loan_route_motif_voucher_to_voucher_share_total": latest.get(
+                "loan_route_motif_voucher_to_voucher_share_total", 0.0
+            ),
+            "loan_route_motif_voucher_to_stable_share_total": latest.get(
+                "loan_route_motif_voucher_to_stable_share_total", 0.0
+            ),
+            "loan_route_motif_stable_to_voucher_share_total": latest.get(
+                "loan_route_motif_stable_to_voucher_share_total", 0.0
+            ),
+            "loan_route_motif_stable_involved_share_total": latest.get(
+                "loan_route_motif_stable_involved_share_total", 0.0
+            ),
+            "loan_route_motif_voucher_to_voucher_volume_usd_total": latest.get(
+                "loan_route_motif_voucher_to_voucher_volume_usd_total", 0.0
+            ),
+            "loan_route_motif_voucher_to_stable_volume_usd_total": latest.get(
+                "loan_route_motif_voucher_to_stable_volume_usd_total", 0.0
+            ),
+            "loan_route_motif_stable_to_voucher_volume_usd_total": latest.get(
+                "loan_route_motif_stable_to_voucher_volume_usd_total", 0.0
             ),
             "productive_boosted_voucher_swap_count_tick": latest.get(
                 "productive_boosted_voucher_swap_count_tick", 0
@@ -6822,6 +6976,9 @@ def run_validation_shard(
         )
         args._progress_run_position = run_idx
         args._progress_total_runs = int(args.runs)
+        args._progress_file = str(job_dir / "progress.json")
+        args._progress_config_hash = config_hash
+        args._progress_job_id = str(job["job_id"])
         bond_rows, network_rows, failure_rows, summary = run_one(
             scenario="sarafu_engine_validation",
             coupon=0.0,
@@ -7175,6 +7332,36 @@ def summarize_frontier_cell(
     ]
     repayment_route_swap_volume_values = [
         safe_float(row.get("repayment_route_swap_volume_usd_total")) for row in rows
+    ]
+    loan_route_motif_count_values = [
+        safe_float(row.get("loan_route_motif_count_total")) for row in rows
+    ]
+    loan_route_motif_v2v_share_values = [
+        safe_float(row.get("loan_route_motif_voucher_to_voucher_share_total")) for row in rows
+    ]
+    loan_route_motif_v2s_share_values = [
+        safe_float(row.get("loan_route_motif_voucher_to_stable_share_total")) for row in rows
+    ]
+    loan_route_motif_stable_involved_share_values = [
+        safe_float(row.get("loan_route_motif_stable_involved_share_total")) for row in rows
+    ]
+    loan_route_motif_v2v_volume_values = [
+        safe_float(row.get("loan_route_motif_voucher_to_voucher_volume_usd_total")) for row in rows
+    ]
+    loan_route_motif_v2s_volume_values = [
+        safe_float(row.get("loan_route_motif_voucher_to_stable_volume_usd_total")) for row in rows
+    ]
+    repayment_route_motif_count_values = [
+        safe_float(row.get("repayment_route_motif_count_total")) for row in rows
+    ]
+    repayment_route_motif_s2v_share_values = [
+        safe_float(row.get("repayment_route_motif_stable_to_voucher_share_total")) for row in rows
+    ]
+    repayment_route_motif_stable_involved_share_values = [
+        safe_float(row.get("repayment_route_motif_stable_involved_share_total")) for row in rows
+    ]
+    repayment_route_motif_s2v_volume_values = [
+        safe_float(row.get("repayment_route_motif_stable_to_voucher_volume_usd_total")) for row in rows
     ]
     loan_backfill_swap_count_values = [
         safe_float(row.get("loan_backfill_swap_count_total")) for row in rows
@@ -7974,6 +8161,34 @@ def summarize_frontier_cell(
         "repayment_route_swap_count_total_p50": percentile(repayment_route_swap_count_values, 0.50),
         "repayment_route_swap_volume_usd_total_p50": percentile(
             repayment_route_swap_volume_values, 0.50
+        ),
+        "loan_route_motif_count_total_p50": percentile(loan_route_motif_count_values, 0.50),
+        "loan_route_motif_voucher_to_voucher_share_p50": percentile(
+            loan_route_motif_v2v_share_values, 0.50
+        ),
+        "loan_route_motif_voucher_to_stable_share_p50": percentile(
+            loan_route_motif_v2s_share_values, 0.50
+        ),
+        "loan_route_motif_stable_involved_share_p50": percentile(
+            loan_route_motif_stable_involved_share_values, 0.50
+        ),
+        "loan_route_motif_voucher_to_voucher_volume_usd_total_p50": percentile(
+            loan_route_motif_v2v_volume_values, 0.50
+        ),
+        "loan_route_motif_voucher_to_stable_volume_usd_total_p50": percentile(
+            loan_route_motif_v2s_volume_values, 0.50
+        ),
+        "repayment_route_motif_count_total_p50": percentile(
+            repayment_route_motif_count_values, 0.50
+        ),
+        "repayment_route_motif_stable_to_voucher_share_p50": percentile(
+            repayment_route_motif_s2v_share_values, 0.50
+        ),
+        "repayment_route_motif_stable_involved_share_p50": percentile(
+            repayment_route_motif_stable_involved_share_values, 0.50
+        ),
+        "repayment_route_motif_stable_to_voucher_volume_usd_total_p50": percentile(
+            repayment_route_motif_s2v_volume_values, 0.50
         ),
         "loan_backfill_swap_count_total_p50": percentile(loan_backfill_swap_count_values, 0.50),
         "loan_backfill_swap_volume_usd_total_p50": percentile(
