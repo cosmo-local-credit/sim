@@ -8,6 +8,7 @@ from scripts.run_regenbond_monte_carlo import (
     SHARD_CONFIG_KEYS,
     bond_metrics,
     configure_sarafu_activity_controls,
+    engine_validation_moments,
     frontier_baseline_metrics,
     issuer_headroom_frontier_rows,
     load_calibration,
@@ -484,6 +485,20 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(engine._market_route_motif_count_total.get("voucher_to_voucher"), 1)
         self.assertEqual(engine._route_motif_stable_intermediate_count_total, 1)
         self.assertEqual(engine._route_context_count_tick.get("ordinary"), 2)
+        engine.snapshot_metrics(force_network=True)
+        latest = engine.metrics.network_rows[-1]
+        self.assertEqual(
+            latest["observed_route_motif_voucher_to_voucher_count_total"],
+            latest["route_motif_voucher_to_voucher_count_total"],
+        )
+        self.assertAlmostEqual(
+            latest["observed_route_motif_voucher_to_voucher_share_total"],
+            latest["route_motif_voucher_to_voucher_share_total"],
+        )
+        self.assertEqual(
+            latest["observed_route_motif_stable_intermediate_count_total"],
+            latest["route_motif_stable_intermediate_count_total"],
+        )
 
     def test_repayment_and_loan_route_motifs_are_separate_from_market_motifs(self):
         engine = SimulationEngine(
@@ -535,6 +550,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         )
 
         self.assertTrue(ok)
+        self.assertEqual(engine._route_motif_count_total.get("stable_to_voucher"), 1)
         self.assertEqual(engine._repayment_route_motif_count_total.get("stable_to_voucher"), 1)
         self.assertEqual(engine._market_route_motif_count_total.get("stable_to_voucher", 0), 0)
 
@@ -554,8 +570,73 @@ class RegenBondRevisionTests(unittest.TestCase):
         )
 
         self.assertTrue(ok)
+        self.assertEqual(engine._route_motif_count_total.get("voucher_to_stable"), 1)
         self.assertEqual(engine._loan_route_motif_count_total.get("voucher_to_stable"), 1)
         self.assertEqual(engine._market_route_motif_count_total.get("voucher_to_stable", 0), 0)
+        engine.snapshot_metrics(force_network=True)
+        latest = engine.metrics.network_rows[-1]
+        self.assertEqual(latest["observed_route_motif_stable_to_voucher_count_total"], 1)
+        self.assertEqual(latest["repayment_route_motif_stable_to_voucher_count_total"], 1)
+        self.assertEqual(latest["observed_route_motif_voucher_to_stable_count_total"], 1)
+        self.assertEqual(latest["loan_route_motif_voucher_to_stable_count_total"], 1)
+        self.assertEqual(latest["market_route_motif_stable_to_voucher_count_total"], 0)
+        self.assertEqual(latest["market_route_motif_voucher_to_stable_count_total"], 0)
+
+    def test_engine_validation_binds_ledger_observed_route_motifs(self):
+        calibration = load_calibration(Path("analysis/sarafu_calibration"))
+        circulation = calibration.voucher_circulation_baselines["trailing_90d"]
+        observed_v2v = float(circulation["voucher_to_voucher_share"])
+        observed_v2s = float(circulation["voucher_to_stable_share"])
+        observed_s2v = float(circulation["stable_to_voucher_share"])
+        summary = {
+            "observed_route_motif_voucher_to_voucher_share_total": observed_v2v,
+            "observed_route_motif_voucher_to_stable_share_total": observed_v2s,
+            "observed_route_motif_stable_to_voucher_share_total": observed_s2v,
+            "observed_route_motif_stable_involved_share_total": observed_v2s + observed_s2v,
+            "market_route_motif_voucher_to_voucher_share_total": 0.0,
+            "market_route_motif_voucher_to_stable_share_total": 1.0,
+            "market_route_motif_stable_to_voucher_share_total": 0.0,
+            "market_route_motif_stable_involved_share_total": 1.0,
+        }
+
+        rows = engine_validation_moments(calibration, [summary], ticks=52)
+        by_moment = {(row["tier"], row["moment"]): row for row in rows}
+
+        for moment in (
+            "observed_route_motif_voucher_to_voucher_share",
+            "observed_route_motif_voucher_to_stable_share",
+            "observed_route_motif_stable_to_voucher_share",
+            "observed_route_motif_stable_involved_share",
+        ):
+            row = by_moment[("all", moment)]
+            self.assertEqual(row["binding"], 1)
+            self.assertEqual(row["validation_status"], "pass")
+
+        for moment in (
+            "market_route_motif_voucher_to_voucher_share",
+            "market_route_motif_voucher_to_stable_share",
+            "market_route_motif_stable_to_voucher_share",
+            "market_route_motif_stable_involved_share",
+        ):
+            row = by_moment[("all", moment)]
+            self.assertEqual(row["binding"], 0)
+            self.assertEqual(row["category"], "purpose_diagnostic")
+            self.assertEqual(row["validation_status"], "reported")
+
+        fallback_summary = {
+            "route_motif_voucher_to_voucher_share_total": observed_v2v,
+            "route_motif_voucher_to_stable_share_total": observed_v2s,
+            "route_motif_stable_to_voucher_share_total": observed_s2v,
+            "route_motif_stable_involved_share_total": observed_v2s + observed_s2v,
+        }
+        fallback_rows = engine_validation_moments(calibration, [fallback_summary], ticks=52)
+        fallback_by_moment = {(row["tier"], row["moment"]): row for row in fallback_rows}
+        self.assertEqual(
+            fallback_by_moment[
+                ("all", "observed_route_motif_voucher_to_stable_share")
+            ]["validation_status"],
+            "pass",
+        )
 
     def test_redeem_outputs_mode_redeems_final_lender_voucher_output(self):
         engine = SimulationEngine(
@@ -944,8 +1025,14 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(obligation.debt_kind, "voucher")
         self.assertAlmostEqual(obligation.borrowed_usd, 10.0)
         self.assertAlmostEqual(obligation.remaining_voucher_units, 10.0)
+        self.assertEqual(engine._route_motif_count_total.get("voucher_to_voucher"), 1)
         self.assertEqual(engine._loan_route_motif_count_total.get("voucher_to_voucher"), 1)
         self.assertEqual(engine._market_route_motif_count_total.get("voucher_to_voucher", 0), 0)
+        engine.snapshot_metrics(force_network=True)
+        latest = engine.metrics.network_rows[-1]
+        self.assertEqual(latest["observed_route_motif_voucher_to_voucher_count_total"], 1)
+        self.assertEqual(latest["loan_route_motif_voucher_to_voucher_count_total"], 1)
+        self.assertEqual(latest["market_route_motif_voucher_to_voucher_count_total"], 0)
 
     def test_execute_route_rejects_private_wallet_hop_and_refunds_source(self):
         engine = SimulationEngine(

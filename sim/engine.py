@@ -11028,6 +11028,41 @@ class SimulationEngine:
                 "route_motif_stable_intermediate_volume_usd_total": float(
                     self._route_motif_stable_intermediate_volume_usd_total
                 ),
+                **route_motif_metric_bundle(
+                    "observed",
+                    motif_count,
+                    motif_volume,
+                    route_motif_count_tick,
+                    route_motif_count_total,
+                ),
+                "observed_route_motif_other_count_tick": motif_count("other"),
+                "observed_route_motif_other_count_total": motif_count("other", total=True),
+                "observed_route_motif_stable_involved_count_tick": (
+                    motif_count("voucher_to_stable") + motif_count("stable_to_voucher")
+                ),
+                "observed_route_motif_stable_involved_count_total": (
+                    motif_count("voucher_to_stable", total=True)
+                    + motif_count("stable_to_voucher", total=True)
+                ),
+                "observed_route_motif_stable_involved_volume_usd_tick": (
+                    motif_volume("voucher_to_stable") + motif_volume("stable_to_voucher")
+                ),
+                "observed_route_motif_stable_involved_volume_usd_total": (
+                    motif_volume("voucher_to_stable", total=True)
+                    + motif_volume("stable_to_voucher", total=True)
+                ),
+                "observed_route_motif_stable_intermediate_count_tick": int(
+                    self._route_motif_stable_intermediate_count_tick
+                ),
+                "observed_route_motif_stable_intermediate_count_total": int(
+                    self._route_motif_stable_intermediate_count_total
+                ),
+                "observed_route_motif_stable_intermediate_volume_usd_tick": float(
+                    self._route_motif_stable_intermediate_volume_usd_tick
+                ),
+                "observed_route_motif_stable_intermediate_volume_usd_total": float(
+                    self._route_motif_stable_intermediate_volume_usd_total
+                ),
                 "ordinary_route_motif_count_tick": int(ordinary_route_motif_count_tick),
                 "ordinary_route_motif_count_total": int(ordinary_route_motif_count_total),
                 "ordinary_route_motif_voucher_to_voucher_count_tick": ordinary_motif_count(

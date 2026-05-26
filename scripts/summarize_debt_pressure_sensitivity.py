@@ -8,6 +8,10 @@ from pathlib import Path
 
 
 MOMENTS = {
+    "observed_v2v": ("all", "observed_route_motif_voucher_to_voucher_share"),
+    "observed_v2s": ("all", "observed_route_motif_voucher_to_stable_share"),
+    "observed_s2v": ("all", "observed_route_motif_stable_to_voucher_share"),
+    "observed_stable_involved": ("all", "observed_route_motif_stable_involved_share"),
     "market_v2v": ("all", "market_route_motif_voucher_to_voucher_share"),
     "market_v2s": ("all", "market_route_motif_voucher_to_stable_share"),
     "market_s2v": ("all", "market_route_motif_stable_to_voucher_share"),
@@ -33,6 +37,14 @@ RUN_METRICS = (
     "producer_debt_arrears_usd",
     "producer_stable_exited_usd_total",
     "producer_stable_reuse_budget_usd_total",
+    "observed_route_motif_voucher_to_voucher_share_total",
+    "observed_route_motif_voucher_to_stable_share_total",
+    "observed_route_motif_stable_to_voucher_share_total",
+    "observed_route_motif_stable_involved_share_total",
+    "observed_route_motif_voucher_to_voucher_volume_usd_total",
+    "observed_route_motif_voucher_to_stable_volume_usd_total",
+    "observed_route_motif_stable_to_voucher_volume_usd_total",
+    "observed_route_motif_stable_involved_volume_usd_total",
     "market_route_motif_voucher_to_voucher_share_total",
     "market_route_motif_voucher_to_stable_share_total",
     "market_route_motif_stable_to_voucher_share_total",
@@ -141,15 +153,21 @@ def summarize_cell(cell_dir: Path) -> dict[str, object] | None:
         out[f"{metric}_p05"] = percentile(values, 0.05)
         out[f"{metric}_p95"] = percentile(values, 0.95)
 
-    out["v2s_accept"] = int(
-        safe_float(out.get("market_v2s_relative_error")) <= safe_float(out.get("market_v2s_tolerance"))
+    out["observed_v2s_accept"] = int(
+        safe_float(out.get("observed_v2s_relative_error"))
+        <= safe_float(out.get("observed_v2s_tolerance"))
     )
-    out["v2v_accept"] = int(
-        safe_float(out.get("market_v2v_relative_error")) <= safe_float(out.get("market_v2v_tolerance"))
+    out["observed_v2v_accept"] = int(
+        safe_float(out.get("observed_v2v_relative_error"))
+        <= safe_float(out.get("observed_v2v_tolerance"))
     )
-    out["s2v_accept"] = int(
-        safe_float(out.get("market_s2v_relative_error")) <= safe_float(out.get("market_s2v_tolerance"))
+    out["observed_s2v_accept"] = int(
+        safe_float(out.get("observed_s2v_relative_error"))
+        <= safe_float(out.get("observed_s2v_tolerance"))
     )
+    out["v2s_accept"] = out["observed_v2s_accept"]
+    out["v2v_accept"] = out["observed_v2v_accept"]
+    out["s2v_accept"] = out["observed_s2v_accept"]
     out["self_repayment_present"] = int(
         safe_float(out.get("producer_self_repayment_swap_volume_usd_total_p50")) > 1e-9
     )
@@ -196,7 +214,7 @@ def main(argv: list[str]) -> int:
 
     print(f"[sensitivity-summary] wrote {output}")
     print(
-        "capacity prepay status market_v2s loan_v2s repay_s2v self_repay_p50 "
+        "capacity prepay status observed_v2s market_subset_v2s loan_v2s repay_s2v self_repay_p50 "
         "debt_repaid_p50 arrears_p50 capacity_balance_p50 candidate"
     )
     for row in rows:
@@ -204,7 +222,8 @@ def main(argv: list[str]) -> int:
             f"{safe_float(row['capacity_share']):7.2f} "
             f"{safe_float(row['prepay_share']):6.2f} "
             f"{str(row['status']):6s} "
-            f"{safe_float(row['market_v2s_p50']):8.4f} "
+            f"{safe_float(row['observed_v2s_p50']):12.4f} "
+            f"{safe_float(row['market_v2s_p50']):17.4f} "
             f"{safe_float(row['loan_route_motif_voucher_to_stable_volume_usd_total_p50']):8.2f} "
             f"{safe_float(row['repayment_route_motif_stable_to_voucher_volume_usd_total_p50']):9.2f} "
             f"{safe_float(row['producer_self_repayment_swap_volume_usd_total_p50']):15.2f} "

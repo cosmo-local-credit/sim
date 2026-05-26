@@ -4363,6 +4363,72 @@ def run_one(
             "route_motif_stable_intermediate_volume_usd_total": latest.get(
                 "route_motif_stable_intermediate_volume_usd_total", 0.0
             ),
+            "observed_route_motif_count_total": latest.get(
+                "observed_route_motif_count_total",
+                latest.get("route_motif_count_total", 0),
+            ),
+            "observed_route_motif_voucher_to_voucher_count_total": latest.get(
+                "observed_route_motif_voucher_to_voucher_count_total",
+                latest.get("route_motif_voucher_to_voucher_count_total", 0),
+            ),
+            "observed_route_motif_voucher_to_stable_count_total": latest.get(
+                "observed_route_motif_voucher_to_stable_count_total",
+                latest.get("route_motif_voucher_to_stable_count_total", 0),
+            ),
+            "observed_route_motif_stable_to_voucher_count_total": latest.get(
+                "observed_route_motif_stable_to_voucher_count_total",
+                latest.get("route_motif_stable_to_voucher_count_total", 0),
+            ),
+            "observed_route_motif_stable_involved_count_total": latest.get(
+                "observed_route_motif_stable_involved_count_total",
+                latest.get("route_motif_voucher_to_stable_count_total", 0)
+                + latest.get("route_motif_stable_to_voucher_count_total", 0),
+            ),
+            "observed_route_motif_other_count_total": latest.get(
+                "observed_route_motif_other_count_total",
+                latest.get("route_motif_other_count_total", 0),
+            ),
+            "observed_route_motif_voucher_to_voucher_share_total": latest.get(
+                "observed_route_motif_voucher_to_voucher_share_total",
+                latest.get("route_motif_voucher_to_voucher_share_total", 0.0),
+            ),
+            "observed_route_motif_voucher_to_stable_share_total": latest.get(
+                "observed_route_motif_voucher_to_stable_share_total",
+                latest.get("route_motif_voucher_to_stable_share_total", 0.0),
+            ),
+            "observed_route_motif_stable_to_voucher_share_total": latest.get(
+                "observed_route_motif_stable_to_voucher_share_total",
+                latest.get("route_motif_stable_to_voucher_share_total", 0.0),
+            ),
+            "observed_route_motif_stable_involved_share_total": latest.get(
+                "observed_route_motif_stable_involved_share_total",
+                latest.get("route_motif_stable_involved_share_total", 0.0),
+            ),
+            "observed_route_motif_voucher_to_voucher_volume_usd_total": latest.get(
+                "observed_route_motif_voucher_to_voucher_volume_usd_total",
+                latest.get("route_motif_voucher_to_voucher_volume_usd_total", 0.0),
+            ),
+            "observed_route_motif_voucher_to_stable_volume_usd_total": latest.get(
+                "observed_route_motif_voucher_to_stable_volume_usd_total",
+                latest.get("route_motif_voucher_to_stable_volume_usd_total", 0.0),
+            ),
+            "observed_route_motif_stable_to_voucher_volume_usd_total": latest.get(
+                "observed_route_motif_stable_to_voucher_volume_usd_total",
+                latest.get("route_motif_stable_to_voucher_volume_usd_total", 0.0),
+            ),
+            "observed_route_motif_stable_involved_volume_usd_total": latest.get(
+                "observed_route_motif_stable_involved_volume_usd_total",
+                latest.get("route_motif_voucher_to_stable_volume_usd_total", 0.0)
+                + latest.get("route_motif_stable_to_voucher_volume_usd_total", 0.0),
+            ),
+            "observed_route_motif_stable_intermediate_count_total": latest.get(
+                "observed_route_motif_stable_intermediate_count_total",
+                latest.get("route_motif_stable_intermediate_count_total", 0),
+            ),
+            "observed_route_motif_stable_intermediate_volume_usd_total": latest.get(
+                "observed_route_motif_stable_intermediate_volume_usd_total",
+                latest.get("route_motif_stable_intermediate_volume_usd_total", 0.0),
+            ),
             "ordinary_route_motif_count_total": latest.get("ordinary_route_motif_count_total", 0),
             "ordinary_route_motif_voucher_to_voucher_count_total": latest.get(
                 "ordinary_route_motif_voucher_to_voucher_count_total", 0
@@ -6401,39 +6467,107 @@ def engine_validation_moments(
         ),
         (
             "all",
-            "market_route_motif_voucher_to_voucher_share",
+            "observed_route_motif_voucher_to_voucher_share",
             "settlement",
             current_circulation.get("voucher_to_voucher_share", ""),
-            [safe_float(row.get("market_route_motif_voucher_to_voucher_share_total")) for row in summaries],
+            [
+                safe_float(
+                    row.get(
+                        "observed_route_motif_voucher_to_voucher_share_total",
+                        row.get("route_motif_voucher_to_voucher_share_total"),
+                    )
+                )
+                for row in summaries
+            ],
             0.35,
             True,
+        ),
+        (
+            "all",
+            "observed_route_motif_voucher_to_stable_share",
+            "settlement",
+            current_circulation.get("voucher_to_stable_share", ""),
+            [
+                safe_float(
+                    row.get(
+                        "observed_route_motif_voucher_to_stable_share_total",
+                        row.get("route_motif_voucher_to_stable_share_total"),
+                    )
+                )
+                for row in summaries
+            ],
+            0.35,
+            True,
+        ),
+        (
+            "all",
+            "observed_route_motif_stable_to_voucher_share",
+            "settlement",
+            current_circulation.get("stable_to_voucher_share", ""),
+            [
+                safe_float(
+                    row.get(
+                        "observed_route_motif_stable_to_voucher_share_total",
+                        row.get("route_motif_stable_to_voucher_share_total"),
+                    )
+                )
+                for row in summaries
+            ],
+            0.35,
+            True,
+        ),
+        (
+            "all",
+            "observed_route_motif_stable_involved_share",
+            "settlement",
+            empirical_stable_involved_swap_share,
+            [
+                safe_float(
+                    row.get(
+                        "observed_route_motif_stable_involved_share_total",
+                        row.get("route_motif_stable_involved_share_total"),
+                    )
+                )
+                for row in summaries
+            ],
+            0.35,
+            True,
+        ),
+        (
+            "all",
+            "market_route_motif_voucher_to_voucher_share",
+            "purpose_diagnostic",
+            current_circulation.get("voucher_to_voucher_share", ""),
+            [safe_float(row.get("market_route_motif_voucher_to_voucher_share_total")) for row in summaries],
+            None,
+            False,
         ),
         (
             "all",
             "market_route_motif_voucher_to_stable_share",
-            "settlement",
+            "purpose_diagnostic",
             current_circulation.get("voucher_to_stable_share", ""),
             [safe_float(row.get("market_route_motif_voucher_to_stable_share_total")) for row in summaries],
-            0.35,
-            True,
+            None,
+            False,
         ),
         (
             "all",
             "market_route_motif_stable_to_voucher_share",
-            "settlement",
+            "purpose_diagnostic",
             current_circulation.get("stable_to_voucher_share", ""),
             [safe_float(row.get("market_route_motif_stable_to_voucher_share_total")) for row in summaries],
-            0.35,
-            True,
+            None,
+            False,
         ),
         (
             "all",
             "market_route_motif_stable_involved_share",
-            "settlement",
+            "purpose_diagnostic",
             empirical_stable_involved_swap_share,
             [safe_float(row.get("market_route_motif_stable_involved_share_total")) for row in summaries],
-            0.35,
-            True,
+            None,
+            False,
         ),
         (
             "all",
@@ -6745,6 +6879,10 @@ def write_engine_validation_table(output_dir: Path, rows: list[dict[str, object]
             "same_token_return_coverage",
             "cash_return_coverage",
             "voucher_return_coverage",
+            "observed_route_motif_voucher_to_voucher_share",
+            "observed_route_motif_voucher_to_stable_share",
+            "observed_route_motif_stable_to_voucher_share",
+            "observed_route_motif_stable_involved_share",
             "report_exposure_projection",
             "route_success_pass_rate",
             "realized_largest_component_share",
@@ -6900,6 +7038,9 @@ def write_engine_validation_notes(
         f"- Runs: {args.runs}.",
         f"- Horizon: {args.ticks} weekly ticks.",
         f"- Overall status: `{status}`.",
+        "- Settlement motif validation uses ledger-observed route motifs, matching the empirical Sarafu ledger view.",
+        "- Purpose diagnostics decompose the same route ledger into loan/credit origination, repayment, ordinary, and narrowed non-credit/purchase/circulation subsets.",
+        "- `market_route_motif_*` is reported only as the narrowed non-credit/purchase/circulation subset; it is not the binding empirical settlement gate.",
         "- Route success and connectivity are reported as non-binding diagnostics until a direct empirical route graph is calibrated.",
         "- Template validation remains the empirical calibration layer; this engine validation is the bridge to robust counterfactual bond-injection frontiers.",
         "",
@@ -6907,11 +7048,11 @@ def write_engine_validation_notes(
         "",
     ]
     if status == "pass":
-        lines.append("All binding Sarafu calibration moments are within tolerance; proceed to the bond-issuer frontier.")
+        lines.append("All binding Sarafu calibration moments, including ledger-observed settlement motifs, are within tolerance; proceed to the bond-issuer frontier.")
     elif status == "review":
         lines.append("One or more non-critical or calibration-sensitive moments are outside tolerance; review before treating frontier outputs as paper headline estimates.")
     else:
-        lines.append("One or more settlement/repayment moments materially miss calibration; do not use frontier outputs as paper headline estimates until recalibrated.")
+        lines.append("One or more ledger-observed settlement or repayment moments materially miss calibration; do not use frontier outputs as paper headline estimates until recalibrated.")
     lines.extend(
         [
             "",
@@ -6921,7 +7062,7 @@ def write_engine_validation_notes(
             "",
             "## Paper Text Hook",
             "",
-            "Sarafu provides empirical calibration; the engine reproduces key Sarafu settlement moments subject to this validation gate; then the bond-issuer frontier estimates safe non-extractive principal under current and larger connected commitment-pooling networks.",
+            "Sarafu provides empirical calibration; the engine reproduces ledger-observed Sarafu settlement motifs while separately decomposing credit-origination and debt-service purpose; then the bond-issuer frontier estimates safe non-extractive principal under current and larger connected commitment-pooling networks.",
         ]
     )
     (output_dir / "paper_integration_notes.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
