@@ -152,6 +152,8 @@ run_frontier() {
   local default_coupons="$6"
   local default_shares="$7"
   local output_dir="${OUTPUT:-$OUTPUT_ROOT/$default_output}"
+  local frontier_routing_abstraction="${FRONTIER_ROUTING_ABSTRACTION:-steward_shortlist}"
+  local frontier_relationship_refresh_ticks="${FRONTIER_RELATIONSHIP_REFRESH_TICKS:-13}"
   local frontier_extra_args=()
   if [[ -n "${PRODUCTIVE_CREDIT_VOUCHER_DEPOSIT_SHARE:-}" ]]; then
     frontier_extra_args+=(--productive-credit-voucher-deposit-share "$PRODUCTIVE_CREDIT_VOUCHER_DEPOSIT_SHARE")
@@ -263,6 +265,7 @@ run_frontier() {
   echo "[batch] primary voucher borrowing: enabled=${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-0} attempt_share=${PRODUCER_PRIMARY_VOUCHER_BORROWING_ATTEMPT_SHARE:-calibrated} producer_credit_budget_share=${PRODUCER_CREDIT_REQUEST_BUDGET_SHARE:-calibrated}"
   echo "[batch] producer voucher overlap mode: ${PRODUCER_VOUCHER_OVERLAP_MODE:-single_lender}"
   echo "[batch] lender voucher purchase demand: enabled=${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-0} attempts_per_tick=${LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK:-calibrated} consumer_share=${LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE:-calibrated} inventory_share=${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-calibrated} stable_budget_usd_per_tick=${LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK:-calibrated}"
+  echo "[batch] frontier routing abstraction: $frontier_routing_abstraction refresh_ticks=$frontier_relationship_refresh_ticks"
   run_monte_carlo "${PYTHON_BIN}" scripts/run_regenbond_monte_carlo.py \
     --scenario bond_issuer_frontier \
     --network-scales "${NETWORK_SCALES:-$default_scales}" \
@@ -272,6 +275,8 @@ run_frontier() {
     --certification-policy "${CERTIFICATION_POLICY:-strong_moderate_capped}" \
     --frontier-mode "${FRONTIER_MODE:-grid}" \
     --frontier-refinement-rounds "${FRONTIER_REFINEMENT_ROUNDS:-0}" \
+    --frontier-routing-abstraction "$frontier_routing_abstraction" \
+    --frontier-relationship-refresh-ticks "$frontier_relationship_refresh_ticks" \
     --route-success-mode "${ROUTE_SUCCESS_MODE:-diagnostic}" \
     --route-success-floor "${ROUTE_SUCCESS_FLOOR:-0.85}" \
     --bond-service-lockbox-mode "${BOND_SERVICE_LOCKBOX_MODE:-remaining_schedule}" \
