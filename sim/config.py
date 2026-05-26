@@ -156,6 +156,7 @@ class ScenarioConfig:
     settlement_motif_voucher_to_stable_share: float = 0.0
     settlement_motif_stable_to_voucher_share: float = 0.0
     settlement_motif_purchase_lane_adjustment_enabled: bool = False
+    voucher_settlement_mode: str = "redeem_outputs"  # "legacy" or "redeem_outputs"
 
     # Limits & fees
     default_window_len: int = 10

@@ -58,6 +58,7 @@ append_optional_arg SWAP_SUSTAIN_MAX_ROUNDS --swap-sustain-max-rounds
 append_optional_arg SWAP_SUSTAIN_ATTEMPTS_PER_MISSING_SWAP --swap-sustain-attempts-per-missing-swap
 append_optional_arg VOUCHER_FEE_CONVERSION_MAX_SWAPS_PER_EPOCH --voucher-fee-conversion-max-swaps-per-epoch
 append_optional_arg VOUCHER_FEE_CONVERSION_MAX_USD_PER_EPOCH --voucher-fee-conversion-max-usd-per-epoch
+append_optional_arg VOUCHER_SETTLEMENT_MODE --voucher-settlement-mode
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -96,9 +97,11 @@ echo "[batch] output_root=$OUTPUT_ROOT"
 echo "[batch] workers=$WORKERS_VALUE"
 echo "[batch] resume=${RESUME:-1}"
 echo "[batch] dry_run=${DRY_RUN:-0}"
+echo "[batch] progress_stride=${PROGRESS_STRIDE:-13} partial_aggregate_stride=$PARTIAL_AGGREGATE_STRIDE_VALUE heartbeat=60s"
 echo "[batch] route_success_mode=${ROUTE_SUCCESS_MODE:-diagnostic}"
 echo "[batch] routing_profile=max_hops:${MAX_HOPS:-3} noam_max_hops:${NOAM_MAX_HOPS:-3} overlay:${NOAM_OVERLAY_ENABLED:-1} clearing:${NOAM_CLEARING_ENABLED:-1} clearing_stride:${NOAM_CLEARING_STRIDE_TICKS:-13}"
 echo "[batch] activity_profile=decision_based:${DECISION_BASED_ACTIVITY_ENABLED:-1} repeat_partner_share:${REPEAT_PARTNER_ROUTE_SHARE:-0.70} buddy_min:${AFFINITY_BUDDY_MIN_COUNT:-1}"
+echo "[batch] voucher_settlement_mode=${VOUCHER_SETTLEMENT_MODE:-redeem_outputs}"
 echo "[batch] kes_per_usd=${KES_PER_USD:-missing}"
 echo "[batch] voucher_kes_value=${VOUCHER_KES_VALUE:-missing}"
 

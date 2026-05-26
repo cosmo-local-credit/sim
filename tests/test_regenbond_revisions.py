@@ -380,6 +380,156 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertEqual(engine._route_motif_stable_intermediate_count_total, 1)
         self.assertEqual(engine._route_context_count_tick.get("ordinary"), 2)
 
+    def test_redeem_outputs_mode_redeems_final_lender_voucher_output(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=2,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=3,
+                voucher_settlement_mode="redeem_outputs",
+                pool_fee_rate=0.02,
+                clc_rake_rate=1.0,
+            ),
+            seed=31,
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        voucher_id = producer.voucher_spec.voucher_id
+        source_pool, swap_pool = [
+            pool for pool in engine.pools.values() if pool.policy.role == "lender"
+        ]
+        for pool in (source_pool, swap_pool, producer_pool):
+            pool.values.set_value(stable_id, 1.0)
+            pool.values.set_value(voucher_id, 1.0)
+        for pool in (source_pool, swap_pool):
+            pool.list_asset_with_value_and_limit(stable_id, value=1.0, window_len=10, cap_in=500.0)
+            pool.list_asset_with_value_and_limit(voucher_id, value=1.0, window_len=10, cap_in=500.0)
+        for pool, asset_id in (
+            (source_pool, stable_id),
+            (source_pool, voucher_id),
+            (swap_pool, voucher_id),
+            (producer_pool, voucher_id),
+        ):
+            current = pool.vault.get(asset_id)
+            if current > 0.0:
+                engine._vault_sub(pool, asset_id, current, "test_clear", "test")
+        engine._vault_add(source_pool, stable_id, 20.0, "test_seed", "test")
+        engine._vault_add(swap_pool, voucher_id, 100.0, "test_seed", "test")
+        plan = RoutePlan(
+            ok=True,
+            reason="test",
+            hops=[Hop(swap_pool.pool_id, stable_id, voucher_id, 10.0)],
+        )
+
+        ok = engine.execute_route_from_pool(source_pool.pool_id, plan, 10.0)
+
+        self.assertTrue(ok)
+        self.assertAlmostEqual(source_pool.vault.get(voucher_id), 0.0)
+        self.assertAlmostEqual(producer_pool.vault.get(voucher_id), 9.8)
+        self.assertAlmostEqual(producer.issuer.issuer_returned_total, 9.8)
+        self.assertAlmostEqual(swap_pool.vault.get(voucher_id), 90.0)
+        self.assertAlmostEqual(swap_pool.fee_ledger_pool.get(voucher_id, 0.0), 0.2)
+        self.assertAlmostEqual(swap_pool.fee_ledger_clc.get(voucher_id, 0.0), 0.2)
+        self.assertAlmostEqual(engine._net_redeemed_voucher_usd_total, 9.8)
+        self.assertAlmostEqual(engine._voucher_fee_retained_for_service_usd_total, 0.2)
+        self.assertAlmostEqual(engine._debt_removal_voucher_redeemed_usd_total, 9.8)
+
+    def test_legacy_mode_keeps_final_lender_voucher_output_in_source_pool(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=2,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=3,
+                voucher_settlement_mode="legacy",
+                pool_fee_rate=0.02,
+                clc_rake_rate=1.0,
+            ),
+            seed=37,
+        )
+        stable_id = engine.cfg.stable_symbol
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        voucher_id = producer.voucher_spec.voucher_id
+        source_pool, swap_pool = [
+            pool for pool in engine.pools.values() if pool.policy.role == "lender"
+        ]
+        for pool in (source_pool, swap_pool, producer_pool):
+            pool.values.set_value(stable_id, 1.0)
+            pool.values.set_value(voucher_id, 1.0)
+        for pool in (source_pool, swap_pool):
+            pool.list_asset_with_value_and_limit(stable_id, value=1.0, window_len=10, cap_in=500.0)
+            pool.list_asset_with_value_and_limit(voucher_id, value=1.0, window_len=10, cap_in=500.0)
+        for pool, asset_id in (
+            (source_pool, stable_id),
+            (source_pool, voucher_id),
+            (swap_pool, voucher_id),
+            (producer_pool, voucher_id),
+        ):
+            current = pool.vault.get(asset_id)
+            if current > 0.0:
+                engine._vault_sub(pool, asset_id, current, "test_clear", "test")
+        engine._vault_add(source_pool, stable_id, 20.0, "test_seed", "test")
+        engine._vault_add(swap_pool, voucher_id, 100.0, "test_seed", "test")
+        plan = RoutePlan(
+            ok=True,
+            reason="test",
+            hops=[Hop(swap_pool.pool_id, stable_id, voucher_id, 10.0)],
+        )
+
+        ok = engine.execute_route_from_pool(source_pool.pool_id, plan, 10.0)
+
+        self.assertTrue(ok)
+        self.assertAlmostEqual(source_pool.vault.get(voucher_id), 9.8)
+        self.assertAlmostEqual(producer_pool.vault.get(voucher_id), 0.0)
+        self.assertAlmostEqual(producer.issuer.issuer_returned_total, 0.0)
+        self.assertAlmostEqual(engine._net_redeemed_voucher_usd_total, 0.0)
+        self.assertAlmostEqual(engine._voucher_fee_retained_for_service_usd_total, 0.2)
+
+    def test_producer_deposit_reintroduces_returned_vouchers_before_new_issuance(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+            ),
+            seed=41,
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        for pool in (producer_pool, lender_pool):
+            pool.values.set_value(voucher_id, 1.0)
+        lender_pool.list_asset_with_value_and_limit(voucher_id, value=1.0, window_len=10, cap_in=500.0)
+        for pool in (producer_pool, lender_pool):
+            current = pool.vault.get(voucher_id)
+            if current > 0.0:
+                engine._vault_sub(pool, voucher_id, current, "test_clear", "test")
+        engine._vault_add(producer_pool, voucher_id, 8.0, "redeem_receive", "test")
+        issued_before = producer.issuer.issued_total
+
+        deposited = engine._deposit_producer_voucher_with_lenders(
+            producer_pool=producer_pool,
+            agent=producer,
+            voucher_id=voucher_id,
+            voucher_value_usd=10.0,
+            source="test_deposit",
+        )
+
+        self.assertTrue(deposited)
+        self.assertAlmostEqual(producer_pool.vault.get(voucher_id), 0.0)
+        self.assertAlmostEqual(lender_pool.vault.get(voucher_id), 10.0)
+        self.assertAlmostEqual(producer.issuer.issued_total, issued_before + 2.0)
+        self.assertAlmostEqual(engine._voucher_reintroduced_by_deposit_usd_total, 8.0)
+        self.assertAlmostEqual(engine._voucher_new_issuance_deposit_usd_total, 2.0)
+
     def test_execute_route_rejects_private_wallet_hop_and_refunds_source(self):
         engine = SimulationEngine(
             small_config(
@@ -1239,6 +1389,7 @@ class RegenBondRevisionTests(unittest.TestCase):
             "swap_sustain_attempts_per_missing_swap",
             "voucher_fee_conversion_max_swaps_per_epoch",
             "voucher_fee_conversion_max_usd_per_epoch",
+            "voucher_settlement_mode",
         ):
             self.assertEqual(getattr(cfg_baseline, attr), getattr(cfg, attr))
 
@@ -1294,6 +1445,7 @@ class RegenBondRevisionTests(unittest.TestCase):
             "swap_sustain_attempts_per_missing_swap",
             "voucher_fee_conversion_max_swaps_per_epoch",
             "voucher_fee_conversion_max_usd_per_epoch",
+            "voucher_settlement_mode",
         ):
             self.assertIn(key, SHARD_CONFIG_KEYS)
 

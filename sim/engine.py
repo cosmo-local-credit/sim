@@ -324,6 +324,18 @@ class SimulationEngine:
         self._producer_stable_exited_usd_total: float = 0.0
         self._producer_stable_reuse_budget_usd_tick: float = 0.0
         self._producer_stable_reuse_budget_usd_total: float = 0.0
+        self._net_redeemed_voucher_usd_tick: float = 0.0
+        self._net_redeemed_voucher_usd_total: float = 0.0
+        self._voucher_redeemed_to_issuer_usd_tick: float = 0.0
+        self._voucher_redeemed_to_issuer_usd_total: float = 0.0
+        self._voucher_fee_retained_for_service_usd_tick: float = 0.0
+        self._voucher_fee_retained_for_service_usd_total: float = 0.0
+        self._voucher_reintroduced_by_deposit_usd_tick: float = 0.0
+        self._voucher_reintroduced_by_deposit_usd_total: float = 0.0
+        self._voucher_new_issuance_deposit_usd_tick: float = 0.0
+        self._voucher_new_issuance_deposit_usd_total: float = 0.0
+        self._debt_removal_voucher_redeemed_usd_tick: float = 0.0
+        self._debt_removal_voucher_redeemed_usd_total: float = 0.0
         self._route_context_count_tick: Dict[str, int] = {}
         self._route_context_count_total: Dict[str, int] = {}
         self._route_context_volume_usd_tick: Dict[str, float] = {}
@@ -1042,6 +1054,7 @@ class SimulationEngine:
                 )
 
         total_units = voucher_value_usd / value
+        transferred_units = 0.0
         if all(target.pool_id != producer_pool.pool_id for target in targets):
             available_units = max(0.0, producer_pool.vault.get(voucher_id))
             transferred_units = min(available_units, total_units)
@@ -1059,6 +1072,14 @@ class SimulationEngine:
         if issued_units > 1e-9:
             agent.issuer.issue(issued_units)
             self._mark_lender_voucher_limits_dirty(voucher_id)
+        reintroduced_usd = transferred_units * value
+        new_issuance_usd = issued_units * value
+        if reintroduced_usd > 1e-9:
+            self._voucher_reintroduced_by_deposit_usd_tick += reintroduced_usd
+            self._voucher_reintroduced_by_deposit_usd_total += reintroduced_usd
+        if new_issuance_usd > 1e-9:
+            self._voucher_new_issuance_deposit_usd_tick += new_issuance_usd
+            self._voucher_new_issuance_deposit_usd_total += new_issuance_usd
         units_per_target = total_units / float(len(targets))
         value_per_target = voucher_value_usd / float(len(targets))
         for target in targets:
@@ -2631,6 +2652,27 @@ class SimulationEngine:
             self._clc_pool_swapped_out_stable_total += float(receipt.amount_out)
         elif asset_out.startswith("VCHR:"):
             self._clc_pool_swapped_out_voucher_total += float(receipt.amount_out)
+
+    def _voucher_settlement_mode(self) -> str:
+        mode = str(getattr(self.cfg, "voucher_settlement_mode", "legacy") or "legacy")
+        mode = mode.strip().lower()
+        if mode not in {"legacy", "redeem_outputs"}:
+            return "legacy"
+        return mode
+
+    def _redeem_final_voucher_outputs_enabled(self) -> bool:
+        return self._voucher_settlement_mode() == "redeem_outputs"
+
+    def _record_voucher_fee_retained_for_service(self, pool: "Pool", receipt: SwapReceipt) -> None:
+        if receipt.status != "executed" or not receipt.asset_out.startswith("VCHR:"):
+            return
+        fee_units = max(0.0, float(receipt.fees.total_fee or 0.0))
+        if fee_units <= 1e-9:
+            return
+        value = self._asset_value(pool, receipt.asset_out)
+        fee_usd = fee_units * value
+        self._voucher_fee_retained_for_service_usd_tick += fee_usd
+        self._voucher_fee_retained_for_service_usd_total += fee_usd
 
     def _is_routable_pool(self, pool: "Pool") -> bool:
         return (not pool.policy.system_pool) and pool.policy.role == "lender"
@@ -7096,6 +7138,12 @@ class SimulationEngine:
             self._third_party_voucher_purchase_stable_budget_onramp_usd_tick = 0.0
             self._producer_stable_exited_usd_tick = 0.0
             self._producer_stable_reuse_budget_usd_tick = 0.0
+            self._net_redeemed_voucher_usd_tick = 0.0
+            self._voucher_redeemed_to_issuer_usd_tick = 0.0
+            self._voucher_fee_retained_for_service_usd_tick = 0.0
+            self._voucher_reintroduced_by_deposit_usd_tick = 0.0
+            self._voucher_new_issuance_deposit_usd_tick = 0.0
+            self._debt_removal_voucher_redeemed_usd_tick = 0.0
             self._route_context_count_tick = {}
             self._route_context_volume_usd_tick = {}
             self._route_context_source_stable_count_tick = {}
@@ -7750,6 +7798,19 @@ class SimulationEngine:
                 continue
             for asset_id, amount in pool.vault.inventory.items():
                 if amount <= 1e-9 or not self._is_producer_voucher(asset_id):
+                    continue
+                total += amount * self._asset_value(pool, asset_id)
+        return total
+
+    def _active_routable_producer_voucher_float_usd(self) -> float:
+        total = 0.0
+        for pool in self.pools.values():
+            if not self._is_routable_pool(pool):
+                continue
+            for asset_id, amount in pool.vault.inventory.items():
+                if amount <= 1e-9 or not self._is_producer_voucher(asset_id):
+                    continue
+                if not pool.registry.is_listed(asset_id):
                     continue
                 total += amount * self._asset_value(pool, asset_id)
         return total
@@ -8696,6 +8757,92 @@ class SimulationEngine:
             self._producer_loan_execution_failed_tick += 1
         return True
 
+    def _redeem_final_route_voucher_output(
+        self,
+        *,
+        source_pool: "Pool",
+        source_asset: str,
+        source_amount: float,
+        voucher_id: str,
+        voucher_amount: float,
+        route_context: str,
+        plan: RoutePlan,
+    ) -> bool:
+        spec = self.factory.voucher_specs.get(voucher_id)
+        issuer_id = spec.issuer_id if spec else None
+        if issuer_id not in self.agents:
+            self.log.add(Event(
+                self.tick,
+                "VOUCHER_REDEEM_FAILED",
+                pool_id=source_pool.pool_id,
+                asset_id=voucher_id,
+                amount=voucher_amount,
+                meta={"reason": "missing_issuer", "level": "error"},
+            ))
+            return False
+
+        issuer_agent = self.agents[issuer_id]
+        issuer_pool = self.pools.get(issuer_agent.pool_id)
+        if issuer_pool is None:
+            self.log.add(Event(
+                self.tick,
+                "VOUCHER_REDEEM_FAILED",
+                pool_id=source_pool.pool_id,
+                asset_id=voucher_id,
+                amount=voucher_amount,
+                meta={"reason": "missing_issuer_pool", "level": "error"},
+            ))
+            return False
+
+        self.log.add(Event(
+            self.tick,
+            "VOUCHER_EXIT_NETWORK",
+            pool_id=source_pool.pool_id,
+            asset_id=voucher_id,
+            amount=voucher_amount,
+            meta={
+                "settlement_mode": self._voucher_settlement_mode(),
+                "route_context": str(route_context or "ordinary"),
+            },
+        ))
+        issuer_agent.issuer.return_to_issuer(voucher_amount)
+        self._mark_lender_voucher_limits_dirty(voucher_id)
+        self._vault_add(issuer_pool, voucher_id, voucher_amount, "redeem_receive", source_pool.pool_id)
+
+        value = self._asset_value(issuer_pool, voucher_id)
+        redeemed_usd = voucher_amount * value
+        self._net_redeemed_voucher_usd_tick += redeemed_usd
+        self._net_redeemed_voucher_usd_total += redeemed_usd
+        self._voucher_redeemed_to_issuer_usd_tick += redeemed_usd
+        self._voucher_redeemed_to_issuer_usd_total += redeemed_usd
+        if source_asset == self.cfg.stable_symbol and self._is_producer_voucher(voucher_id):
+            self._debt_removal_voucher_redeemed_usd_tick += redeemed_usd
+            self._debt_removal_voucher_redeemed_usd_total += redeemed_usd
+
+        self._record_route_motif(
+            route_context=route_context,
+            source_pool=source_pool,
+            asset_in=source_asset,
+            asset_out=voucher_id,
+            amount_in=source_amount,
+            plan=plan,
+        )
+        self._record_route_source_net_flow(source_pool, source_asset, source_amount, -1.0)
+        self._record_route_source_net_flow(issuer_pool, voucher_id, voucher_amount, 1.0)
+        self.log.add(Event(
+            self.tick,
+            "VOUCHER_REDEEMED",
+            actor_id=issuer_id,
+            asset_id=voucher_id,
+            amount=voucher_amount,
+            meta={
+                "source_pool_id": source_pool.pool_id,
+                "redeemed_usd": redeemed_usd,
+                "settlement_mode": self._voucher_settlement_mode(),
+            },
+        ))
+        return True
+
     def execute_route_from_pool(
         self,
         source_pool_id: str,
@@ -8781,6 +8928,7 @@ class SimulationEngine:
             self._update_pool_caches(pool, receipt.asset_in, float(receipt.amount_in))
             self._update_pool_caches(pool, receipt.asset_out, -float(gross_out))
             self._record_fee_cumulative(receipt)
+            self._record_voucher_fee_retained_for_service(pool, receipt)
             self._record_recent_clc_fee(pool, receipt)
             self._record_clc_swap_cumulative(receipt)
             if (
@@ -8923,37 +9071,20 @@ class SimulationEngine:
             return False
 
         if out_asset.startswith("VCHR:"):
-            if source_pool.policy.role in ("producer", "consumer"):
-                # voucher exit (redeem to issuer)
-                self.log.add(Event(self.tick, "VOUCHER_EXIT_NETWORK", pool_id=source_pool_id, asset_id=out_asset, amount=out_amount))
-
-                spec = self.factory.voucher_specs.get(out_asset)
-                issuer_id = spec.issuer_id if spec else None
-                if issuer_id in self.agents:
-                    issuer_agent = self.agents[issuer_id]
-                    issuer_agent.issuer.return_to_issuer(out_amount)
-                    self._mark_lender_voucher_limits_dirty(out_asset)
-                    issuer_pool_id = issuer_agent.pool_id
-                    issuer_pool = self.pools.get(issuer_pool_id)
-                    if issuer_pool is not None:
-                        self._vault_add(issuer_pool, out_asset, out_amount, "redeem_receive", source_pool_id)
-                        self._record_route_motif(
-                            route_context=route_context,
-                            source_pool=source_pool,
-                            asset_in=asset_in,
-                            asset_out=out_asset,
-                            amount_in=amount_in,
-                            plan=plan,
-                        )
-                        self._record_route_source_net_flow(source_pool, asset_in, amount_in, -1.0)
-                        self._record_route_source_net_flow(issuer_pool, out_asset, out_amount, 1.0)
-                        escrow[out_asset] = 0.0
-                        self.log.add(Event(self.tick, "VOUCHER_REDEEMED", actor_id=issuer_id, asset_id=out_asset, amount=out_amount))
-                        self._noam_route_cache_store(source_pool_id, plan, amount_in)
-                        return True
-                self.log.add(Event(self.tick, "VOUCHER_REDEEM_FAILED", pool_id=source_pool_id, asset_id=out_asset, amount=out_amount,
-                                   meta={"reason": "missing_issuer", "level": "error"}))
-                return False
+            if self._redeem_final_voucher_outputs_enabled() or source_pool.policy.role in ("producer", "consumer"):
+                ok = self._redeem_final_route_voucher_output(
+                    source_pool=source_pool,
+                    source_asset=asset_in,
+                    source_amount=amount_in,
+                    voucher_id=out_asset,
+                    voucher_amount=out_amount,
+                    route_context=route_context,
+                    plan=plan,
+                )
+                if ok:
+                    escrow[out_asset] = 0.0
+                    self._noam_route_cache_store(source_pool_id, plan, amount_in)
+                return ok
             # lenders/sys_clc keep vouchers from swaps
             self._vault_add(source_pool, out_asset, out_amount, "route_deposit", "escrow")
             self._record_route_motif(
@@ -9515,6 +9646,9 @@ class SimulationEngine:
                 "lender_held_producer_voucher_inventory_usd": float(
                     self._lender_held_producer_voucher_inventory_usd()
                 ),
+                "active_routable_producer_voucher_float_usd": float(
+                    self._active_routable_producer_voucher_float_usd()
+                ),
                 **producer_voucher_overlap,
                 "consumer_stable_available_above_reserve_usd": float(
                     self._consumer_stable_available_above_reserve_usd()
@@ -9808,6 +9942,38 @@ class SimulationEngine:
                 ),
                 "producer_stable_reuse_budget_usd_total": float(
                     self._producer_stable_reuse_budget_usd_total
+                ),
+                "net_redeemed_voucher_usd_tick": float(self._net_redeemed_voucher_usd_tick),
+                "net_redeemed_voucher_usd_total": float(self._net_redeemed_voucher_usd_total),
+                "voucher_redeemed_to_issuer_usd_tick": float(
+                    self._voucher_redeemed_to_issuer_usd_tick
+                ),
+                "voucher_redeemed_to_issuer_usd_total": float(
+                    self._voucher_redeemed_to_issuer_usd_total
+                ),
+                "voucher_fee_retained_for_service_usd_tick": float(
+                    self._voucher_fee_retained_for_service_usd_tick
+                ),
+                "voucher_fee_retained_for_service_usd_total": float(
+                    self._voucher_fee_retained_for_service_usd_total
+                ),
+                "voucher_reintroduced_by_deposit_usd_tick": float(
+                    self._voucher_reintroduced_by_deposit_usd_tick
+                ),
+                "voucher_reintroduced_by_deposit_usd_total": float(
+                    self._voucher_reintroduced_by_deposit_usd_total
+                ),
+                "voucher_new_issuance_deposit_usd_tick": float(
+                    self._voucher_new_issuance_deposit_usd_tick
+                ),
+                "voucher_new_issuance_deposit_usd_total": float(
+                    self._voucher_new_issuance_deposit_usd_total
+                ),
+                "debt_removal_voucher_redeemed_usd_tick": float(
+                    self._debt_removal_voucher_redeemed_usd_tick
+                ),
+                "debt_removal_voucher_redeemed_usd_total": float(
+                    self._debt_removal_voucher_redeemed_usd_total
                 ),
                 "producer_debt_matured_usd_tick": float(self._producer_debt_matured_usd_tick),
                 "producer_debt_matured_usd_total": float(self._producer_debt_matured_usd_total),

@@ -19,7 +19,7 @@ import random
 import sys
 import time
 import traceback
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +38,7 @@ from sim.engine import SimulationEngine
 
 DEFAULT_PUBLIC_CALIBRATION_DIR = SIM_ROOT / "analysis" / "sarafu_calibration"
 DEFAULT_OUTPUT_DIR = SIM_ROOT / "analysis" / "monte_carlo"
+PARALLEL_PROGRESS_HEARTBEAT_SECONDS = 60.0
 MONTH_TICKS = 4
 YEAR_TICKS = 52
 DEFAULT_COUPONS = (0.0, 0.03, 0.06, 0.09, 0.12)
@@ -602,6 +603,15 @@ def parse_args() -> argparse.Namespace:
         help="Optional USD cap on routed voucher-fee conversion per waterfall epoch.",
     )
     parser.add_argument(
+        "--voucher-settlement-mode",
+        choices=("legacy", "redeem_outputs"),
+        default="redeem_outputs",
+        help=(
+            "Final voucher-output settlement. 'legacy' leaves lender-acquired vouchers "
+            "in inventory; 'redeem_outputs' sends net final voucher outputs to issuers."
+        ),
+    )
+    parser.add_argument(
         "--pool-metrics-stride",
         type=int,
         default=1,
@@ -811,6 +821,7 @@ SHARD_CONFIG_KEYS = (
     "swap_sustain_attempts_per_missing_swap",
     "voucher_fee_conversion_max_swaps_per_epoch",
     "voucher_fee_conversion_max_usd_per_epoch",
+    "voucher_settlement_mode",
     "pool_metrics_stride",
     "analysis_stride",
     "progress_stride",
@@ -988,6 +999,40 @@ def failed_result(job: dict[str, object], error: str) -> dict[str, object]:
     return {"status": "failed", "job": job, "error": error}
 
 
+def frontier_completed_trajectory_count(
+    *,
+    jobs: list[dict[str, object]],
+    shard_root: Path,
+    runs_per_job: int,
+    seed_base: int,
+) -> int | None:
+    if runs_per_job <= 0:
+        return None
+    completed_runs = 0
+    for job in jobs:
+        job_id = str(job.get("job_id", ""))
+        config_hash = str(job.get("config_hash", ""))
+        if not job_id or not config_hash:
+            continue
+        job_dir = shard_job_dir(shard_root, "frontier", job_id)
+        if completed_manifest(job_dir / "manifest.json", config_hash):
+            completed_runs += runs_per_job
+            continue
+        runs_dir = job_dir / "runs"
+        if not runs_dir.exists():
+            continue
+        seed_offset = int(safe_float(job.get("seed_offset")))
+        for run_idx in range(1, runs_per_job + 1):
+            seed = seed_base + seed_offset + run_idx
+            run_hash = canonical_hash(
+                {"cell_config_hash": config_hash, "run_idx": run_idx, "seed": seed}
+            )
+            run_dir = runs_dir / f"run_{run_idx:06d}"
+            if completed_manifest(run_dir / "manifest.json", run_hash):
+                completed_runs += 1
+    return completed_runs
+
+
 def run_sharded_jobs(
     *,
     label: str,
@@ -1007,6 +1052,7 @@ def run_sharded_jobs(
     completed: list[dict[str, object]] = []
     pending: list[dict[str, object]] = []
     failed: list[dict[str, object]] = []
+    outstanding_job_count = 0
 
     for job in jobs:
         config_hash = shard_job_hash(args, job)
@@ -1018,6 +1064,18 @@ def run_sharded_jobs(
                 continue
         pending.append(job)
 
+    frontier_runs_per_job = int(getattr(args, "runs", 0) or 0) if kind == "frontier" else 0
+    frontier_total_trajectories = len(jobs) * max(0, frontier_runs_per_job)
+    initial_trajectories_done = (
+        frontier_completed_trajectory_count(
+            jobs=jobs,
+            shard_root=shard_root,
+            runs_per_job=frontier_runs_per_job,
+            seed_base=int(getattr(args, "seed", 0) or 0),
+        )
+        if frontier_runs_per_job > 0
+        else None
+    )
     print(
         f"[parallel] {label}: workers={worker_count} completed={len(completed)} pending={len(pending)}",
         flush=True,
@@ -1031,6 +1089,8 @@ def run_sharded_jobs(
         total = max(1, len(jobs))
         done = len(completed) + len(failed)
         remaining = max(0, len(jobs) - done)
+        running = min(worker_count, max(0, outstanding_job_count))
+        queued = max(0, outstanding_job_count - running)
         elapsed = time.monotonic() - started_at
         processed_this_session = max(0, done - initial_done)
         eta_seconds = (
@@ -1038,19 +1098,47 @@ def run_sharded_jobs(
             if processed_this_session > 0 and remaining > 0
             else 0.0 if remaining == 0 else None
         )
+        trajectory_text = ""
+        if frontier_total_trajectories > 0 and initial_trajectories_done is not None:
+            trajectories_done = frontier_completed_trajectory_count(
+                jobs=jobs,
+                shard_root=shard_root,
+                runs_per_job=frontier_runs_per_job,
+                seed_base=int(getattr(args, "seed", 0) or 0),
+            )
+            if trajectories_done is not None:
+                trajectories_remaining = max(0, frontier_total_trajectories - trajectories_done)
+                trajectories_this_session = max(0, trajectories_done - initial_trajectories_done)
+                trajectory_eta_seconds = (
+                    trajectories_remaining * (elapsed / trajectories_this_session)
+                    if trajectories_this_session > 0 and trajectories_remaining > 0
+                    else 0.0 if trajectories_remaining == 0 else None
+                )
+                trajectory_text = (
+                    " trajectories={done}/{total} trajectory_global={pct:5.1f}% "
+                    "trajectory_eta={eta}"
+                ).format(
+                    done=trajectories_done,
+                    total=frontier_total_trajectories,
+                    pct=100.0 * trajectories_done / max(1, frontier_total_trajectories),
+                    eta=format_duration(trajectory_eta_seconds),
+                )
         print(
             "[parallel-progress] {label}: global={pct:5.1f}% done={done}/{total} "
-            "completed={completed} failed={failed} remaining={remaining} "
-            "elapsed={elapsed} eta={eta}".format(
+            "completed={completed} failed={failed} running={running} pending={pending} "
+            "remaining={remaining} elapsed={elapsed} eta={eta}{trajectory_text}".format(
                 label=label,
                 pct=100.0 * done / total,
                 done=done,
                 total=len(jobs),
                 completed=len(completed),
                 failed=len(failed),
+                running=running,
+                pending=queued,
                 remaining=remaining,
                 elapsed=format_duration(elapsed),
                 eta=format_duration(eta_seconds),
+                trajectory_text=trajectory_text,
             ),
             flush=True,
         )
@@ -1068,10 +1156,14 @@ def run_sharded_jobs(
         print(f"[parallel] {label}: {status} {job_id} ({done}/{len(jobs)})", flush=True)
         print_global_progress()
 
+    outstanding_job_count = len(pending)
+
     if worker_count == 1:
         for job in pending:
             try:
-                handle_result(worker(job, args_data, calibration, str(shard_root), bool(args.resume)))
+                result = worker(job, args_data, calibration, str(shard_root), bool(args.resume))
+                outstanding_job_count = max(0, outstanding_job_count - 1)
+                handle_result(result)
             except BaseException:
                 error = traceback.format_exc()
                 write_shard_manifest(
@@ -1081,6 +1173,7 @@ def run_sharded_jobs(
                     status="failed",
                     error=error,
                 )
+                outstanding_job_count = max(0, outstanding_job_count - 1)
                 handle_result(failed_result(job, error))
     elif pending:
         with ProcessPoolExecutor(max_workers=worker_count) as pool:
@@ -1088,20 +1181,31 @@ def run_sharded_jobs(
                 pool.submit(worker, job, args_data, calibration, str(shard_root), bool(args.resume)): job
                 for job in pending
             }
-            for future in as_completed(futures):
-                job = futures[future]
-                try:
-                    handle_result(future.result())
-                except BaseException:
-                    error = traceback.format_exc()
-                    write_shard_manifest(
-                        shard_job_dir(shard_root, kind, str(job["job_id"])),
-                        job=job,
-                        config_hash=str(job["config_hash"]),
-                        status="failed",
-                        error=error,
-                    )
-                    handle_result(failed_result(job, error))
+            outstanding = dict(futures)
+            while outstanding:
+                done_futures, _ = wait(
+                    outstanding,
+                    timeout=PARALLEL_PROGRESS_HEARTBEAT_SECONDS,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done_futures:
+                    print_global_progress()
+                    continue
+                finished = [(future, outstanding.pop(future)) for future in done_futures]
+                outstanding_job_count = len(outstanding)
+                for future, job in finished:
+                    try:
+                        handle_result(future.result())
+                    except BaseException:
+                        error = traceback.format_exc()
+                        write_shard_manifest(
+                            shard_job_dir(shard_root, kind, str(job["job_id"])),
+                            job=job,
+                            config_hash=str(job["config_hash"]),
+                            status="failed",
+                            error=error,
+                        )
+                        handle_result(failed_result(job, error))
 
     if on_progress is not None:
         on_progress(completed)
@@ -1986,6 +2090,9 @@ def scenario_config(
     cfg.frontier_relationship_refresh_ticks = max(
         1,
         int(getattr(args, "frontier_relationship_refresh_ticks", 13) or 13),
+    )
+    cfg.voucher_settlement_mode = str(
+        getattr(args, "voucher_settlement_mode", "redeem_outputs") or "redeem_outputs"
     )
     cfg.kes_per_usd = max(0.0, float(getattr(args, "_calibration_kes_per_usd", 0.0)))
     cfg.voucher_unit_value_usd = max(
@@ -3399,6 +3506,12 @@ def run_one(
             "stable_offramp_usd_tick",
             "producer_stable_exited_usd_tick",
             "producer_stable_reuse_budget_usd_tick",
+            "net_redeemed_voucher_usd_tick",
+            "voucher_redeemed_to_issuer_usd_tick",
+            "voucher_fee_retained_for_service_usd_tick",
+            "voucher_reintroduced_by_deposit_usd_tick",
+            "voucher_new_issuance_deposit_usd_tick",
+            "debt_removal_voucher_redeemed_usd_tick",
             "producer_deposit_stable_usd_tick",
             "producer_deposit_voucher_usd_tick",
             "productive_credit_inflow_usd_tick",
@@ -3874,6 +3987,9 @@ def run_one(
                 ""
                 if getattr(cfg, "voucher_fee_conversion_max_usd_per_epoch", None) is None
                 else safe_float(getattr(cfg, "voucher_fee_conversion_max_usd_per_epoch", 0.0))
+            ),
+            "configured_voucher_settlement_mode": str(
+                getattr(cfg, "voucher_settlement_mode", "legacy")
             ),
             "stable_symbol": unit_diagnostics.get("stable_symbol", ""),
             "stable_unit_value_usd": unit_diagnostics.get("stable_unit_value_usd", 1.0),
@@ -4455,6 +4571,9 @@ def run_one(
             "lender_held_producer_voucher_inventory_usd": latest.get(
                 "lender_held_producer_voucher_inventory_usd", 0.0
             ),
+            "active_routable_producer_voucher_float_usd": latest.get(
+                "active_routable_producer_voucher_float_usd", 0.0
+            ),
             "producer_voucher_overlap_mode_empirical": latest.get(
                 "producer_voucher_overlap_mode_empirical", 0
             ),
@@ -4643,6 +4762,38 @@ def run_one(
             ),
             "producer_stable_reuse_budget_usd_total": cumulative_float[
                 "producer_stable_reuse_budget_usd_tick"
+            ],
+            "net_redeemed_voucher_usd": latest.get("net_redeemed_voucher_usd_tick", 0.0),
+            "net_redeemed_voucher_usd_total": cumulative_float["net_redeemed_voucher_usd_tick"],
+            "voucher_redeemed_to_issuer_usd": latest.get(
+                "voucher_redeemed_to_issuer_usd_tick", 0.0
+            ),
+            "voucher_redeemed_to_issuer_usd_total": cumulative_float[
+                "voucher_redeemed_to_issuer_usd_tick"
+            ],
+            "voucher_fee_retained_for_service_usd": latest.get(
+                "voucher_fee_retained_for_service_usd_tick", 0.0
+            ),
+            "voucher_fee_retained_for_service_usd_total": cumulative_float[
+                "voucher_fee_retained_for_service_usd_tick"
+            ],
+            "voucher_reintroduced_by_deposit_usd": latest.get(
+                "voucher_reintroduced_by_deposit_usd_tick", 0.0
+            ),
+            "voucher_reintroduced_by_deposit_usd_total": cumulative_float[
+                "voucher_reintroduced_by_deposit_usd_tick"
+            ],
+            "voucher_new_issuance_deposit_usd": latest.get(
+                "voucher_new_issuance_deposit_usd_tick", 0.0
+            ),
+            "voucher_new_issuance_deposit_usd_total": cumulative_float[
+                "voucher_new_issuance_deposit_usd_tick"
+            ],
+            "debt_removal_voucher_redeemed_usd": latest.get(
+                "debt_removal_voucher_redeemed_usd_tick", 0.0
+            ),
+            "debt_removal_voucher_redeemed_usd_total": cumulative_float[
+                "debt_removal_voucher_redeemed_usd_tick"
             ],
             "lender_recovered_stable_usd": latest.get("lender_recovered_stable_usd_tick", 0.0),
             "lender_recovered_stable_usd_total": cumulative_float[
@@ -6847,6 +6998,8 @@ def summarize_frontier_cell(
     v2v_volume_values = [safe_float(row.get("swap_volume_vchr_to_vchr_total")) for row in rows]
     v2stable_count_values = [safe_float(row.get("swap_count_vchr_to_usd_total")) for row in rows]
     stable2v_count_values = [safe_float(row.get("swap_count_usd_to_vchr_total")) for row in rows]
+    v2stable_volume_values = [safe_float(row.get("swap_volume_vchr_to_usd_total")) for row in rows]
+    stable2v_volume_values = [safe_float(row.get("swap_volume_usd_to_vchr_total")) for row in rows]
     transaction_values = [safe_float(row.get("transactions_total")) for row in rows]
     ordinary_swap_count_values = [safe_float(row.get("ordinary_swap_count_total")) for row in rows]
     ordinary_swap_volume_values = [safe_float(row.get("ordinary_swap_volume_usd_total")) for row in rows]
@@ -7046,6 +7199,9 @@ def summarize_frontier_cell(
     lender_held_producer_voucher_inventory_values = [
         safe_float(row.get("lender_held_producer_voucher_inventory_usd")) for row in rows
     ]
+    active_routable_producer_voucher_float_values = [
+        safe_float(row.get("active_routable_producer_voucher_float_usd")) for row in rows
+    ]
     producer_voucher_multi_lender_share_values = [
         safe_float(row.get("producer_voucher_multi_lender_share")) for row in rows
     ]
@@ -7135,6 +7291,21 @@ def summarize_frontier_cell(
     producer_stable_reuse_budget_values = [
         safe_float(row.get("producer_stable_reuse_budget_usd_total")) for row in rows
     ]
+    net_redeemed_voucher_values = [
+        safe_float(row.get("net_redeemed_voucher_usd_total")) for row in rows
+    ]
+    voucher_fee_retained_for_service_values = [
+        safe_float(row.get("voucher_fee_retained_for_service_usd_total")) for row in rows
+    ]
+    voucher_reintroduced_by_deposit_values = [
+        safe_float(row.get("voucher_reintroduced_by_deposit_usd_total")) for row in rows
+    ]
+    voucher_new_issuance_deposit_values = [
+        safe_float(row.get("voucher_new_issuance_deposit_usd_total")) for row in rows
+    ]
+    debt_removal_voucher_redeemed_values = [
+        safe_float(row.get("debt_removal_voucher_redeemed_usd_total")) for row in rows
+    ]
     lender_recovered_stable_values = [
         safe_float(row.get("lender_recovered_stable_usd_total")) for row in rows
     ]
@@ -7205,6 +7376,8 @@ def summarize_frontier_cell(
     v2v_count_p50 = percentile(v2v_count_values, 0.50)
     v2v_volume_p50 = percentile(v2v_volume_values, 0.50)
     v2v_share_p50 = percentile(v2v_share_values, 0.50)
+    v2stable_volume_p50 = percentile(v2stable_volume_values, 0.50)
+    stable2v_volume_p50 = percentile(stable2v_volume_values, 0.50)
     ordinary_swap_count_p50 = percentile(ordinary_swap_count_values, 0.50)
     ordinary_swap_volume_p50 = percentile(ordinary_swap_volume_values, 0.50)
     ordinary_stable_source_count_p50 = percentile(ordinary_stable_source_count_values, 0.50)
@@ -7214,6 +7387,7 @@ def summarize_frontier_cell(
     stable_share_p50 = percentile(stable_share_values, 0.50)
     stable_share_p95 = percentile(stable_share_values, 0.95)
     voucher_share_p50 = percentile(voucher_share_values, 0.50)
+    active_routable_float_p50 = percentile(active_routable_producer_voucher_float_values, 0.50)
     stress_p50 = percentile(stress_values, 0.50)
     stress_p95 = percentile(stress_values, 0.95)
     consumer_stress_p50 = percentile(consumer_stress_values, 0.50)
@@ -7247,6 +7421,10 @@ def summarize_frontier_cell(
     baseline_stable_share_p50 = baseline.get("stable_value_share_p50", 0.0)
     baseline_stable_share_p95 = baseline.get("stable_value_share_p95", baseline_stable_share_p50)
     baseline_voucher_share_p50 = baseline.get("voucher_value_share_p50", 0.0)
+    baseline_active_routable_float_p50 = baseline.get(
+        "routable_producer_voucher_float_usd_p50",
+        0.0,
+    )
     baseline_producer_credit_capacity_p50 = baseline.get("producer_deposit_credit_capacity_usd_p50", 0.0)
     baseline_productive_credit_inflow_p50 = baseline.get("productive_credit_inflow_usd_total_p50", 0.0)
     baseline_productive_credit_stable_retained_p50 = baseline.get(
@@ -7304,6 +7482,12 @@ def summarize_frontier_cell(
     voucher_to_voucher_volume_ratio_vs_baseline = v2v_volume_p50 / max(
         1e-9, baseline_v2v_volume_p50
     )
+    active_routable_float_ratio_vs_baseline = active_routable_float_p50 / max(
+        1e-9,
+        baseline_active_routable_float_p50,
+    )
+    v2s_to_v2v_volume_ratio_p50 = v2stable_volume_p50 / max(1e-9, v2v_volume_p50)
+    s2v_to_v2v_volume_ratio_p50 = stable2v_volume_p50 / max(1e-9, v2v_volume_p50)
     route_decline = route_p50 < baseline_route_p50 - 0.05
     swap_volume_decline = baseline_swap_p50 > 0.0 and swap_p50 < baseline_swap_p50 * 0.85
     ordinary_swap_count_decline = (
@@ -7348,6 +7532,10 @@ def summarize_frontier_cell(
     voucher_value_share_decline = (
         baseline_voucher_share_p50 > 0.0 and voucher_share_p50 < max(0.0, baseline_voucher_share_p50 - 0.15)
     )
+    v2v_float_decline = (
+        baseline_active_routable_float_p50 > 0.0
+        and active_routable_float_p50 < baseline_active_routable_float_p50 * 0.85
+    )
     stable_dependency_increase = stable_dependency_delta_p95 > 0.15
     consumer_stress_increase = consumer_stress_p50 > baseline_consumer_stress_p50 + 0.05
     community_stress_increase = community_stress_p50 > baseline_community_stress_p50 + 0.05
@@ -7357,6 +7545,7 @@ def summarize_frontier_cell(
         or voucher_circulation_decline
         or stable_dependency_increase
         or voucher_value_share_decline
+        or v2v_float_decline
         or consumer_stress_increase
         or community_stress_increase
         or leakage_increase
@@ -7396,6 +7585,8 @@ def summarize_frontier_cell(
         constraints.append("p95_stable_dependency_delta")
     if voucher_value_share_decline:
         constraints.append("voucher_value_share_decline_vs_no_bond")
+    if v2v_float_decline:
+        constraints.append("routable_producer_voucher_float_decline_vs_no_bond")
     if material_decline:
         constraints.append("material_decline_vs_no_bond")
     material_reasons = []
@@ -7434,7 +7625,21 @@ def summarize_frontier_cell(
         material_reasons.append("leakage_increase")
     if voucher_value_share_decline:
         material_reasons.append("voucher_share_decline")
+    if v2v_float_decline:
+        material_reasons.append("routable_producer_voucher_float_decline")
     first = rows[0] if rows else {}
+    scheduled_payment_p05 = percentile(scheduled_payment_values, 0.05)
+    scheduled_payment_p50 = percentile(scheduled_payment_values, 0.50)
+    unpaid_claims_ratio_p95 = percentile(claims_ratios, 0.95)
+    issuer_headroom_p50 = percentile(available_service_cash_headroom_values, 0.50)
+    repayment_pass = (
+        scheduled_payment_p05 >= 1.0
+        and scheduled_payment_p50 >= 1.0
+        and unpaid_claims_ratio_p95 <= 0.01
+    )
+    headroom_pass = issuer_headroom_p50 >= 1.25
+    v2v_float_pass = not v2v_float_decline
+    strong_success = repayment_pass and headroom_pass and v2v_float_pass and not material_decline
     return {
         "scenario": "bond_issuer_frontier",
         "network_scale": first.get("network_scale", ""),
@@ -7449,12 +7654,13 @@ def summarize_frontier_cell(
             "configured_producer_voucher_debt_contract_service_margin_rate",
             first.get("configured_producer_debt_contract_service_margin_rate", 0.0),
         ),
+        "voucher_settlement_mode": first.get("configured_voucher_settlement_mode", ""),
         "principal_usd_p50": percentile(principal_values, 0.50),
         "runs": len(rows),
         "service_coverage_p05": percentile(service_values, 0.05),
         "service_coverage_p50": percentile(service_values, 0.50),
-        "scheduled_payment_coverage_p05": percentile(scheduled_payment_values, 0.05),
-        "scheduled_payment_coverage_p50": percentile(scheduled_payment_values, 0.50),
+        "scheduled_payment_coverage_p05": scheduled_payment_p05,
+        "scheduled_payment_coverage_p50": scheduled_payment_p50,
         "service_cash_headroom_p05": percentile(service_cash_headroom_values, 0.05),
         "service_cash_headroom_p50": percentile(service_cash_headroom_values, 0.50),
         "gross_historical_service_cash_headroom_p05": percentile(service_cash_headroom_values, 0.05),
@@ -7468,9 +7674,7 @@ def summarize_frontier_cell(
         "issuer_operating_risk_headroom_p05": percentile(
             available_service_cash_headroom_values, 0.05
         ),
-        "issuer_operating_risk_headroom_p50": percentile(
-            available_service_cash_headroom_values, 0.50
-        ),
+        "issuer_operating_risk_headroom_p50": issuer_headroom_p50,
         "issuer_operating_risk_headroom_ge_125": int(
             percentile(available_service_cash_headroom_values, 0.50) >= 1.25
         ),
@@ -7539,7 +7743,7 @@ def summarize_frontier_cell(
         "community_stress_delta_p95": community_stress_delta_p95,
         "liquidity_leakage_p95": leakage_p95,
         "liquidity_leakage_delta_p95": leakage_delta_p95,
-        "unpaid_claims_ratio_p95": percentile(claims_ratios, 0.95),
+        "unpaid_claims_ratio_p95": unpaid_claims_ratio_p95,
         "realized_edge_concentration_p95": percentile(concentration_values, 0.95),
         "swap_volume_usd_total_p50": swap_p50,
         "swap_volume_ratio_vs_baseline": swap_volume_ratio_vs_baseline,
@@ -7603,9 +7807,17 @@ def summarize_frontier_cell(
         "voucher_to_voucher_share_p50": v2v_share_p50,
         "voucher_to_stable_count_p50": percentile(v2stable_count_values, 0.50),
         "stable_to_voucher_count_p50": percentile(stable2v_count_values, 0.50),
+        "voucher_to_stable_volume_p50": v2stable_volume_p50,
+        "stable_to_voucher_volume_p50": stable2v_volume_p50,
+        "v2s_to_v2v_volume_ratio_p50": v2s_to_v2v_volume_ratio_p50,
+        "s2v_to_v2v_volume_ratio_p50": s2v_to_v2v_volume_ratio_p50,
         "stable_value_share_p50": stable_share_p50,
         "stable_value_share_p95": stable_share_p95,
         "voucher_value_share_p50": voucher_share_p50,
+        "active_routable_producer_voucher_float_usd_p50": active_routable_float_p50,
+        "active_routable_producer_voucher_float_ratio_vs_baseline": (
+            active_routable_float_ratio_vs_baseline
+        ),
         "stable_to_voucher_value_ratio_p50": percentile(stable_to_voucher_ratio_values, 0.50),
         "producer_debt_matured_usd_total_p50": percentile(producer_debt_matured_values, 0.50),
         "producer_debt_repaid_usd_total_p50": percentile(producer_debt_repaid_values, 0.50),
@@ -7813,6 +8025,27 @@ def summarize_frontier_cell(
         "producer_stable_reuse_budget_usd_total_p50": percentile(
             producer_stable_reuse_budget_values, 0.50
         ),
+        "net_redeemed_voucher_usd_total_p50": percentile(net_redeemed_voucher_values, 0.50),
+        "voucher_fee_retained_for_service_usd_total_p50": percentile(
+            voucher_fee_retained_for_service_values,
+            0.50,
+        ),
+        "voucher_reintroduced_by_deposit_usd_total_p50": percentile(
+            voucher_reintroduced_by_deposit_values,
+            0.50,
+        ),
+        "voucher_new_issuance_deposit_usd_total_p50": percentile(
+            voucher_new_issuance_deposit_values,
+            0.50,
+        ),
+        "debt_removal_voucher_redeemed_usd_total_p50": percentile(
+            debt_removal_voucher_redeemed_values,
+            0.50,
+        ),
+        "repayment_pressure_to_v2v_volume_ratio_p50": (
+            percentile(debt_removal_voucher_redeemed_values, 0.50)
+            / max(1e-9, v2v_volume_p50)
+        ),
         "lender_recovered_stable_usd_total_p50": percentile(lender_recovered_stable_values, 0.50),
         "bond_eligible_pool_exposure_recovered_stable_usd_total_p50": percentile(
             bond_eligible_recovered_stable_values, 0.50
@@ -7886,6 +8119,9 @@ def summarize_frontier_cell(
         "baseline_stable_value_share_p50": baseline_stable_share_p50,
         "baseline_stable_value_share_p95": baseline_stable_share_p95,
         "baseline_voucher_value_share_p50": baseline_voucher_share_p50,
+        "baseline_active_routable_producer_voucher_float_usd_p50": (
+            baseline_active_routable_float_p50
+        ),
         "baseline_household_cash_stress_p50": baseline_stress_p50,
         "baseline_household_cash_stress_p95": baseline_stress_p95,
         "baseline_consumer_cash_stress_p50": baseline_consumer_stress_p50,
@@ -7945,6 +8181,7 @@ def summarize_frontier_cell(
         "material_decline_community_stress_increase": int(community_stress_increase),
         "material_decline_leakage_increase": int(leakage_increase),
         "material_decline_voucher_share_decline": int(voucher_value_share_decline),
+        "material_decline_routable_producer_voucher_float_decline": int(v2v_float_decline),
         "material_decline_reasons": ";".join(material_reasons),
         "diagnostic_decline_reasons": ";".join(diagnostic_reasons),
         "voucher_to_voucher_count_decline_vs_no_bond": int(v2v_count_decline),
@@ -7957,7 +8194,12 @@ def summarize_frontier_cell(
             ordinary_voucher_source_volume_decline
         ),
         "voucher_value_share_decline_vs_no_bond": int(voucher_value_share_decline),
+        "routable_producer_voucher_float_decline_vs_no_bond": int(v2v_float_decline),
         "material_decline_vs_no_bond": int(material_decline),
+        "repayment_pass": int(repayment_pass),
+        "headroom_pass": int(headroom_pass),
+        "v2v_float_pass": int(v2v_float_pass),
+        "strong_success": int(strong_success),
         "safe": int(not constraints),
         "binding_constraint": ";".join(constraints),
     }
@@ -8123,6 +8365,134 @@ def _draw_binding_constraint_heatmap(
     image.convert("RGB").save(path)
 
 
+def _draw_frontier_scatter(
+    path: Path,
+    title: str,
+    subtitle: str,
+    safety_rows: list[dict[str, object]],
+    *,
+    x_field: str,
+    y_field: str,
+    x_label: str,
+    y_label: str,
+) -> None:
+    from PIL import Image, ImageDraw
+
+    points = [
+        (
+            safe_float(row.get(x_field)),
+            safe_float(row.get(y_field)),
+            int(row.get("strong_success", row.get("safe", 0))) == 1,
+        )
+        for row in safety_rows
+        if math.isfinite(safe_float(row.get(x_field))) and math.isfinite(safe_float(row.get(y_field)))
+    ]
+    if not points:
+        return
+    width, height = 1200, 780
+    left, right, top, bottom = 120, 80, 120, 110
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    max_x = max(1e-9, max(point[0] for point in points))
+    max_y = max(1e-9, max(point[1] for point in points))
+    image = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(image, "RGBA")
+    title_font = _load_font(28)
+    subtitle_font = _load_font(17)
+    label_font = _load_font(16)
+    axis_font = _load_font(14)
+    _draw_text(draw, (left, 32), title, title_font)
+    _draw_text(draw, (left, 68), subtitle, subtitle_font, fill=(80, 80, 80))
+    draw.rectangle((left, top, left + plot_w, top + plot_h), outline=(210, 210, 210), width=1)
+    for idx in range(6):
+        x = left + plot_w * idx / 5
+        y = top + plot_h * idx / 5
+        draw.line((x, top, x, top + plot_h), fill=(235, 235, 235), width=1)
+        draw.line((left, y, left + plot_w, y), fill=(235, 235, 235), width=1)
+        _draw_text(
+            draw,
+            (int(x), top + plot_h + 12),
+            _fmt_plot_value(max_x * idx / 5),
+            axis_font,
+            fill=(70, 70, 70),
+            anchor="ma",
+        )
+        _draw_text(
+            draw,
+            (left - 12, int(top + plot_h - plot_h * idx / 5) - 7),
+            _fmt_plot_value(max_y * idx / 5),
+            axis_font,
+            fill=(70, 70, 70),
+            anchor="rm",
+        )
+    for x_value, y_value, passed in points:
+        x = left + plot_w * min(1.0, max(0.0, x_value / max_x))
+        y = top + plot_h - plot_h * min(1.0, max(0.0, y_value / max_y))
+        color = (39, 137, 89, 220) if passed else (204, 86, 70, 210)
+        draw.ellipse((x - 6, y - 6, x + 6, y + 6), fill=color, outline=(255, 255, 255, 230))
+    _draw_text(draw, (left + plot_w // 2, height - 58), x_label, label_font, anchor="ma")
+    _draw_text(draw, (28, top + plot_h // 2), y_label, label_font)
+    _draw_text(draw, (width - 265, 38), "green: strong success", axis_font, fill=(39, 137, 89))
+    _draw_text(draw, (width - 265, 62), "red: constrained", axis_font, fill=(204, 86, 70))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.convert("RGB").save(path)
+
+
+def _draw_coupon_principal_grid(path: Path, safety_rows: list[dict[str, object]]) -> None:
+    from PIL import Image, ImageDraw
+
+    coupons = sorted({safe_float(row.get("coupon_target_annual")) for row in safety_rows})
+    ratios = sorted({safe_float(row.get("principal_ratio")) for row in safety_rows})
+    if not coupons or not ratios:
+        return
+    scale = str(safety_rows[0].get("network_scale", ""))
+    rows = [row for row in safety_rows if str(row.get("network_scale", "")) == scale]
+    if not rows:
+        return
+    by_key = {
+        (safe_float(row.get("coupon_target_annual")), safe_float(row.get("principal_ratio"))): row
+        for row in rows
+    }
+    cell_w, cell_h = 90, 48
+    left, top = 150, 120
+    width = left + cell_w * len(ratios) + 80
+    height = top + cell_h * len(coupons) + 90
+    image = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(image, "RGBA")
+    title_font = _load_font(26)
+    subtitle_font = _load_font(16)
+    axis_font = _load_font(14)
+    _draw_text(draw, (left, 30), "Coupon/Principal Outcome Grid", title_font)
+    _draw_text(
+        draw,
+        (left, 64),
+        f"Scale {scale}; green strong success, amber repayment/headroom only, red constrained.",
+        subtitle_font,
+        fill=(80, 80, 80),
+    )
+    for col, ratio in enumerate(ratios):
+        _draw_text(draw, (left + col * cell_w + cell_w // 2, top - 20), f"{ratio:.2f}", axis_font, anchor="ma")
+    for row_idx, coupon in enumerate(coupons):
+        y = top + row_idx * cell_h
+        _draw_text(draw, (left - 14, y + cell_h // 2 - 7), fmt_pct(coupon), axis_font, anchor="rm")
+        for col, ratio in enumerate(ratios):
+            x = left + col * cell_w
+            row = by_key.get((coupon, ratio), {})
+            if int(row.get("strong_success", 0)) == 1:
+                color = (60, 150, 100, 255)
+            elif int(row.get("repayment_pass", 0)) == 1 and int(row.get("headroom_pass", 0)) == 1:
+                color = (221, 169, 72, 255)
+            elif row:
+                color = (210, 92, 80, 255)
+            else:
+                color = (230, 230, 230, 255)
+            draw.rectangle((x, y, x + cell_w - 6, y + cell_h - 6), fill=color, outline=(255, 255, 255))
+    _draw_text(draw, (left + cell_w * len(ratios) // 2, height - 45), "principal/certified-capacity ratio", axis_font, anchor="ma")
+    _draw_text(draw, (26, top + cell_h * len(coupons) // 2), "coupon", axis_font)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.convert("RGB").save(path)
+
+
 def write_frontier_figures(
     output_dir: Path,
     frontier_rows: list[dict[str, object]],
@@ -8157,6 +8527,27 @@ def write_frontier_figures(
         ],
     )
     _draw_binding_constraint_heatmap(output_dir / "fig_binding_constraints_heatmap.png", safety_rows)
+    _draw_frontier_scatter(
+        output_dir / "fig_v2s_s2v_vs_v2v_phase_space.png",
+        "Stable/Voucher Flow Phase Space",
+        "Each point is a frontier cell; axes normalize stable-involved flow by voucher-to-voucher volume.",
+        safety_rows,
+        x_field="v2s_to_v2v_volume_ratio_p50",
+        y_field="s2v_to_v2v_volume_ratio_p50",
+        x_label="V2S / V2V volume",
+        y_label="S2V / V2V volume",
+    )
+    _draw_frontier_scatter(
+        output_dir / "fig_repayment_pressure_vs_voucher_float.png",
+        "Repayment Pressure and Routable Voucher Float",
+        "Each point is a frontier cell; voucher float is the active lender-held producer-voucher inventory.",
+        safety_rows,
+        x_field="repayment_pressure_to_v2v_volume_ratio_p50",
+        y_field="active_routable_producer_voucher_float_ratio_vs_baseline",
+        x_label="debt-removal redeemed voucher / V2V volume",
+        y_label="routable producer-voucher float / no-bond baseline",
+    )
+    _draw_coupon_principal_grid(output_dir / "fig_coupon_principal_outcome_grid.png", safety_rows)
 
 
 def write_frontier_notes(output_dir: Path, args: argparse.Namespace, summary_rows: list[dict[str, object]]) -> None:
@@ -8170,6 +8561,7 @@ def write_frontier_notes(output_dir: Path, args: argparse.Namespace, summary_row
         f"- Term: {selected_terms(args)[0] if selected_terms(args) else args.ticks} weekly ticks.",
         f"- Full engine-validation gate status: `{validation_status}`.",
         f"- Frontier mode: `{args.frontier_mode}` with {args.frontier_refinement_rounds} refinement round(s).",
+        f"- Voucher settlement mode: `{getattr(args, 'voucher_settlement_mode', 'redeem_outputs')}`.",
         f"- Certification policy: `{args.certification_policy}`.",
         "- Issuer reserve share: 0.00%; the frontier setup deploys 100% of gross principal directly to lender pools.",
         f"- Issuer payment stride: {args.issuer_payment_stride} weekly ticks.",
@@ -8179,8 +8571,9 @@ def write_frontier_notes(output_dir: Path, args: argparse.Namespace, summary_row
         "",
         "## Non-Extraction Gate",
         "",
-        "A cell is safe only when scheduled bond payments clear, voucher-to-voucher circulation preservation, active-pool stable-dependency limits, incremental household or community cash stress, incremental liquidity leakage, unpaid claims, edge concentration, and matched no-bond degradation tests all pass.",
+        "A cell is safe only when scheduled bond payments clear, voucher-to-voucher circulation preservation, active routable producer-voucher float, active-pool stable-dependency limits, incremental household or community cash stress, incremental liquidity leakage, unpaid claims, edge concentration, and matched no-bond degradation tests all pass.",
         "Available service-cash headroom is reported separately as issuer operating and risk-capital capacity. The 1.25x threshold is an issuer-headroom frontier, not an additional bondholder-payment requirement.",
+        "In `redeem_outputs` mode, net final voucher outputs leave routing liquidity and are returned to issuers; voucher-denominated swap fees remain in fee ledgers for the existing fee-conversion service path.",
         "- The route-success floor is a model settlement-reliability sensitivity parameter, not a direct empirical Sarafu failed-route scalar.",
         "- Voucher-to-voucher count and share are compared against the matched no-bond baseline to protect the empirically observed ROLA-like settlement motif.",
         "- Stable value share and voucher value share in active pools are compared against the matched no-bond baseline so stable/bond injections do not crowd out voucher-backed settlement capacity.",
@@ -8419,6 +8812,10 @@ def frontier_baseline_metrics(baseline_rows: list[dict[str, object]]) -> dict[st
         ),
         "voucher_value_share_p50": percentile(
             [safe_float(row.get("voucher_value_share_in_active_pools")) for row in baseline_rows], 0.50
+        ),
+        "routable_producer_voucher_float_usd_p50": percentile(
+            [safe_float(row.get("active_routable_producer_voucher_float_usd")) for row in baseline_rows],
+            0.50,
         ),
         "household_cash_stress_p50": percentile(
             [safe_float(row.get("household_cash_stress_ratio")) for row in baseline_rows], 0.50
@@ -8780,6 +9177,7 @@ def run_frontier_cell_shard(
         if completed is not None:
             return completed
     started_at = time.time()
+    cell_started_at = time.monotonic()
     try:
         args = namespace_from_payload(args_data)
         apply_unit_normalization_context(args, calibration)
@@ -8804,7 +9202,33 @@ def run_frontier_cell_shard(
         args._current_certified_pool_count = capacity["certified_pool_count"]
         args._current_certified_capacity_usd = capacity["certified_backing_capacity_usd"]
         rows: list[dict[str, object]] = []
-        for run_idx in range(1, int(args.runs) + 1):
+        total_runs = int(args.runs)
+        completed_this_session = 0
+
+        def print_cell_progress() -> None:
+            done_in_cell = len(rows)
+            elapsed = time.monotonic() - cell_started_at
+            remaining = max(0, total_runs - done_in_cell)
+            eta_seconds = (
+                remaining * (elapsed / completed_this_session)
+                if completed_this_session > 0 and remaining > 0
+                else 0.0 if remaining == 0 else None
+            )
+            print(
+                "[cell-progress] job={job_id} run={done}/{total} cell_pct={pct:5.1f}% "
+                "completed_this_session={session_done} elapsed={elapsed} eta={eta}".format(
+                    job_id=job.get("job_id", "?"),
+                    done=done_in_cell,
+                    total=total_runs,
+                    pct=100.0 * done_in_cell / max(1, total_runs),
+                    session_done=completed_this_session,
+                    elapsed=format_duration(elapsed),
+                    eta=format_duration(eta_seconds),
+                ),
+                flush=True,
+            )
+
+        for run_idx in range(1, total_runs + 1):
             seed = int(args.seed) + seed_offset + run_idx
             run_hash = canonical_hash({"cell_config_hash": config_hash, "run_idx": run_idx, "seed": seed})
             run_dir = job_dir / "runs" / f"run_{run_idx:06d}"
@@ -8845,6 +9269,8 @@ def run_frontier_cell_shard(
                 files={"summary": 1},
             )
             rows.append(summary)
+            completed_this_session += 1
+            print_cell_progress()
         rows = sorted_run_rows(rows)
         write_rows(job_dir / "rows.csv", rows)
         write_shard_manifest(
@@ -9248,6 +9674,20 @@ def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration,
             for coupon in coupons:
                 for service_share in service_shares:
                     grid_jobs.append(make_cell_job("grid", scale, ratio, coupon, service_share))
+    total_initial_cells = len(baseline_jobs) + len(grid_jobs)
+    runs_per_cell = int(args.runs)
+    print(
+        "[frontier-progress] total_cells={cells} runs_per_cell={runs} "
+        "total_trajectories={trajectories} progress_stride={progress_stride} "
+        "heartbeat={heartbeat}".format(
+            cells=total_initial_cells,
+            runs=runs_per_cell,
+            trajectories=total_initial_cells * runs_per_cell,
+            progress_stride=int(getattr(args, "progress_stride", 0) or 0),
+            heartbeat=format_duration(PARALLEL_PROGRESS_HEARTBEAT_SECONDS),
+        ),
+        flush=True,
+    )
 
     def safety_for_completed(
         baseline_results: list[dict[str, object]],
