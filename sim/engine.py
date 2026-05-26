@@ -68,6 +68,7 @@ class ProducerDebtObligation:
     cash_service_remaining_usd: float = 0.0
     cash_service_arrears_usd: float = 0.0
     cash_service_penalty_remaining_usd: float = 0.0
+    pressure_deferred_usd: float = 0.0
     last_pressure_due_tick: int = -1
 
 class SimulationEngine:
@@ -255,6 +256,12 @@ class SimulationEngine:
         self._producer_self_repayment_voucher_removed_usd_total: float = 0.0
         self._producer_debt_pressure_prepayment_usd_tick: float = 0.0
         self._producer_debt_pressure_prepayment_usd_total: float = 0.0
+        self._producer_debt_pressure_deferred_usd_tick: float = 0.0
+        self._producer_debt_pressure_deferred_usd_total: float = 0.0
+        self._producer_debt_pressure_batched_swap_count_tick: int = 0
+        self._producer_debt_pressure_batched_swap_count_total: int = 0
+        self._producer_debt_pressure_batched_swap_volume_usd_tick: float = 0.0
+        self._producer_debt_pressure_batched_swap_volume_usd_total: float = 0.0
         self._producer_debt_penalty_accrued_usd_tick: float = 0.0
         self._producer_debt_penalty_accrued_usd_total: float = 0.0
         self._producer_debt_penalty_paid_usd_tick: float = 0.0
@@ -2841,6 +2848,8 @@ class SimulationEngine:
         asset_in: str,
         route_context: str,
     ) -> bool:
+        if bool(getattr(self.cfg, "ordinary_own_voucher_stable_borrowing_enabled", False)):
+            return False
         return (
             str(route_context or "ordinary") == "ordinary"
             and self._is_producer_own_voucher(source_pool, asset_in)
@@ -4339,9 +4348,21 @@ class SimulationEngine:
             configured = int(getattr(self.cfg, "loan_activity_period_ticks", MONTH_TICKS) or MONTH_TICKS)
         return max(1, configured)
 
+    def _producer_debt_pressure_batching_enabled(self) -> bool:
+        return bool(getattr(self.cfg, "producer_debt_pressure_batching_enabled", False))
+
+    def _producer_debt_pressure_min_swap_usd(self) -> float:
+        return max(0.0, float(getattr(self.cfg, "producer_debt_pressure_min_swap_usd", 0.0) or 0.0))
+
     def _producer_debt_arrears_usd(self) -> float:
         return sum(
             max(0.0, float(getattr(obligation, "cash_service_arrears_usd", 0.0) or 0.0))
+            for obligation in self._producer_debt_obligations
+        )
+
+    def _producer_debt_pressure_deferred_balance_usd(self) -> float:
+        return sum(
+            max(0.0, float(getattr(obligation, "pressure_deferred_usd", 0.0) or 0.0))
             for obligation in self._producer_debt_obligations
         )
 
@@ -7265,6 +7286,9 @@ class SimulationEngine:
             self._producer_self_repayment_swap_volume_usd_tick = 0.0
             self._producer_self_repayment_voucher_removed_usd_tick = 0.0
             self._producer_debt_pressure_prepayment_usd_tick = 0.0
+            self._producer_debt_pressure_deferred_usd_tick = 0.0
+            self._producer_debt_pressure_batched_swap_count_tick = 0
+            self._producer_debt_pressure_batched_swap_volume_usd_tick = 0.0
             self._producer_debt_penalty_accrued_usd_tick = 0.0
             self._producer_debt_penalty_paid_usd_tick = 0.0
             self._producer_loan_attempts_tick = 0
@@ -8716,6 +8740,156 @@ class SimulationEngine:
         ))
         return spend_usd
 
+    def _producer_debt_pressure_group_remaining_usd(
+        self,
+        obligations: list[ProducerDebtObligation],
+    ) -> float:
+        total = 0.0
+        for obligation in obligations:
+            remaining_cash = max(0.0, float(obligation.cash_service_remaining_usd))
+            remaining_voucher_usd = max(
+                0.0,
+                obligation.remaining_voucher_units * self._producer_debt_unit_value(obligation),
+            )
+            total += max(remaining_cash, remaining_voucher_usd)
+        return total
+
+    def _producer_debt_pressure_add_due_to_deferred(
+        self,
+        obligation: ProducerDebtObligation,
+        due_usd: float,
+    ) -> None:
+        due = max(0.0, float(due_usd))
+        if due <= 1e-9:
+            return
+        obligation.pressure_deferred_usd = (
+            max(0.0, float(getattr(obligation, "pressure_deferred_usd", 0.0) or 0.0))
+            + due
+        )
+        self._producer_debt_pressure_deferred_usd_tick += due
+        self._producer_debt_pressure_deferred_usd_total += due
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_DEBT_PRESSURE_DEFERRED",
+            pool_id=obligation.producer_pool_id,
+            asset_id=obligation.voucher_id,
+            amount=due,
+            meta={
+                "obligation_id": obligation.obligation_id,
+                "lender_pool_id": obligation.lender_pool_id,
+                "deferred_balance_usd": obligation.pressure_deferred_usd,
+            },
+        ))
+
+    def _attempt_debt_pressure_repayment_batched(
+        self,
+        source_pool: "Pool",
+        obligations: list[ProducerDebtObligation],
+        period: int,
+    ) -> bool:
+        min_swap_usd = self._producer_debt_pressure_min_swap_usd()
+        obligations_by_lender: Dict[str, list[ProducerDebtObligation]] = {}
+        attempted = False
+        paid_any = False
+        for obligation in obligations:
+            if obligation.last_pressure_due_tick == self.tick:
+                continue
+            due_usd = self._producer_debt_pressure_due_usd(obligation, period)
+            obligation.last_pressure_due_tick = self.tick
+            if due_usd <= 1e-9:
+                continue
+            attempted = True
+            self._producer_debt_pressure_add_due_to_deferred(obligation, due_usd)
+            obligations_by_lender.setdefault(obligation.lender_pool_id, []).append(obligation)
+
+        for obligation in obligations:
+            if max(0.0, float(getattr(obligation, "pressure_deferred_usd", 0.0) or 0.0)) <= 1e-9:
+                continue
+            obligations_by_lender.setdefault(obligation.lender_pool_id, []).append(obligation)
+
+        for lender_pool_id, lender_obligations in obligations_by_lender.items():
+            unique: dict[int, ProducerDebtObligation] = {
+                obligation.obligation_id: obligation for obligation in lender_obligations
+            }
+            group = sorted(unique.values(), key=self._producer_debt_obligation_sort_key)
+            group_deferred_usd = sum(
+                max(0.0, float(getattr(obligation, "pressure_deferred_usd", 0.0) or 0.0))
+                for obligation in group
+            )
+            if group_deferred_usd <= 1e-9:
+                continue
+            force_settle = any(obligation.due_tick <= self.tick for obligation in group)
+            if min_swap_usd > 1e-9 and group_deferred_usd + 1e-9 < min_swap_usd and not force_settle:
+                continue
+
+            available_usd = self._producer_debt_pressure_stable_available_usd(source_pool)
+            prepay_share = max(
+                0.0,
+                min(1.0, float(getattr(self.cfg, "producer_debt_pressure_prepay_share", 0.10) or 0.0)),
+            )
+            remaining_after_deferred = max(
+                0.0,
+                self._producer_debt_pressure_group_remaining_usd(group) - group_deferred_usd,
+            )
+            prepay_target_usd = min(
+                remaining_after_deferred,
+                max(0.0, available_usd - group_deferred_usd) * prepay_share,
+            )
+            target_usd = group_deferred_usd + prepay_target_usd
+            representative = group[0]
+            paid = self._execute_producer_self_repayment_swap(
+                source_pool,
+                representative,
+                target_usd,
+                "batched_due_and_prepayment" if prepay_target_usd > 1e-9 else "batched_scheduled_due",
+            )
+            if paid > 1e-9:
+                paid_any = True
+                self._producer_debt_pressure_batched_swap_count_tick += 1
+                self._producer_debt_pressure_batched_swap_count_total += 1
+                self._producer_debt_pressure_batched_swap_volume_usd_tick += paid
+                self._producer_debt_pressure_batched_swap_volume_usd_total += paid
+
+            remaining_paid = paid
+            for obligation in group:
+                deferred = max(
+                    0.0,
+                    float(getattr(obligation, "pressure_deferred_usd", 0.0) or 0.0),
+                )
+                if deferred <= 1e-9:
+                    continue
+                applied = min(deferred, remaining_paid)
+                remaining_paid = max(0.0, remaining_paid - applied)
+                obligation.pressure_deferred_usd = 0.0
+                self._record_producer_debt_pressure_payment_allocation(
+                    obligation,
+                    applied,
+                    deferred,
+                )
+
+            prepay_paid = max(0.0, paid - group_deferred_usd)
+            if prepay_paid > 1e-9:
+                self._producer_debt_pressure_prepayment_usd_tick += prepay_paid
+                self._producer_debt_pressure_prepayment_usd_total += prepay_paid
+
+            self.log.add(Event(
+                self.tick,
+                "PRODUCER_DEBT_PRESSURE_BATCH_SETTLED",
+                pool_id=lender_pool_id,
+                asset_id=representative.voucher_id,
+                amount=paid,
+                meta={
+                    "producer_pool_id": source_pool.pool_id,
+                    "scheduled_deferred_usd": group_deferred_usd,
+                    "prepay_target_usd": prepay_target_usd,
+                    "min_swap_usd": min_swap_usd,
+                    "force_settle": force_settle,
+                    "obligation_count": len(group),
+                },
+            ))
+
+        return attempted or paid_any
+
     def _attempt_debt_pressure_repayment(
         self,
         source_pool: "Pool",
@@ -8736,6 +8910,8 @@ class SimulationEngine:
         ]
         if not obligations:
             return False
+        if self._producer_debt_pressure_batching_enabled():
+            return self._attempt_debt_pressure_repayment_batched(source_pool, obligations, period)
         attempted = False
         paid_any = False
         for obligation in obligations:
@@ -10425,6 +10601,33 @@ class SimulationEngine:
                 ),
                 "producer_debt_pressure_prepayment_usd_total": float(
                     self._producer_debt_pressure_prepayment_usd_total
+                ),
+                "producer_debt_pressure_deferred_usd_tick": float(
+                    self._producer_debt_pressure_deferred_usd_tick
+                ),
+                "producer_debt_pressure_deferred_usd_total": float(
+                    self._producer_debt_pressure_deferred_usd_total
+                ),
+                "producer_debt_pressure_deferred_balance_usd": float(
+                    self._producer_debt_pressure_deferred_balance_usd()
+                ),
+                "producer_debt_pressure_batched_swap_count_tick": int(
+                    self._producer_debt_pressure_batched_swap_count_tick
+                ),
+                "producer_debt_pressure_batched_swap_count_total": int(
+                    self._producer_debt_pressure_batched_swap_count_total
+                ),
+                "producer_debt_pressure_batched_swap_volume_usd_tick": float(
+                    self._producer_debt_pressure_batched_swap_volume_usd_tick
+                ),
+                "producer_debt_pressure_batched_swap_volume_usd_total": float(
+                    self._producer_debt_pressure_batched_swap_volume_usd_total
+                ),
+                "producer_debt_pressure_min_swap_usd": float(
+                    self._producer_debt_pressure_min_swap_usd()
+                ),
+                "ordinary_own_voucher_stable_borrowing_enabled": int(
+                    bool(getattr(self.cfg, "ordinary_own_voucher_stable_borrowing_enabled", False))
                 ),
                 "producer_debt_penalty_accrued_usd_tick": float(
                     self._producer_debt_penalty_accrued_usd_tick

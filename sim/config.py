@@ -198,6 +198,7 @@ class ScenarioConfig:
     producer_voucher_loan_fallback_enabled: bool = False
     producer_primary_voucher_borrowing_enabled: bool = False
     producer_primary_voucher_borrowing_attempt_share: float = 0.0
+    ordinary_own_voucher_stable_borrowing_enabled: bool = False
     producer_voucher_loan_activity_boost_enabled: bool = False
     producer_voucher_loan_max_target_candidates: int = 3
     lender_voucher_purchase_demand_enabled: bool = False
@@ -325,6 +326,8 @@ class ScenarioConfig:
     producer_debt_pressure_period_ticks: int = 4
     producer_debt_pressure_capacity_share: float = 1.0
     producer_debt_pressure_prepay_share: float = 0.10
+    producer_debt_pressure_batching_enabled: bool = False
+    producer_debt_pressure_min_swap_usd: float = 0.0
     producer_debt_penalty_enabled: bool = True
     producer_debt_penalty_rate_per_period: float | None = None
 

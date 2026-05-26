@@ -32,6 +32,10 @@ RUN_METRICS = (
     "producer_self_repayment_swap_volume_usd_total",
     "producer_self_repayment_voucher_removed_usd_total",
     "producer_debt_pressure_prepayment_usd_total",
+    "producer_debt_pressure_deferred_usd_total",
+    "producer_debt_pressure_deferred_balance_usd",
+    "producer_debt_pressure_batched_swap_count_total",
+    "producer_debt_pressure_batched_swap_volume_usd_total",
     "producer_debt_penalty_accrued_usd_total",
     "producer_debt_penalty_paid_usd_total",
     "producer_debt_arrears_usd",
@@ -130,6 +134,18 @@ def summarize_cell(cell_dir: Path) -> dict[str, object] | None:
         ),
         "pressure_enabled": int(
             safe_float(first_run.get("configured_producer_debt_pressure_enabled")) > 0.5
+        ),
+        "batching_enabled": int(
+            safe_float(first_run.get("configured_producer_debt_pressure_batching_enabled")) > 0.5
+        ),
+        "min_swap_usd": safe_float(
+            first_run.get("configured_producer_debt_pressure_min_swap_usd")
+        ),
+        "own_voucher_stable_borrowing_enabled": int(
+            safe_float(
+                first_run.get("configured_ordinary_own_voucher_stable_borrowing_enabled")
+            )
+            > 0.5
         ),
         "penalty_enabled": int(
             safe_float(first_run.get("configured_producer_debt_penalty_enabled")) > 0.5

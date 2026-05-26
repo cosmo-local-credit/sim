@@ -317,6 +317,20 @@ def parse_args() -> argparse.Namespace:
         help="Share of remaining debt-service capacity used for prepayment after due/arrears clear.",
     )
     parser.add_argument(
+        "--producer-debt-pressure-min-swap-usd",
+        type=float,
+        default=None,
+        help=(
+            "Minimum visible borrower repayment swap ticket. Validation/frontier "
+            "default to max(1, 25% of calibrated lender purchase size) when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--disable-producer-debt-pressure-batching",
+        action="store_true",
+        help="Ablation: settle monthly borrower self-repayment pressure without batching.",
+    )
+    parser.add_argument(
         "--disable-producer-debt-penalty",
         action="store_true",
         help="Ablation: do not accrue cash-fee penalties on missed producer debt service.",
@@ -326,6 +340,14 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Monthly producer debt penalty rate. Defaults to the pool fee rate when omitted.",
+    )
+    parser.add_argument(
+        "--enable-ordinary-own-voucher-stable-borrowing",
+        action="store_true",
+        help=(
+            "Allow ordinary producer own-voucher routes to choose stable targets; "
+            "the executed route is still classified as credit origination."
+        ),
     )
     parser.add_argument(
         "--productive-credit-voucher-deposit-share",
@@ -816,8 +838,11 @@ SHARD_CONFIG_KEYS = (
     "producer_debt_pressure_period_ticks",
     "producer_debt_pressure_capacity_share",
     "producer_debt_pressure_prepay_share",
+    "producer_debt_pressure_min_swap_usd",
+    "disable_producer_debt_pressure_batching",
     "disable_producer_debt_penalty",
     "producer_debt_penalty_rate_per_period",
+    "enable_ordinary_own_voucher_stable_borrowing",
     "productive_credit_voucher_deposit_share",
     "productive_credit_voucher_deposit_cap_rate_per_month",
     "disable_productive_credit_voucher_activity_boost",
@@ -2179,7 +2204,12 @@ def certified_pool_capacity(calibration: Calibration, network_scale: str, policy
     }
 
 
-def configure_producer_debt_pressure(cfg: ScenarioConfig, args: argparse.Namespace) -> None:
+def configure_producer_debt_pressure(
+    cfg: ScenarioConfig,
+    args: argparse.Namespace,
+    *,
+    batching_default: bool = False,
+) -> None:
     cfg.producer_debt_pressure_enabled = not bool(
         getattr(args, "disable_producer_debt_pressure", False)
     )
@@ -2200,6 +2230,12 @@ def configure_producer_debt_pressure(cfg: ScenarioConfig, args: argparse.Namespa
             float(getattr(args, "producer_debt_pressure_prepay_share", 0.10) or 0.0),
         ),
     )
+    cfg.producer_debt_pressure_batching_enabled = bool(batching_default) and not bool(
+        getattr(args, "disable_producer_debt_pressure_batching", False)
+    )
+    min_swap = getattr(args, "producer_debt_pressure_min_swap_usd", None)
+    if min_swap is not None:
+        cfg.producer_debt_pressure_min_swap_usd = max(0.0, float(min_swap))
     cfg.producer_debt_penalty_enabled = not bool(
         getattr(args, "disable_producer_debt_penalty", False)
     )
@@ -2207,6 +2243,15 @@ def configure_producer_debt_pressure(cfg: ScenarioConfig, args: argparse.Namespa
     cfg.producer_debt_penalty_rate_per_period = (
         None if penalty_rate is None else max(0.0, float(penalty_rate))
     )
+
+
+def apply_debt_pressure_min_swap_default(cfg: ScenarioConfig, args: argparse.Namespace) -> None:
+    if not bool(getattr(cfg, "producer_debt_pressure_batching_enabled", False)):
+        return
+    if getattr(args, "producer_debt_pressure_min_swap_usd", None) is not None:
+        return
+    avg_spend = max(0.0, float(getattr(cfg, "lender_voucher_purchase_avg_stable_spend_usd", 0.0) or 0.0))
+    cfg.producer_debt_pressure_min_swap_usd = max(1.0, 0.25 * avg_spend)
 
 
 def scenario_config(
@@ -2225,6 +2270,9 @@ def scenario_config(
         bond_fee_service_share=1.0,
         bond_return_mode="lp_sclc",
         calibration_profile="sarafu_empirical",
+    )
+    cfg.ordinary_own_voucher_stable_borrowing_enabled = bool(
+        getattr(args, "enable_ordinary_own_voucher_stable_borrowing", False)
     )
     cfg.max_active_pools_per_tick = args.max_active_pools_per_tick
     cfg.frontier_routing_abstraction = str(
@@ -2392,7 +2440,8 @@ def scenario_config(
         )
         cfg.producer_debt_maturity_preserve_reserve = True
         cfg.loan_term_weeks = cfg.producer_debt_maturity_ticks
-        configure_producer_debt_pressure(cfg, args)
+        configure_producer_debt_pressure(cfg, args, batching_default=True)
+        cfg.ordinary_own_voucher_stable_borrowing_enabled = True
         cfg.producer_voucher_overlap_mode = "empirical_overlap"
         cfg.producer_voucher_single_lender = False
         cfg.producer_voucher_overlap_bucket_weights = dict(
@@ -2509,6 +2558,7 @@ def scenario_config(
             0.0,
             float(getattr(args, "_validation_lender_voucher_purchase_avg_stable_spend_usd", 0.0) or 0.0),
         )
+        apply_debt_pressure_min_swap_default(cfg, args)
         validation_purchase_max_usd = max(
             0.0,
             float(getattr(args, "_validation_lender_voucher_purchase_max_usd", 0.0) or 0.0),
@@ -2706,7 +2756,8 @@ def scenario_config(
             cfg.productive_credit_return_rate,
             1.0 + stable_contract_margin,
         )
-        configure_producer_debt_pressure(cfg, args)
+        configure_producer_debt_pressure(cfg, args, batching_default=True)
+        cfg.ordinary_own_voucher_stable_borrowing_enabled = True
         cfg.ordinary_stable_spend_protection_enabled = bool(
             getattr(args, "enable_ordinary_stable_spend_protection", False)
         ) and not bool(getattr(args, "disable_ordinary_stable_spend_protection", False))
@@ -2878,6 +2929,7 @@ def scenario_config(
             0.0,
             float(getattr(args, "_frontier_lender_voucher_purchase_avg_stable_spend_usd", 0.0) or 0.0),
         )
+        apply_debt_pressure_min_swap_default(cfg, args)
         frontier_purchase_max_usd = max(
             0.0,
             float(getattr(args, "_frontier_lender_voucher_purchase_max_usd", 0.0) or 0.0),
@@ -3689,6 +3741,9 @@ def run_one(
             "producer_self_repayment_swap_volume_usd_tick",
             "producer_self_repayment_voucher_removed_usd_tick",
             "producer_debt_pressure_prepayment_usd_tick",
+            "producer_debt_pressure_deferred_usd_tick",
+            "producer_debt_pressure_batched_swap_count_tick",
+            "producer_debt_pressure_batched_swap_volume_usd_tick",
             "producer_debt_penalty_accrued_usd_tick",
             "producer_debt_penalty_paid_usd_tick",
             "producer_debt_matured_usd_tick",
@@ -4019,6 +4074,15 @@ def run_one(
             ),
             "configured_producer_debt_pressure_prepay_share": safe_float(
                 getattr(cfg, "producer_debt_pressure_prepay_share", 0.0)
+            ),
+            "configured_producer_debt_pressure_batching_enabled": int(
+                bool(getattr(cfg, "producer_debt_pressure_batching_enabled", False))
+            ),
+            "configured_producer_debt_pressure_min_swap_usd": safe_float(
+                getattr(cfg, "producer_debt_pressure_min_swap_usd", 0.0)
+            ),
+            "configured_ordinary_own_voucher_stable_borrowing_enabled": int(
+                bool(getattr(cfg, "ordinary_own_voucher_stable_borrowing_enabled", False))
             ),
             "configured_producer_debt_penalty_enabled": int(
                 bool(getattr(cfg, "producer_debt_penalty_enabled", False))
@@ -5281,6 +5345,35 @@ def run_one(
             "producer_debt_pressure_prepayment_usd_total": cumulative_float[
                 "producer_debt_pressure_prepayment_usd_tick"
             ],
+            "producer_debt_pressure_deferred_usd": latest.get(
+                "producer_debt_pressure_deferred_usd_tick", 0.0
+            ),
+            "producer_debt_pressure_deferred_usd_total": cumulative_float[
+                "producer_debt_pressure_deferred_usd_tick"
+            ],
+            "producer_debt_pressure_deferred_balance_usd": latest.get(
+                "producer_debt_pressure_deferred_balance_usd", 0.0
+            ),
+            "producer_debt_pressure_batched_swap_count": latest.get(
+                "producer_debt_pressure_batched_swap_count_tick", 0
+            ),
+            "producer_debt_pressure_batched_swap_count_total": cumulative_float[
+                "producer_debt_pressure_batched_swap_count_tick"
+            ],
+            "producer_debt_pressure_batched_swap_volume_usd": latest.get(
+                "producer_debt_pressure_batched_swap_volume_usd_tick", 0.0
+            ),
+            "producer_debt_pressure_batched_swap_volume_usd_total": cumulative_float[
+                "producer_debt_pressure_batched_swap_volume_usd_tick"
+            ],
+            "producer_debt_pressure_min_swap_usd": latest.get(
+                "producer_debt_pressure_min_swap_usd",
+                getattr(cfg, "producer_debt_pressure_min_swap_usd", 0.0),
+            ),
+            "ordinary_own_voucher_stable_borrowing_enabled": latest.get(
+                "ordinary_own_voucher_stable_borrowing_enabled",
+                int(bool(getattr(cfg, "ordinary_own_voucher_stable_borrowing_enabled", False))),
+            ),
             "producer_debt_penalty_accrued_usd": latest.get(
                 "producer_debt_penalty_accrued_usd_tick", 0.0
             ),
@@ -7562,6 +7655,18 @@ def summarize_frontier_cell(
     producer_debt_pressure_prepayment_values = [
         safe_float(row.get("producer_debt_pressure_prepayment_usd_total")) for row in rows
     ]
+    producer_debt_pressure_deferred_values = [
+        safe_float(row.get("producer_debt_pressure_deferred_usd_total")) for row in rows
+    ]
+    producer_debt_pressure_deferred_balance_values = [
+        safe_float(row.get("producer_debt_pressure_deferred_balance_usd")) for row in rows
+    ]
+    producer_debt_pressure_batched_swap_count_values = [
+        safe_float(row.get("producer_debt_pressure_batched_swap_count_total")) for row in rows
+    ]
+    producer_debt_pressure_batched_swap_volume_values = [
+        safe_float(row.get("producer_debt_pressure_batched_swap_volume_usd_total")) for row in rows
+    ]
     producer_debt_penalty_accrued_values = [
         safe_float(row.get("producer_debt_penalty_accrued_usd_total")) for row in rows
     ]
@@ -8170,6 +8275,18 @@ def summarize_frontier_cell(
             "configured_producer_debt_pressure_prepay_share",
             0.0,
         ),
+        "producer_debt_pressure_batching_enabled": first.get(
+            "configured_producer_debt_pressure_batching_enabled",
+            0,
+        ),
+        "producer_debt_pressure_min_swap_usd": first.get(
+            "configured_producer_debt_pressure_min_swap_usd",
+            0.0,
+        ),
+        "ordinary_own_voucher_stable_borrowing_enabled": first.get(
+            "configured_ordinary_own_voucher_stable_borrowing_enabled",
+            0,
+        ),
         "producer_debt_penalty_enabled": first.get(
             "configured_producer_debt_penalty_enabled",
             0,
@@ -8399,6 +8516,18 @@ def summarize_frontier_cell(
         ),
         "producer_debt_pressure_prepayment_usd_total_p50": percentile(
             producer_debt_pressure_prepayment_values, 0.50
+        ),
+        "producer_debt_pressure_deferred_usd_total_p50": percentile(
+            producer_debt_pressure_deferred_values, 0.50
+        ),
+        "producer_debt_pressure_deferred_balance_usd_p50": percentile(
+            producer_debt_pressure_deferred_balance_values, 0.50
+        ),
+        "producer_debt_pressure_batched_swap_count_total_p50": percentile(
+            producer_debt_pressure_batched_swap_count_values, 0.50
+        ),
+        "producer_debt_pressure_batched_swap_volume_usd_total_p50": percentile(
+            producer_debt_pressure_batched_swap_volume_values, 0.50
         ),
         "producer_debt_penalty_accrued_usd_total_p50": percentile(
             producer_debt_penalty_accrued_values, 0.50
