@@ -446,6 +446,22 @@ def parse_args() -> argparse.Namespace:
         help="Number of adaptive midpoint refinement rounds for bond_issuer_frontier.",
     )
     parser.add_argument(
+        "--frontier-routing-abstraction",
+        default="full",
+        choices=("full", "steward_shortlist"),
+        help=(
+            "Routing abstraction for bond_issuer_frontier. full preserves the "
+            "complete simulator search; steward_shortlist bounds ordinary swaps "
+            "to periodically refreshed steward/relationship candidates."
+        ),
+    )
+    parser.add_argument(
+        "--frontier-relationship-refresh-ticks",
+        type=int,
+        default=13,
+        help="Cadence, in weekly ticks, for refreshing steward_shortlist relationship candidates.",
+    )
+    parser.add_argument(
         "--route-success-floor",
         type=float,
         default=0.85,
@@ -770,6 +786,8 @@ SHARD_CONFIG_KEYS = (
     "lender_voucher_purchase_stable_budget_usd_per_tick",
     "frontier_mode",
     "frontier_refinement_rounds",
+    "frontier_routing_abstraction",
+    "frontier_relationship_refresh_ticks",
     "route_success_floor",
     "route_success_mode",
     "calibration_dir",
@@ -1821,6 +1839,13 @@ def scenario_config(
         calibration_profile="sarafu_empirical",
     )
     cfg.max_active_pools_per_tick = args.max_active_pools_per_tick
+    cfg.frontier_routing_abstraction = str(
+        getattr(args, "frontier_routing_abstraction", "full") or "full"
+    )
+    cfg.frontier_relationship_refresh_ticks = max(
+        1,
+        int(getattr(args, "frontier_relationship_refresh_ticks", 13) or 13),
+    )
     cfg.kes_per_usd = max(0.0, float(getattr(args, "_calibration_kes_per_usd", 0.0)))
     cfg.voucher_unit_value_usd = max(
         1e-12,
@@ -2480,6 +2505,24 @@ def scenario_config(
             cfg.historical_voucher_backing_tick = 1
             cfg.historical_voucher_backing_total_usd = historical_voucher_backing_total * factor
         apply_current_network_routing_profile(cfg, args)
+        if cfg.frontier_routing_abstraction == "steward_shortlist":
+            cfg.route_substitution_max_alternatives = 0
+            cfg.swap_sustain_floor_per_tick = int(math.ceil(float(cfg.swap_sustain_floor_per_tick or 0) * 0.45))
+            cfg.swap_sustain_max_extra_attempts = 0
+            cfg.swap_sustain_max_rounds = 1
+            cfg.voucher_fee_conversion_max_swaps_per_epoch = min(
+                int(cfg.voucher_fee_conversion_max_swaps_per_epoch or 0),
+                5,
+            )
+            cfg.noam_clearing_max_cycles = min(int(cfg.noam_clearing_max_cycles or 0), 20)
+            cfg.noam_clearing_edge_cap_per_asset = min(
+                int(cfg.noam_clearing_edge_cap_per_asset or 0),
+                4,
+            )
+            refresh = max(1, int(cfg.frontier_relationship_refresh_ticks or 13))
+            cfg.noam_topk_refresh_ticks = max(int(cfg.noam_topk_refresh_ticks or 1), refresh)
+            cfg.noam_overlay_refresh_ticks = max(int(cfg.noam_overlay_refresh_ticks or 1), refresh)
+            cfg.clc_rebalance_interval_ticks = max(int(cfg.clc_rebalance_interval_ticks or 1), 4)
         cfg.calibration_profile = "bond_issuer_frontier"
     elif scenario == "stress_weak_pool_repayment":
         cfg.initial_liquidity_providers = 1

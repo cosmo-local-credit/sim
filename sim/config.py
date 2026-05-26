@@ -92,6 +92,9 @@ class ScenarioConfig:
     affinity_buddy_direct_only: bool = True  # once buddies reached, skip routing and trade directly
     decision_based_activity_enabled: bool = True
     repeat_partner_route_share: float = 0.70  # share of ordinary attempts that prefer known partners
+    frontier_routing_abstraction: str = "full"  # "full" or "steward_shortlist"
+    frontier_relationship_refresh_ticks: int = 13
+    frontier_steward_referral_count: int = 4
     producer_voucher_single_lender: bool = True
     producer_voucher_overlap_mode: str = "single_lender"  # "single_lender" or "empirical_overlap"
     producer_voucher_overlap_bucket_weights: dict[str, float] = field(default_factory=dict)

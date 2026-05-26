@@ -113,14 +113,23 @@ class SimulationEngine:
         self._liquidity_tick: int = -1
         self._liquidity_by_asset: Dict[str, float] = {}
         self._liquidity_initialized: bool = False
+        self._liquidity_version: int = 0
         self._target_asset_candidate_cache_tick: int = -1
         self._target_asset_candidate_cache: Dict[Tuple[Optional[str], bool], Tuple[str, ...]] = {}
+        self._target_asset_weight_cache_tick: int = -1
+        self._target_asset_weight_cache: Dict[
+            Tuple[Optional[str], bool, float, int],
+            Tuple[Tuple[str, ...], np.ndarray],
+        ] = {}
         self._utilization_boost: float = 1.0
         self._last_utilization_rate: float = 0.0
         self._loan_phase_by_agent: Dict[str, int] = {}
         self._producer_voucher_assignments: Dict[str, str] = {}
         self._producer_voucher_lender_assignments: Dict[str, Set[str]] = {}
         self._producer_voucher_target_lender_counts: Dict[str, int] = {}
+        self._producer_voucher_lender_target_cache: Dict[str, Tuple[str, ...]] = {}
+        self._producer_voucher_ids: Set[str] = set()
+        self._lender_producer_voucher_count_cache: Dict[str, int] = {}
         self._pending_producer_vouchers: list[str] = []
         self.system_pools: Set[str] = set()
         self.ops_pool_id: Optional[str] = None
@@ -139,6 +148,9 @@ class SimulationEngine:
         self._fee_clc_cumulative_usd: float = 0.0
         self._fee_pool_cumulative_voucher: float = 0.0
         self._fee_clc_cumulative_voucher: float = 0.0
+        self._clc_fee_window_entries: deque[Tuple[int, str, float]] = deque()
+        self._clc_fee_window_totals: Dict[str, float] = {}
+        self._clc_fee_window_ticks: Optional[int] = None
         self._clc_pool_injected_usd_total: float = 0.0
         self._clc_pool_swapped_out_stable_total: float = 0.0
         self._clc_pool_swapped_out_voucher_total: float = 0.0
@@ -176,6 +188,7 @@ class SimulationEngine:
         self._producer_deposit_stable_usd_total: float = 0.0
         self._producer_deposit_voucher_usd_total: float = 0.0
         self._producer_deposit_value_by_voucher: Dict[str, float] = {}
+        self._dirty_lender_voucher_limit_assets: Set[str] = set()
         self._route_source_stable_net_flow_value_tick: float = 0.0
         self._route_source_voucher_net_flow_value_tick: float = 0.0
         self._productive_credit_inflow_usd_tick: float = 0.0
@@ -194,6 +207,11 @@ class SimulationEngine:
         self._producer_voucher_loan_activity_until: Dict[Tuple[str, str], int] = {}
         self._productive_credit_queue: Dict[int, list[Tuple[str, float, str]]] = {}
         self._producer_debt_obligations: list[ProducerDebtObligation] = []
+        self._producer_debt_obligations_by_lender_voucher: Dict[
+            Tuple[str, str],
+            list[ProducerDebtObligation],
+        ] = {}
+        self._producer_debt_obligation_index_dirty: Set[Tuple[str, str]] = set()
         self._next_producer_debt_obligation_id: int = 1
         self._producer_debt_originated_usd_tick: float = 0.0
         self._producer_debt_originated_usd_total: float = 0.0
@@ -384,6 +402,8 @@ class SimulationEngine:
         self._route_buddy_direct_used_tick: int = 0
         self._route_new_target_search_tick: int = 0
         self._route_search_fallback_used_tick: int = 0
+        self._frontier_relationship_candidates: Dict[str, Set[str]] = {}
+        self._frontier_relationship_last_refresh_tick: int = -1
         self._pool_value_cache: Dict[str, float] = {}
         self._pool_voucher_value_cache: Dict[str, float] = {}
         self._swap_success_ema: Dict[str, float] = {}
@@ -402,11 +422,15 @@ class SimulationEngine:
         self._noam_failure_cache: Dict[Tuple[str, str, str], int] = {}
         self._noam_route_cache: Dict[Tuple[str, str, str, int], Tuple[int, RoutePlan]] = {}
         self._noam_distance_cache_tick: int = -1
+        self._noam_distance_cache_graph_version: int = 0
         self._noam_distance_cache: Dict[Tuple[str, int], Dict[str, int]] = {}
+        self._noam_graph_version: int = 0
+        self._noam_graph_changed_tick: int = -1
         self._noam_near_hubs_cache_tick: int = -1
         self._noam_near_hubs_cache: Dict[Tuple[str, bool], list[str]] = {}
         self._noam_cap_scale_cache_tick: int = -1
         self._noam_cap_scale_cache_value: float = 1.0
+        self._non_system_pool_count_cache: Optional[int] = None
         self._recent_swap_counts: list[int] = []
 
         self.initial_stable_total: float = 0.0
@@ -593,6 +617,8 @@ class SimulationEngine:
                 else:
                     self._liquidity_by_asset[asset] = total
                 self._liquidity_initialized = True
+                self._liquidity_version += 1
+                self._target_asset_weight_cache = {}
 
     def _voucher_outstanding_supply(self, voucher_id: str) -> float:
         spec = self.factory.voucher_specs.get(voucher_id)
@@ -634,19 +660,37 @@ class SimulationEngine:
     def _is_producer_voucher(self, asset_id: str) -> bool:
         if not asset_id.startswith("VCHR:"):
             return False
+        if asset_id in self._producer_voucher_ids:
+            return True
         spec = self.factory.voucher_specs.get(asset_id)
         if spec is None:
             return False
         issuer = self.agents.get(spec.issuer_id)
-        return bool(issuer and issuer.role == "producer")
+        is_producer = bool(issuer and issuer.role == "producer")
+        if is_producer:
+            self._producer_voucher_ids.add(asset_id)
+        return is_producer
+
+    def _invalidate_lender_producer_voucher_count(self, pool_id: Optional[str] = None) -> None:
+        if pool_id is None:
+            self._lender_producer_voucher_count_cache = {}
+        else:
+            self._lender_producer_voucher_count_cache.pop(pool_id, None)
+
+    def _invalidate_producer_voucher_lender_targets(self, voucher_id: str) -> None:
+        self._producer_voucher_lender_target_cache.pop(voucher_id, None)
 
     def _lender_producer_voucher_count(self, pool: "Pool") -> int:
+        cached = self._lender_producer_voucher_count_cache.get(pool.pool_id)
+        if cached is not None:
+            return cached
         count = 0
         for asset_id, pol in pool.registry.listings.items():
             if not pol.enabled:
                 continue
             if self._is_producer_voucher(asset_id):
                 count += 1
+        self._lender_producer_voucher_count_cache[pool.pool_id] = count
         return count
 
     def _list_producer_voucher_on_lender(self, lender_pool: "Pool", voucher_id: str) -> bool:
@@ -667,6 +711,9 @@ class SimulationEngine:
             window_len=self.cfg.default_window_len,
             cap_in=cap_in,
         )
+        self._producer_voucher_ids.add(voucher_id)
+        self._invalidate_lender_producer_voucher_count(lender_pool.pool_id)
+        self._invalidate_producer_voucher_lender_targets(voucher_id)
         return True
 
     def _producer_voucher_overlap_enabled(self) -> bool:
@@ -760,6 +807,23 @@ class SimulationEngine:
         }
 
     def _assign_producer_voucher_to_lender(self, voucher_id: str) -> None:
+        stored_target = self._producer_voucher_target_lender_counts.get(voucher_id)
+        stored_assignments = self._producer_voucher_lender_assignments.get(voucher_id)
+        if (
+            self._frontier_shortlist_enabled()
+            and stored_target is not None
+            and stored_target > 0
+            and stored_assignments
+        ):
+            acceptors = self.accept_index.get(voucher_id, set())
+            if len(stored_assignments) == int(stored_target) and all(
+                (lender_id in self.pools)
+                and self.pools[lender_id].policy.role == "lender"
+                and self.pools[lender_id].registry.is_listed(voucher_id)
+                and lender_id in acceptors
+                for lender_id in stored_assignments
+            ):
+                return
         lenders = [
             p for p in self.pools.values()
             if not p.policy.system_pool and p.policy.role == "lender"
@@ -778,6 +842,20 @@ class SimulationEngine:
             target_count = self._bucketed_producer_voucher_lender_count(len(lenders))
             self._producer_voucher_target_lender_counts[voucher_id] = target_count
         target_count = max(1, min(int(target_count), len(lenders)))
+        if self._frontier_shortlist_enabled() and len(current) >= target_count:
+            assigned = sorted(current)[:target_count]
+            acceptors = self.accept_index.get(voucher_id, set())
+            if (
+                len(current) == target_count
+                and self._producer_voucher_lender_assignments.get(voucher_id) == set(current)
+                and all(
+                    (lender_id in self.pools)
+                    and self.pools[lender_id].registry.is_listed(voucher_id)
+                    and lender_id in acceptors
+                    for lender_id in assigned
+                )
+            ):
+                return
         if len(current) < target_count:
             stable_id = self.cfg.stable_symbol
             available = [p for p in lenders if p.pool_id not in current]
@@ -794,6 +872,7 @@ class SimulationEngine:
         if not current:
             return
         self._producer_voucher_lender_assignments[voucher_id] = set(current)
+        self._invalidate_producer_voucher_lender_targets(voucher_id)
         primary_id = sorted(
             current,
             key=lambda pid: (
@@ -820,6 +899,8 @@ class SimulationEngine:
                 pol = lender.registry.listings.get(voucher_id)
                 if pol and pol.enabled:
                     pol.enabled = False
+                    self._invalidate_lender_producer_voucher_count(lender.pool_id)
+                    self._invalidate_producer_voucher_lender_targets(voucher_id)
                     pools = self.accept_index.get(voucher_id)
                     if pools is not None:
                         pools.discard(lender.pool_id)
@@ -835,8 +916,31 @@ class SimulationEngine:
             self._assign_producer_voucher_to_lender(voucher_id)
 
     def _refresh_lender_voucher_limits(self, voucher_ids: Optional[Set[str]] = None) -> None:
+        target_vouchers = set(voucher_ids) if voucher_ids is not None else None
         if not self.cfg.swap_limits_enabled:
+            if target_vouchers is None:
+                self._dirty_lender_voucher_limit_assets.clear()
+            else:
+                self._dirty_lender_voucher_limit_assets.difference_update(target_vouchers)
             return
+
+        def refresh_rule(p: "Pool", asset_id: str) -> None:
+            cap_in = self._lender_voucher_cap(asset_id, lender_pool=p)
+            rule = p.limiter.rules.get(asset_id)
+            window_len = rule.window_len_ticks if rule else int(self.cfg.default_window_len or 1)
+            p.limiter.set_rule(asset_id, LimitRule(window_len_ticks=window_len, cap_in_global=cap_in))
+
+        if target_vouchers is not None:
+            for p in self.pools.values():
+                if p.policy.system_pool or p.policy.role != "lender":
+                    continue
+                for asset_id in target_vouchers:
+                    pol = p.registry.listings.get(asset_id)
+                    if pol and pol.enabled and asset_id.startswith("VCHR:"):
+                        refresh_rule(p, asset_id)
+            self._dirty_lender_voucher_limit_assets.difference_update(target_vouchers)
+            return
+
         for p in self.pools.values():
             if p.policy.system_pool or p.policy.role != "lender":
                 continue
@@ -845,14 +949,41 @@ class SimulationEngine:
                     continue
                 if not asset_id.startswith("VCHR:"):
                     continue
-                if voucher_ids is not None and asset_id not in voucher_ids:
-                    continue
-                cap_in = self._lender_voucher_cap(asset_id, lender_pool=p)
-                rule = p.limiter.rules.get(asset_id)
-                window_len = rule.window_len_ticks if rule else int(self.cfg.default_window_len or 1)
-                p.limiter.set_rule(asset_id, LimitRule(window_len_ticks=window_len, cap_in_global=cap_in))
+                refresh_rule(p, asset_id)
+        self._dirty_lender_voucher_limit_assets.clear()
+
+    def _mark_lender_voucher_limits_dirty(self, voucher_id: str) -> None:
+        if voucher_id.startswith("VCHR:"):
+            self._dirty_lender_voucher_limit_assets.add(voucher_id)
+
+    def _refresh_dirty_lender_voucher_limits(self) -> None:
+        if self._dirty_lender_voucher_limit_assets:
+            self._refresh_lender_voucher_limits(set(self._dirty_lender_voucher_limit_assets))
 
     def _producer_voucher_lender_deposit_targets(self, voucher_id: str) -> list["Pool"]:
+        cached_ids = (
+            self._producer_voucher_lender_target_cache.get(voucher_id)
+            if self._frontier_shortlist_enabled()
+            else None
+        )
+        if cached_ids is not None:
+            cached_targets: list["Pool"] = []
+            cache_valid = True
+            for lender_id in cached_ids:
+                pool = self.pools.get(lender_id)
+                if (
+                    pool is None
+                    or pool.policy.system_pool
+                    or pool.policy.role != "lender"
+                    or not pool.registry.is_listed(voucher_id)
+                ):
+                    cache_valid = False
+                    break
+                cached_targets.append(pool)
+            if cache_valid:
+                return cached_targets
+            self._producer_voucher_lender_target_cache.pop(voucher_id, None)
+
         self._assign_producer_voucher_to_lender(voucher_id)
         lender_ids = sorted(self._producer_voucher_lender_assignments.get(voucher_id, set()))
         targets: list["Pool"] = []
@@ -863,6 +994,8 @@ class SimulationEngine:
             if not pool.registry.is_listed(voucher_id):
                 self._list_producer_voucher_on_lender(pool, voucher_id)
             targets.append(pool)
+        if self._frontier_shortlist_enabled() and targets:
+            self._producer_voucher_lender_target_cache[voucher_id] = tuple(pool.pool_id for pool in targets)
         return targets
 
     def _deposit_producer_voucher_with_lenders(
@@ -908,6 +1041,7 @@ class SimulationEngine:
             issued_units = total_units
         if issued_units > 1e-9:
             agent.issuer.issue(issued_units)
+            self._mark_lender_voucher_limits_dirty(voucher_id)
         units_per_target = total_units / float(len(targets))
         value_per_target = voucher_value_usd / float(len(targets))
         for target in targets:
@@ -1067,8 +1201,14 @@ class SimulationEngine:
         return cache.value[key]
 
     def _noam_distance_to_target(self, target_asset: str, max_hops: int) -> Dict[str, int]:
-        if self._noam_distance_cache_tick != self.tick:
+        same_tick_cache = self._noam_distance_cache_tick == self.tick
+        if (
+            self._noam_distance_cache_graph_version != self._noam_graph_version
+            and not same_tick_cache
+        ):
             self._noam_distance_cache = {}
+            self._noam_distance_cache_graph_version = self._noam_graph_version
+        if self._noam_distance_cache_tick != self.tick:
             self._noam_distance_cache_tick = self.tick
         key = (target_asset, max_hops)
         cached = self._noam_distance_cache.get(key)
@@ -1248,6 +1388,14 @@ class SimulationEngine:
         min_m = max(1, int(self.cfg.noam_dynamic_min_topm or 1))
         top_k = max(1, self._noam_scaled_cap(base_k, min_k))
         top_m = max(1, self._noam_scaled_cap(base_m, min_m))
+        enabled_listings_by_pool: Dict[str, Set[str]] = {
+            pid: {
+                asset_id
+                for asset_id, pol in pool.registry.listings.items()
+                if pol.enabled
+            }
+            for pid, pool in self.pools.items()
+        }
 
         top_pools: Dict[str, list[str]] = {}
         for asset_id in assets:
@@ -1268,8 +1416,9 @@ class SimulationEngine:
         if self.clc_pool_id and self.clc_pool_id in self.pools:
             clc_pool = self.pools[self.clc_pool_id]
             if self._is_routable_pool(clc_pool):
+                clc_enabled = enabled_listings_by_pool.get(self.clc_pool_id, set())
                 for asset_id in assets:
-                    if not clc_pool.registry.is_listed(asset_id):
+                    if asset_id not in clc_enabled:
                         continue
                     pools = top_pools.get(asset_id, [])
                     if self.clc_pool_id in pools:
@@ -1292,7 +1441,7 @@ class SimulationEngine:
                 lender_pool = self.pools.get(lender_id)
                 if lender_pool is None:
                     continue
-                if not lender_pool.registry.is_listed(voucher_id):
+                if voucher_id not in enabled_listings_by_pool.get(lender_id, set()):
                     continue
                 pools = top_pools.get(voucher_id, [])
                 if lender_id in pools:
@@ -1321,7 +1470,7 @@ class SimulationEngine:
                     pool = self.pools.get(pid)
                     if pool is None:
                         continue
-                    if not pool.registry.is_listed(asset_id):
+                    if asset_id not in enabled_listings_by_pool.get(pid, set()):
                         continue
                     if pid not in pools:
                         pools.append(pid)
@@ -1344,7 +1493,7 @@ class SimulationEngine:
                         continue
                     if asset_out != self.cfg.stable_symbol and not asset_out.startswith("VCHR:"):
                         continue
-                    if not pool.registry.is_listed(asset_out):
+                    if asset_out not in enabled_listings_by_pool.get(pid, set()):
                         continue
                     value = pool.values.get_value(asset_out)
                     if value <= 0.0:
@@ -1404,6 +1553,9 @@ class SimulationEngine:
         self._noam_edge_state = new_edge_state
         self._noam_escape_score = escape_score
         self._noam_hubs = hubs
+        if adj_forward != self._noam_adj_forward or adj_reverse != self._noam_adj_reverse:
+            self._noam_graph_version += 1
+            self._noam_graph_changed_tick = self.tick
         self._noam_adj_forward = adj_forward
         self._noam_adj_reverse = adj_reverse
         self._noam_last_refresh_tick = self.tick
@@ -2385,6 +2537,33 @@ class SimulationEngine:
             self._fee_pool_cumulative_voucher += pool_fee
             self._fee_clc_cumulative_voucher += clc_fee
 
+    def _record_recent_clc_fee(self, pool: "Pool", receipt: SwapReceipt) -> None:
+        if receipt.status != "executed":
+            return
+        if pool.policy.system_pool:
+            return
+        clc_fee = float(receipt.fees.clc_fee)
+        if clc_fee <= 0.0:
+            return
+        value = self._asset_value(pool, receipt.asset_out)
+        usd = clc_fee * value
+        if usd <= 0.0:
+            return
+        self._clc_fee_window_entries.append((self.tick, pool.pool_id, usd))
+        self._clc_fee_window_totals[pool.pool_id] = (
+            self._clc_fee_window_totals.get(pool.pool_id, 0.0) + usd
+        )
+
+    def _prune_recent_clc_fee_window(self, window_ticks: int) -> None:
+        tick_min = max(1, self.tick - max(1, int(window_ticks or 1)) + 1)
+        while self._clc_fee_window_entries and self._clc_fee_window_entries[0][0] < tick_min:
+            _tick, pool_id, usd = self._clc_fee_window_entries.popleft()
+            remaining = self._clc_fee_window_totals.get(pool_id, 0.0) - usd
+            if remaining > 1e-12:
+                self._clc_fee_window_totals[pool_id] = remaining
+            else:
+                self._clc_fee_window_totals.pop(pool_id, None)
+
     def _record_noam_fee_diagnostics(
         self,
         pool: "Pool",
@@ -2432,6 +2611,14 @@ class SimulationEngine:
     def _is_routable_pool(self, pool: "Pool") -> bool:
         return (not pool.policy.system_pool) and pool.policy.role == "lender"
 
+    def _non_system_pool_count(self) -> int:
+        cached = self._non_system_pool_count_cache
+        if cached is not None:
+            return cached
+        count = sum(1 for p in self.pools.values() if not p.policy.system_pool)
+        self._non_system_pool_count_cache = count
+        return count
+
     def _refresh_liquidity_cache(self) -> None:
         if self._liquidity_tick == self.tick:
             return
@@ -2454,6 +2641,9 @@ class SimulationEngine:
         self._liquidity_by_asset = weights
         self._liquidity_tick = self.tick
         self._liquidity_initialized = True
+        self._liquidity_version += 1
+        self._target_asset_candidate_cache = {}
+        self._target_asset_weight_cache = {}
 
     def _settlement_asset_class(self, asset_id: str) -> str:
         if asset_id == self.cfg.stable_symbol:
@@ -2560,7 +2750,7 @@ class SimulationEngine:
         preferred_class: Optional[str],
         restrict_stable: bool,
     ) -> Tuple[str, ...]:
-        if self._target_asset_candidate_cache_tick != self.tick:
+        if not self._frontier_shortlist_enabled() and self._target_asset_candidate_cache_tick != self.tick:
             self._target_asset_candidate_cache_tick = self.tick
             self._target_asset_candidate_cache = {}
         key = (preferred_class, bool(restrict_stable))
@@ -2581,6 +2771,35 @@ class SimulationEngine:
         universe = tuple(candidates)
         self._target_asset_candidate_cache[key] = universe
         return universe
+
+    def _target_asset_weighted_candidates(
+        self,
+        preferred_class: Optional[str],
+        restrict_stable: bool,
+        stable_target_bias: float,
+    ) -> Tuple[Tuple[str, ...], np.ndarray]:
+        if not self._frontier_shortlist_enabled() and self._target_asset_weight_cache_tick != self.tick:
+            self._target_asset_weight_cache_tick = self.tick
+            self._target_asset_weight_cache = {}
+        key = (preferred_class, bool(restrict_stable), float(stable_target_bias), self._liquidity_version)
+        cached = self._target_asset_weight_cache.get(key)
+        if cached is not None:
+            return cached
+
+        weighted: list[Tuple[str, float]] = []
+        for asset_id in self._target_asset_candidate_universe(preferred_class, restrict_stable):
+            weight = self._liquidity_by_asset.get(asset_id, 0.0)
+            if asset_id == self.cfg.stable_symbol:
+                weight *= stable_target_bias
+            if weight > 0.0:
+                weighted.append((asset_id, weight))
+        if weighted:
+            assets, weights = zip(*weighted)
+            result = (tuple(assets), np.array(weights, dtype=float))
+        else:
+            result = ((), np.array([], dtype=float))
+        self._target_asset_weight_cache[key] = result
+        return result
 
     def _route_source_asset_candidates(self, source_pool: "Pool") -> list[str]:
         if source_pool.policy.system_pool:
@@ -2619,26 +2838,31 @@ class SimulationEngine:
             restrict_stable = False
             stable_target_bias = max(1.0, stable_target_bias)
         if mode == "liquidity_weighted":
-            candidates = []
-            for asset_id in self._target_asset_candidate_universe(preferred_class, restrict_stable):
-                weight = self._liquidity_by_asset.get(asset_id, 0.0)
-                if asset_id == asset_in or weight <= 0.0:
+            assets, weights = self._target_asset_weighted_candidates(
+                preferred_class,
+                restrict_stable,
+                stable_target_bias,
+            )
+            candidates: list[str] = []
+            candidate_weights: list[float] = []
+            for idx, asset_id in enumerate(assets):
+                if asset_id == asset_in:
                     continue
                 if exclude is not None and asset_id in exclude:
                     continue
-                if asset_id == self.cfg.stable_symbol:
-                    weight *= stable_target_bias
-                if weight > 0.0:
-                    candidates.append((asset_id, weight))
+                weight = float(weights[idx])
+                if weight <= 0.0:
+                    continue
+                candidates.append(asset_id)
+                candidate_weights.append(weight)
             if not candidates:
                 return None
-            assets, weights = zip(*candidates)
-            weights = np.array(weights, dtype=float)
-            total = float(weights.sum())
+            weights_array = np.array(candidate_weights, dtype=float)
+            total = float(weights_array.sum())
             if total <= 0.0:
                 return None
-            probs = weights / total
-            return str(np.random.choice(list(assets), p=probs))
+            probs = weights_array / total
+            return str(np.random.choice(candidates, p=probs))
 
         universe = [a for a in self.factory.asset_universe.keys() if a != self.cfg.sclc_symbol]
         if preferred_class:
@@ -2695,7 +2919,7 @@ class SimulationEngine:
         min_count = max(1, int(getattr(self.cfg, "affinity_buddy_min_count", 1) or 1))
         existing = self._affinity_buddies.get(pool_id)
         if existing is not None:
-            return existing
+            return existing if existing else None
         scores: Dict[str, float] = {}
         for (a, b), score in self.pool_affinity.items():
             if score <= 0.0:
@@ -2705,14 +2929,160 @@ class SimulationEngine:
             elif b == pool_id:
                 scores[a] = max(scores.get(a, 0.0), score)
         if len(scores) < min_count:
+            if self._frontier_shortlist_enabled():
+                self._affinity_buddies[pool_id] = set()
             return None
         top_count = min(buddy_count, len(scores))
         top = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:top_count]
         buddies = {pid for pid, _ in top}
         if len(buddies) < min_count:
+            if self._frontier_shortlist_enabled():
+                self._affinity_buddies[pool_id] = set()
             return None
         self._affinity_buddies[pool_id] = buddies
         return buddies
+
+    def _frontier_shortlist_enabled(self) -> bool:
+        return str(getattr(self.cfg, "frontier_routing_abstraction", "full") or "full") == "steward_shortlist"
+
+    def _frontier_steward_referral_pools(self) -> list[str]:
+        referral_count = max(0, int(getattr(self.cfg, "frontier_steward_referral_count", 4) or 0))
+        if referral_count <= 0:
+            return []
+        scored: list[Tuple[float, str]] = []
+        for pool in self.pools.values():
+            if not self._is_routable_pool(pool) or pool.policy.paused:
+                continue
+            liquidity = 0.0
+            for asset_id, amount in pool.vault.inventory.items():
+                if amount <= 1e-9 or asset_id == self.cfg.sclc_symbol:
+                    continue
+                liquidity += amount * self._asset_value(pool, asset_id)
+            if liquidity <= 1e-9:
+                continue
+            reliability = float(self._swap_success_ema.get(pool.pool_id, 1.0))
+            scored.append((reliability * math.log1p(liquidity), pool.pool_id))
+        scored.sort(reverse=True)
+        return [pid for _score, pid in scored[:referral_count]]
+
+    def _refresh_frontier_relationship_candidates(self) -> None:
+        referrals = set(self._frontier_steward_referral_pools())
+        affinity_by_pool: Dict[str, Set[str]] = {}
+        for (a, b), score in self.pool_affinity.items():
+            if score <= 0.0:
+                continue
+            affinity_by_pool.setdefault(a, set()).add(b)
+            affinity_by_pool.setdefault(b, set()).add(a)
+
+        candidates_by_pool: Dict[str, Set[str]] = {}
+        for pool_id, pool in self.pools.items():
+            if pool.policy.system_pool or pool.policy.role == "liquidity_provider":
+                continue
+            candidates: Set[str] = set(referrals)
+            candidates.update(affinity_by_pool.get(pool_id, set()))
+
+            for (source_id, _asset_in, _asset_out), plan in self._sticky_plan_by_pool.items():
+                if source_id != pool_id:
+                    continue
+                candidates.update(hop.pool_id for hop in plan.hops)
+
+            if pool.policy.role == "producer":
+                agent = self.agents.get(pool.steward_id)
+                voucher_id = agent.voucher_spec.voucher_id if agent is not None else None
+                if voucher_id:
+                    candidates.update(self._producer_voucher_lender_assignments.get(voucher_id, set()))
+
+            for asset_id, amount in pool.vault.inventory.items():
+                if amount <= 1e-9:
+                    continue
+                if self._is_producer_voucher(asset_id):
+                    candidates.update(self._producer_voucher_lender_assignments.get(asset_id, set()))
+
+            filtered = {
+                pid
+                for pid in candidates
+                if pid != pool_id
+                and pid in self.pools
+                and self._is_routable_pool(self.pools[pid])
+                and not self.pools[pid].policy.paused
+            }
+            if filtered:
+                candidates_by_pool[pool_id] = filtered
+        self._frontier_relationship_candidates = candidates_by_pool
+        self._frontier_relationship_last_refresh_tick = self.tick
+
+    def _frontier_relationship_pool_whitelist(self, source_pool: "Pool") -> Optional[Set[str]]:
+        if not self._frontier_shortlist_enabled():
+            return None
+        interval = max(1, int(getattr(self.cfg, "frontier_relationship_refresh_ticks", 13) or 13))
+        if (
+            self._frontier_relationship_last_refresh_tick < 0
+            or (self.tick - self._frontier_relationship_last_refresh_tick) >= interval
+        ):
+            self._refresh_frontier_relationship_candidates()
+        candidates = self._frontier_relationship_candidates.get(source_pool.pool_id)
+        return candidates if candidates else None
+
+    def _choose_frontier_relationship_target_asset(
+        self,
+        asset_in: str,
+        source_pool: "Pool",
+        pool_whitelist: Set[str],
+        *,
+        exclude: Optional[Set[str]] = None,
+        preferred_class: Optional[str] = None,
+    ) -> Optional[str]:
+        if not pool_whitelist:
+            return None
+        stable_target_bias = 1.0
+        restrict_stable = False
+        if source_pool.policy.role in ("producer", "consumer"):
+            stable_target_bias = max(0.0, float(self.cfg.producer_consumer_stable_target_bias or 0.0))
+            restrict_stable = stable_target_bias <= 0.0
+        if preferred_class == "stable":
+            restrict_stable = False
+            stable_target_bias = max(1.0, stable_target_bias)
+
+        ordered_assets: list[str] = []
+        weights_by_asset: Dict[str, float] = {}
+        for pid in sorted(pool_whitelist):
+            if pid == source_pool.pool_id:
+                continue
+            pool = self.pools.get(pid)
+            if pool is None or pool.policy.paused or not self._is_routable_pool(pool):
+                continue
+            if not pool.registry.is_listed(asset_in):
+                continue
+            for asset_out, amount in pool.vault.inventory.items():
+                if amount <= 1e-9 or asset_out == asset_in:
+                    continue
+                if exclude is not None and asset_out in exclude:
+                    continue
+                if preferred_class and self._settlement_asset_class(asset_out) != preferred_class:
+                    continue
+                if restrict_stable and asset_out == self.cfg.stable_symbol:
+                    continue
+                if asset_out == self.cfg.sclc_symbol:
+                    continue
+                if not pool.registry.is_listed(asset_out):
+                    continue
+                weight = amount * self._asset_value(pool, asset_out)
+                if asset_out == self.cfg.stable_symbol:
+                    weight *= stable_target_bias
+                if weight <= 0.0:
+                    continue
+                if asset_out not in weights_by_asset:
+                    ordered_assets.append(asset_out)
+                    weights_by_asset[asset_out] = weight
+                else:
+                    weights_by_asset[asset_out] += weight
+        if not ordered_assets:
+            return None
+        weights = np.array([weights_by_asset[asset_id] for asset_id in ordered_assets], dtype=float)
+        total = float(weights.sum())
+        if total <= 0.0:
+            return None
+        return str(np.random.choice(ordered_assets, p=weights / total))
 
     def _recent_pool_activity(self, window_ticks: int) -> Dict[str, float]:
         tick_min = max(1, self.tick - window_ticks + 1)
@@ -2740,6 +3110,19 @@ class SimulationEngine:
         return activity
 
     def _recent_pool_clc_fees(self, window_ticks: int) -> Dict[str, float]:
+        window_ticks = max(1, int(window_ticks or 1))
+        if self._clc_fee_window_ticks is None:
+            self._clc_fee_window_ticks = window_ticks
+        if self._clc_fee_window_ticks == window_ticks:
+            self._prune_recent_clc_fee_window(window_ticks)
+            return {
+                pool_id: amount
+                for pool_id, amount in self._clc_fee_window_totals.items()
+                if amount > 0.0
+                and pool_id in self.pools
+                and not self.pools[pool_id].policy.system_pool
+            }
+
         tick_min = max(1, self.tick - window_ticks + 1)
         fees: Dict[str, float] = {}
         for e in reversed(self.log.events):
@@ -2814,6 +3197,7 @@ class SimulationEngine:
             return 0.0
         self._vault_add(pool, voucher_id, amount, "voucher_inflow", "system")
         agent.issuer.issue(amount)
+        self._mark_lender_voucher_limits_dirty(voucher_id)
         return usd_value
 
     def _min_route_amount_in(self, pool: "Pool", asset_in: str, amount_in: float) -> Optional[float]:
@@ -3138,7 +3522,7 @@ class SimulationEngine:
             return RoutePlan(ok=True, reason="trivial", hops=[], expected_amount_out=amount_in)
 
         self._maybe_refresh_noam_working_set()
-        pool_count = sum(1 for p in self.pools.values() if not p.policy.system_pool)
+        pool_count = self._non_system_pool_count()
         min_pools = int(self.cfg.noam_overlay_min_pools or 0)
         if (
             not self.cfg.noam_overlay_enabled
@@ -3414,6 +3798,7 @@ class SimulationEngine:
 
         self.agents[agent.agent_id] = agent
         self.pools[pool.pool_id] = pool
+        self._non_system_pool_count_cache = None
 
         self.log.add(Event(self.tick, "POOL_CREATED", actor_id=agent.agent_id, pool_id=pool.pool_id))
 
@@ -3468,6 +3853,7 @@ class SimulationEngine:
                 self._vault_add(pool, a, amt, "seed_asset", "system")
                 if spec:
                     agent.issuer.issue(amt)
+                    self._mark_lender_voucher_limits_dirty(a)
                     supply_updates.add(a)
             self._assign_pending_producer_vouchers()
             producer_listed: Set[str] = set()
@@ -3481,6 +3867,8 @@ class SimulationEngine:
 
         elif role == "producer":
             own_v = agent.voucher_spec.voucher_id
+            self._producer_voucher_ids.add(own_v)
+            self._invalidate_lender_producer_voucher_count()
             list_voucher(own_v, cap_in=cfg.producer_voucher_cap_in)
 
             stable_seed = 0.0
@@ -3491,6 +3879,7 @@ class SimulationEngine:
             if own_amt > 0:
                 self._vault_add(pool, own_v, own_amt, "seed_voucher", agent.agent_id)
                 agent.issuer.issue(own_amt)
+                self._mark_lender_voucher_limits_dirty(own_v)
                 supply_updates.add(own_v)
             self._assign_producer_voucher_to_lender(own_v)
             producer_count = max(1, int(cfg.initial_producers or 1))
@@ -3591,17 +3980,22 @@ class SimulationEngine:
         for p in self.pools.values():
             if p.policy.system_pool or p.policy.role == "liquidity_provider":
                 continue
+            enabled_assets = {
+                asset_id
+                for asset_id, pol in p.registry.listings.items()
+                if pol.enabled
+            }
             current = sum(
                 1
-                for asset_id, pol in p.registry.listings.items()
-                if pol.enabled and asset_id not in (stable_id, sclc_id)
+                for asset_id in enabled_assets
+                if asset_id not in (stable_id, sclc_id)
             )
             if current >= target:
                 continue
             need = min(add_per_tick, target - current)
             if need <= 0:
                 continue
-            candidates = [a for a in asset_universe if not p.registry.is_listed(a)]
+            candidates = [a for a in asset_universe if a not in enabled_assets]
             if not candidates:
                 continue
             if len(candidates) > need:
@@ -3624,6 +4018,8 @@ class SimulationEngine:
                 )
                 if self._is_routable_pool(p):
                     self.accept_index.setdefault(asset_id, set()).add(p.pool_id)
+                if p.policy.role == "lender" and self._is_producer_voucher(asset_id):
+                    self._invalidate_lender_producer_voucher_count(p.pool_id)
             total_added += len(chosen)
             pools_updated += 1
         if total_added > 0:
@@ -3640,6 +4036,7 @@ class SimulationEngine:
         self._producer_deposit_value_by_voucher[voucher_id] = (
             self._producer_deposit_value_by_voucher.get(voucher_id, 0.0) + float(amount_usd)
         )
+        self._mark_lender_voucher_limits_dirty(voucher_id)
 
     def _producer_deposit_credit_capacity_usd(self) -> float:
         multiple = max(0.0, float(self.cfg.lender_voucher_cap_deposit_multiple or 0.0))
@@ -3734,6 +4131,36 @@ class SimulationEngine:
             meta={"reason": reason, "reserved_for_bond_service": reserved},
         ))
 
+    def _producer_debt_obligation_sort_key(self, obligation: ProducerDebtObligation) -> Tuple[int, int, int]:
+        return (obligation.due_tick, obligation.issued_tick, obligation.obligation_id)
+
+    def _index_producer_debt_obligation(self, obligation: ProducerDebtObligation) -> None:
+        key = (obligation.lender_pool_id, obligation.voucher_id)
+        self._producer_debt_obligations_by_lender_voucher.setdefault(key, []).append(obligation)
+        self._producer_debt_obligation_index_dirty.add(key)
+
+    def _producer_debt_for_lender_voucher(
+        self,
+        lender_pool_id: str,
+        voucher_id: str,
+    ) -> list[ProducerDebtObligation]:
+        key = (lender_pool_id, voucher_id)
+        obligations = self._producer_debt_obligations_by_lender_voucher.get(key, [])
+        if key in self._producer_debt_obligation_index_dirty:
+            obligations.sort(key=self._producer_debt_obligation_sort_key)
+            self._producer_debt_obligation_index_dirty.discard(key)
+        return obligations
+
+    def _rebuild_producer_debt_obligation_index(self) -> None:
+        indexed: Dict[Tuple[str, str], list[ProducerDebtObligation]] = {}
+        for obligation in self._producer_debt_obligations:
+            key = (obligation.lender_pool_id, obligation.voucher_id)
+            indexed.setdefault(key, []).append(obligation)
+        for obligations in indexed.values():
+            obligations.sort(key=self._producer_debt_obligation_sort_key)
+        self._producer_debt_obligations_by_lender_voucher = indexed
+        self._producer_debt_obligation_index_dirty = set()
+
     def _register_producer_debt_obligation(
         self,
         producer_pool_id: str,
@@ -3780,6 +4207,7 @@ class SimulationEngine:
         )
         self._next_producer_debt_obligation_id += 1
         self._producer_debt_obligations.append(obligation)
+        self._index_producer_debt_obligation(obligation)
         self._producer_debt_originated_usd_tick += float(borrowed_usd)
         self._producer_debt_originated_usd_total += float(borrowed_usd)
         self._producer_debt_cash_service_due_usd_tick += cash_service_due
@@ -3818,14 +4246,9 @@ class SimulationEngine:
         remaining = float(voucher_units)
         reduced_units = 0.0
         unit_value = self._asset_value(lender_pool, voucher_id)
-        for obligation in sorted(
-            self._producer_debt_obligations,
-            key=lambda item: (item.due_tick, item.issued_tick, item.obligation_id),
-        ):
+        for obligation in self._producer_debt_for_lender_voucher(lender_pool_id, voucher_id):
             if remaining <= 1e-9:
                 break
-            if obligation.lender_pool_id != lender_pool_id or obligation.voucher_id != voucher_id:
-                continue
             if obligation.remaining_voucher_units <= 1e-9:
                 continue
             used = min(remaining, obligation.remaining_voucher_units)
@@ -4047,7 +4470,7 @@ class SimulationEngine:
                     "voucher_deposit_cap_clipped_usd": clipped_value,
                 },
             ))
-        self._refresh_lender_voucher_limits()
+        self._refresh_dirty_lender_voucher_limits()
         self.rebuild_indexes()
 
     def _producer_debt_unit_value(self, obligation: ProducerDebtObligation) -> float:
@@ -4121,6 +4544,7 @@ class SimulationEngine:
             if spec and spec.issuer_id in self.agents:
                 issuer_agent = self.agents[spec.issuer_id]
                 issuer_agent.issuer.return_to_issuer(held_units)
+                self._mark_lender_voucher_limits_dirty(obligation.voucher_id)
                 issuer_pool = self.pools.get(issuer_agent.pool_id)
                 if issuer_pool is not None:
                     self._vault_add(
@@ -4368,6 +4792,7 @@ class SimulationEngine:
         self._update_pool_caches(lender_pool, receipt.asset_in, float(receipt.amount_in))
         self._update_pool_caches(lender_pool, receipt.asset_out, -float(gross_voucher_units))
         self._record_fee_cumulative(receipt)
+        self._record_recent_clc_fee(lender_pool, receipt)
         self._record_clc_swap_cumulative(receipt)
         self._noam_update_edge_after_swap(
             lender_pool,
@@ -4395,6 +4820,7 @@ class SimulationEngine:
             issuer_agent = self.agents[spec.issuer_id]
             issuer_pool = self.pools.get(issuer_agent.pool_id)
             issuer_agent.issuer.return_to_issuer(float(receipt.amount_out))
+            self._mark_lender_voucher_limits_dirty(obligation.voucher_id)
             if issuer_pool is not None:
                 self._vault_add(
                     issuer_pool,
@@ -4446,7 +4872,7 @@ class SimulationEngine:
         active: list[ProducerDebtObligation] = []
         for obligation in sorted(
             self._producer_debt_obligations,
-            key=lambda item: (item.due_tick, item.issued_tick, item.obligation_id),
+            key=self._producer_debt_obligation_sort_key,
         ):
             has_voucher_exposure = obligation.remaining_voucher_units > 1e-9
             has_cash_service = (
@@ -4552,6 +4978,7 @@ class SimulationEngine:
                     "maturity_unrecovered",
                 )
         self._producer_debt_obligations = active
+        self._rebuild_producer_debt_obligation_index()
 
     def _apply_producer_deposits(self) -> None:
         if not bool(self.cfg.producer_deposits_enabled):
@@ -5164,6 +5591,7 @@ class SimulationEngine:
             self._update_pool_caches(clc_pool, receipt.asset_in, float(receipt.amount_in))
             self._update_pool_caches(clc_pool, receipt.asset_out, -float(gross_out))
             self._record_fee_cumulative(receipt)
+            self._record_recent_clc_fee(clc_pool, receipt)
             self._record_clc_swap_cumulative(receipt)
             self._noam_update_edge_after_swap(
                 clc_pool,
@@ -6484,7 +6912,7 @@ class SimulationEngine:
             if self.tick % desired_stride == 0:
                 self._grow_pool_desired_assets()
             self._maybe_refresh_noam_working_set()
-            self._refresh_lender_voucher_limits()
+            self._refresh_dirty_lender_voucher_limits()
 
             # shock
             if self.cfg.stable_shock_tick is not None and self.tick == self.cfg.stable_shock_tick:
@@ -6732,6 +7160,14 @@ class SimulationEngine:
         buddy_pools: Optional[Set[str]] = None
         if source_pool.policy.role in ("producer", "consumer"):
             buddy_pools = self._affinity_buddies_for_pool(source_pool.pool_id)
+        frontier_pool_whitelist: Optional[Set[str]] = None
+        if route_context == "ordinary" and self._frontier_shortlist_enabled():
+            frontier_pool_whitelist = self._frontier_relationship_pool_whitelist(source_pool)
+            if frontier_pool_whitelist:
+                if buddy_pools is None:
+                    buddy_pools = set(frontier_pool_whitelist)
+                else:
+                    buddy_pools = set(buddy_pools) | set(frontier_pool_whitelist)
         if decision_mode_active:
             buddy_direct_only = (
                 selected_activity_mode == "repeat_partner"
@@ -6745,7 +7181,9 @@ class SimulationEngine:
         sticky_fail_threshold = max(1, int(self.cfg.sticky_fail_threshold or 1))
 
         for asset_in in asset_candidates:
-            if bool(self.cfg.route_substitution_enabled):
+            if route_context == "ordinary" and self._frontier_shortlist_enabled():
+                max_targets = 1
+            elif bool(self.cfg.route_substitution_enabled):
                 max_targets = 1 + max(0, int(self.cfg.route_substitution_max_alternatives or 0))
             else:
                 max_targets = max(1, int(self.cfg.swap_target_retry_count or 1))
@@ -6829,19 +7267,38 @@ class SimulationEngine:
                     asset_out = sticky_target
                     target_selection = "sticky"
                 else:
-                    asset_out = self._choose_target_asset(
-                        asset_in,
-                        source_pool,
-                        exclude=targets_tried,
-                        preferred_class=motif_target_class,
-                    )
+                    asset_out = None
                     target_selection = "new_search"
-                    if not asset_out and motif_target_class is None:
+                    if frontier_pool_whitelist:
+                        asset_out = self._choose_frontier_relationship_target_asset(
+                            asset_in,
+                            source_pool,
+                            frontier_pool_whitelist,
+                            exclude=targets_tried,
+                            preferred_class=motif_target_class,
+                        )
+                        target_selection = "steward_shortlist"
+                        if not asset_out and motif_target_class is not None:
+                            asset_out = self._choose_frontier_relationship_target_asset(
+                                asset_in,
+                                source_pool,
+                                frontier_pool_whitelist,
+                                exclude=targets_tried,
+                            )
+                    if asset_out is None:
                         asset_out = self._choose_target_asset(
                             asset_in,
                             source_pool,
                             exclude=targets_tried,
+                            preferred_class=motif_target_class,
                         )
+                        target_selection = "new_search"
+                        if not asset_out and motif_target_class is None:
+                            asset_out = self._choose_target_asset(
+                                asset_in,
+                                source_pool,
+                                exclude=targets_tried,
+                            )
                 if not asset_out or asset_out == asset_in:
                     break
                 targets_tried.add(asset_out)
@@ -6865,7 +7322,10 @@ class SimulationEngine:
                                    }))
                 sticky_key = (source_pool.pool_id, asset_in, asset_out)
                 sticky_plan = self._sticky_plan_by_pool.get(sticky_key)
-                active_buddy_pools = buddy_pools if selected_activity_mode == "repeat_partner" else None
+                if frontier_pool_whitelist is not None:
+                    active_buddy_pools = frontier_pool_whitelist
+                else:
+                    active_buddy_pools = buddy_pools if selected_activity_mode == "repeat_partner" else None
                 if sticky_plan and active_buddy_pools is not None:
                     if any(h.pool_id not in active_buddy_pools for h in sticky_plan.hops):
                         sticky_plan = None
@@ -6902,6 +7362,50 @@ class SimulationEngine:
                         continue
 
                     self._sticky_failures[sticky_key] = failures
+
+                if frontier_pool_whitelist is not None and target_selection == "steward_shortlist":
+                    direct_plan, direct_amount, direct_fallback, direct_asset_out = self._find_buddy_direct_plan(
+                        source_pool=source_pool,
+                        asset_in=asset_in,
+                        amount_in=amount_in,
+                        buddy_pools=frontier_pool_whitelist,
+                        target_asset=asset_out,
+                    )
+                    if direct_plan.ok and direct_asset_out is not None:
+                        self._route_buddy_direct_used_tick += 1
+                        if direct_fallback:
+                            self._route_search_fallback_used_tick += 1
+                            self.log.add(Event(self.tick, "ROUTE_REQUESTED", pool_id=source_pool.pool_id,
+                                               asset_id=asset_in, amount=direct_amount,
+                                               meta={
+                                                   "target_asset": direct_asset_out,
+                                                   "fallback": True,
+                                                   "buddy_direct": True,
+                                                   "route_attempt_kind": attempt_kind,
+                                                   "route_activity_mode": selected_activity_mode,
+                                                   "target_selection": target_selection,
+                                               }))
+                        self.log.add(Event(self.tick, "ROUTE_FOUND", pool_id=source_pool.pool_id,
+                                           meta={
+                                               "hops": [h.__dict__ for h in direct_plan.hops],
+                                               "target": direct_asset_out,
+                                               "buddy_direct": True,
+                                               "route_attempt_kind": attempt_kind,
+                                               "route_activity_mode": selected_activity_mode,
+                                               "target_selection": target_selection,
+                                           }))
+                        ok = self.execute_route_from_pool(
+                            source_pool.pool_id,
+                            direct_plan,
+                            direct_amount,
+                            route_context=route_context,
+                        )
+                        self._record_swap_attempt(source_pool.pool_id, success=ok)
+                        if ok:
+                            self._sticky_target_by_pool[(source_pool.pool_id, asset_in)] = direct_asset_out
+                            self._sticky_plan_by_pool[(source_pool.pool_id, asset_in, direct_asset_out)] = direct_plan
+                            break
+                        continue
 
                 plan, amount_used, used_fallback = self._find_route_with_fallback(
                     tick=self.tick,
@@ -7970,6 +8474,7 @@ class SimulationEngine:
             self._update_pool_caches(pool, receipt.asset_in, float(receipt.amount_in))
             self._update_pool_caches(pool, receipt.asset_out, -float(gross_out))
             self._record_fee_cumulative(receipt)
+            self._record_recent_clc_fee(pool, receipt)
             self._record_clc_swap_cumulative(receipt)
             if (
                 bool(self.cfg.stable_excess_sweep_after_stable_receipt)
@@ -8109,6 +8614,7 @@ class SimulationEngine:
                 if issuer_id in self.agents:
                     issuer_agent = self.agents[issuer_id]
                     issuer_agent.issuer.return_to_issuer(out_amount)
+                    self._mark_lender_voucher_limits_dirty(out_asset)
                     issuer_pool_id = issuer_agent.pool_id
                     issuer_pool = self.pools.get(issuer_pool_id)
                     if issuer_pool is not None:
@@ -8173,6 +8679,7 @@ class SimulationEngine:
             return
         self._vault_add(issuer_pool, voucher_id, amount, "redeem_receive", holder_pool.pool_id)
         issuer.issuer.return_to_issuer(amount)
+        self._mark_lender_voucher_limits_dirty(voucher_id)
         self.log.add(Event(self.tick, "VOUCHER_REDEEMED_CONSUMER", actor_id=issuer_id,
                            pool_id=holder_pool.pool_id, asset_id=voucher_id, amount=amount))
 
