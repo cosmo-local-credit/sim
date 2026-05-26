@@ -146,6 +146,7 @@ run_engine_validation() {
   local default_ticks="$2"
   local default_seed="$3"
   local default_output="$4"
+  shift 4
   local output_dir="${OUTPUT:-$OUTPUT_ROOT/$default_output}"
   echo "[batch] writing engine validation artifacts to $output_dir"
   run_monte_carlo "${PYTHON_BIN}" scripts/run_regenbond_monte_carlo.py \
@@ -158,7 +159,77 @@ run_engine_validation() {
     --progress-stride "${PROGRESS_STRIDE:-13}" \
     --calibration-dir "$CALIBRATION_DIR" \
     --output "$output_dir" \
-    "${MONTE_CARLO_EXTRA_ARGS[@]}"
+    "${MONTE_CARLO_EXTRA_ARGS[@]}" \
+    "$@"
+}
+
+safe_decimal_label() {
+  local value="$1"
+  value="${value//./p}"
+  value="${value//- /m}"
+  value="${value//-/m}"
+  echo "$value"
+}
+
+run_validation_debt_pressure_sensitivity() {
+  local default_runs="$1"
+  local default_ticks="$2"
+  local default_seed="$3"
+  local default_output="$4"
+  local base_output="${OUTPUT:-$OUTPUT_ROOT/$default_output}"
+  local capacity_values="${PRODUCER_DEBT_PRESSURE_CAPACITY_SHARES:-0.25,0.50,1.0}"
+  local prepay_values="${PRODUCER_DEBT_PRESSURE_PREPAY_SHARES:-0,0.10,0.25}"
+  local old_output="${OUTPUT:-}"
+  local old_capacity_share="${PRODUCER_DEBT_PRESSURE_CAPACITY_SHARE:-}"
+  local old_prepay_share="${PRODUCER_DEBT_PRESSURE_PREPAY_SHARE:-}"
+
+  echo "[sensitivity] base_output=$base_output"
+  echo "[sensitivity] capacity_shares=$capacity_values"
+  echo "[sensitivity] prepay_shares=$prepay_values"
+  IFS=',' read -r -a capacity_grid <<< "$capacity_values"
+  IFS=',' read -r -a prepay_grid <<< "$prepay_values"
+  for capacity_share in "${capacity_grid[@]}"; do
+    capacity_share="${capacity_share//[[:space:]]/}"
+    if [[ -z "$capacity_share" ]]; then
+      continue
+    fi
+    for prepay_share in "${prepay_grid[@]}"; do
+      prepay_share="${prepay_share//[[:space:]]/}"
+      if [[ -z "$prepay_share" ]]; then
+        continue
+      fi
+      local capacity_label
+      local prepay_label
+      capacity_label="$(safe_decimal_label "$capacity_share")"
+      prepay_label="$(safe_decimal_label "$prepay_share")"
+      local cell_output="$base_output/capacity_${capacity_label}_prepay_${prepay_label}"
+      echo "[sensitivity] cell capacity_share=$capacity_share prepay_share=$prepay_share output=$cell_output"
+      OUTPUT="$cell_output" run_engine_validation \
+        "$default_runs" "$default_ticks" "$default_seed" "$cell_output" \
+        --producer-debt-pressure-capacity-share "$capacity_share" \
+        --producer-debt-pressure-prepay-share "$prepay_share"
+    done
+  done
+
+  if [[ -n "$old_output" ]]; then
+    OUTPUT="$old_output"
+  else
+    unset OUTPUT || true
+  fi
+  if [[ -n "$old_capacity_share" ]]; then
+    PRODUCER_DEBT_PRESSURE_CAPACITY_SHARE="$old_capacity_share"
+  else
+    unset PRODUCER_DEBT_PRESSURE_CAPACITY_SHARE || true
+  fi
+  if [[ -n "$old_prepay_share" ]]; then
+    PRODUCER_DEBT_PRESSURE_PREPAY_SHARE="$old_prepay_share"
+  else
+    unset PRODUCER_DEBT_PRESSURE_PREPAY_SHARE || true
+  fi
+
+  if ! is_dry_run; then
+    "$PYTHON_BIN" scripts/summarize_debt_pressure_sensitivity.py "$base_output"
+  fi
 }
 
 run_frontier() {
@@ -328,6 +399,12 @@ case "$JOB" in
   validation-full)
     run_engine_validation 100 260 1 engine_validation
     ;;
+  validation-debt-pressure-sensitivity)
+    run_validation_debt_pressure_sensitivity 20 260 1 engine_validation_debt_pressure_sensitivity
+    ;;
+  validation-debt-pressure-sensitivity-full)
+    run_validation_debt_pressure_sensitivity 100 260 1 engine_validation_debt_pressure_sensitivity_full
+    ;;
   frontier-smoke)
     ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK="${ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK:-1}" \
       ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST="${ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST:-1}" \
@@ -418,7 +495,7 @@ case "$JOB" in
     ;;
   *)
     echo "Unknown job: $JOB" >&2
-    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, frontier-smoke, frontier-maturity-smoke, frontier-feedback-probe, frontier-low-principal-probe, frontier-activity-ablation-probe, frontier-rola-regeneration-probe, frontier-pilot, frontier-current-grid-pilot, frontier-stress-pilot, frontier-publication" >&2
+    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, validation-debt-pressure-sensitivity, validation-debt-pressure-sensitivity-full, frontier-smoke, frontier-maturity-smoke, frontier-feedback-probe, frontier-low-principal-probe, frontier-activity-ablation-probe, frontier-rola-regeneration-probe, frontier-pilot, frontier-current-grid-pilot, frontier-stress-pilot, frontier-publication" >&2
     exit 2
     ;;
 esac
