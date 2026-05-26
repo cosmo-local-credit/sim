@@ -355,7 +355,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Probability that an ordinary producer own-voucher route may target stable. "
-            "Validation/frontier default to 0.75 when omitted; manual enabled mode defaults to 1.0."
+            "Validation/frontier default to 0.70 when omitted; manual enabled mode defaults to 1.0."
         ),
     )
     parser.add_argument(
@@ -2466,7 +2466,7 @@ def scenario_config(
         configure_producer_debt_pressure(cfg, args, batching_default=True)
         cfg.ordinary_own_voucher_stable_borrowing_enabled = True
         cfg.ordinary_own_voucher_stable_borrowing_probability = (
-            ordinary_own_voucher_stable_borrowing_probability(args, 0.75)
+            ordinary_own_voucher_stable_borrowing_probability(args, 0.70)
         )
         cfg.producer_voucher_overlap_mode = "empirical_overlap"
         cfg.producer_voucher_single_lender = False
@@ -2785,7 +2785,7 @@ def scenario_config(
         configure_producer_debt_pressure(cfg, args, batching_default=True)
         cfg.ordinary_own_voucher_stable_borrowing_enabled = True
         cfg.ordinary_own_voucher_stable_borrowing_probability = (
-            ordinary_own_voucher_stable_borrowing_probability(args, 0.75)
+            ordinary_own_voucher_stable_borrowing_probability(args, 0.70)
         )
         cfg.ordinary_stable_spend_protection_enabled = bool(
             getattr(args, "enable_ordinary_stable_spend_protection", False)

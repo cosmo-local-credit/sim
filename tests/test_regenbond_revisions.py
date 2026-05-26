@@ -2146,7 +2146,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertTrue(cfg.producer_debt_pressure_batching_enabled)
         self.assertAlmostEqual(cfg.producer_debt_pressure_min_swap_usd, 1.0)
         self.assertTrue(cfg.ordinary_own_voucher_stable_borrowing_enabled)
-        self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.75)
+        self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.70)
         self.assertTrue(cfg.producer_debt_penalty_enabled)
         self.assertFalse(cfg.offramps_enabled)
         self.assertIsNone(cfg.historical_stable_backing_tick)
@@ -2326,7 +2326,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertTrue(cfg.producer_debt_pressure_batching_enabled)
         self.assertAlmostEqual(cfg.producer_debt_pressure_min_swap_usd, 1.0)
         self.assertTrue(cfg.ordinary_own_voucher_stable_borrowing_enabled)
-        self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.75)
+        self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.70)
         self.assertTrue(cfg.producer_debt_penalty_enabled)
 
     def test_sarafu_activity_controls_load_settlement_motif_targets(self):
