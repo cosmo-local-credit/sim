@@ -1222,6 +1222,182 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertGreater(pressure_with, pressure_without)
         self.assertGreater(share_with, share_without)
 
+    def test_activity_composition_shift_disabled_leaves_motif_targets_unchanged(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                settlement_motif_targeting_enabled=True,
+                settlement_motif_voucher_to_voucher_share=0.80,
+                settlement_motif_voucher_to_stable_share=0.10,
+                settlement_motif_stable_to_voucher_share=0.10,
+                producer_debt_pressure_enabled=True,
+                producer_activity_composition_shift_enabled=False,
+                producer_debt_maturity_enabled=True,
+                producer_debt_maturity_ticks=12,
+            ),
+            seed=56,
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            producer.voucher_spec.voucher_id,
+            120.0,
+            120.0,
+            contract_cash_service=False,
+        )
+
+        self.assertEqual(
+            engine._settlement_motif_targets(),
+            engine._settlement_motif_targets(source_pool=producer_pool, route_context="ordinary"),
+        )
+
+    def test_activity_composition_shift_moves_producer_v2v_weight_to_v2s(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                settlement_motif_targeting_enabled=True,
+                settlement_motif_voucher_to_voucher_share=0.80,
+                settlement_motif_voucher_to_stable_share=0.10,
+                settlement_motif_stable_to_voucher_share=0.10,
+                producer_debt_pressure_enabled=True,
+                producer_activity_composition_shift_enabled=True,
+                producer_activity_composition_shift_scale=1.0,
+                producer_activity_composition_shift_max_share=0.60,
+                producer_activity_composition_shift_to_v2s_share=1.0,
+                producer_debt_attention_reference_usd=100.0,
+                producer_debt_maturity_enabled=True,
+                producer_debt_maturity_ticks=12,
+                producer_debt_pressure_period_ticks=4,
+            ),
+            seed=57,
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            producer.voucher_spec.voucher_id,
+            120.0,
+            120.0,
+            contract_cash_service=False,
+        )
+
+        base = engine._settlement_motif_targets()
+        adjusted = engine._settlement_motif_targets(source_pool=producer_pool, route_context="ordinary")
+        lender_adjusted = engine._settlement_motif_targets(source_pool=lender_pool, route_context="ordinary")
+
+        self.assertLess(adjusted["voucher_to_voucher"], base["voucher_to_voucher"])
+        self.assertGreater(adjusted["voucher_to_stable"], base["voucher_to_stable"])
+        self.assertEqual(lender_adjusted, base)
+
+    def test_activity_composition_shift_raises_own_voucher_stable_probability(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                ordinary_own_voucher_stable_borrowing_enabled=True,
+                ordinary_own_voucher_stable_borrowing_probability=0.70,
+                producer_debt_pressure_enabled=True,
+                producer_activity_composition_shift_enabled=True,
+                producer_activity_composition_shift_scale=1.0,
+                producer_activity_composition_shift_max_share=0.60,
+                producer_activity_composition_own_voucher_stable_probability_max=0.95,
+                producer_debt_attention_reference_usd=1.0,
+                producer_debt_maturity_enabled=True,
+                producer_debt_maturity_ticks=4,
+                producer_debt_pressure_period_ticks=4,
+            ),
+            seed=58,
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+
+        base_probability = engine._ordinary_own_voucher_stable_borrowing_probability(producer_pool)
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            producer.voucher_spec.voucher_id,
+            100.0,
+            100.0,
+            contract_cash_service=False,
+        )
+        pressured_probability = engine._ordinary_own_voucher_stable_borrowing_probability(producer_pool)
+
+        self.assertAlmostEqual(base_probability, 0.70)
+        self.assertGreater(pressured_probability, base_probability)
+        self.assertLessEqual(pressured_probability, 0.95)
+
+    def test_activity_composition_infeasible_stable_preference_does_not_record_failure(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=2,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=3,
+                settlement_motif_targeting_enabled=True,
+                settlement_motif_voucher_to_voucher_share=1.0,
+                settlement_motif_voucher_to_stable_share=0.0,
+                settlement_motif_stable_to_voucher_share=0.0,
+                producer_debt_pressure_enabled=True,
+                producer_activity_composition_shift_enabled=True,
+                producer_activity_composition_shift_scale=10.0,
+                producer_activity_composition_shift_max_share=1.0,
+                producer_debt_attention_reference_usd=1.0,
+                ordinary_own_voucher_stable_borrowing_enabled=True,
+                producer_debt_maturity_enabled=True,
+                producer_debt_maturity_ticks=4,
+            ),
+            seed=59,
+        )
+        stable_id = engine.cfg.stable_symbol
+        producers = [agent for agent in engine.agents.values() if agent.role == "producer"]
+        source_agent, target_agent = producers[0], producers[1]
+        producer_pool = engine.pools[source_agent.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = source_agent.voucher_spec.voucher_id
+        target_voucher_id = target_agent.voucher_spec.voucher_id
+        for pool in (producer_pool, lender_pool):
+            for asset_id in (stable_id, voucher_id, target_voucher_id):
+                pool.values.set_value(asset_id, 1.0)
+        lender_pool.list_asset_with_value_and_limit(target_voucher_id, value=1.0, window_len=10, cap_in=500.0)
+        for asset_id in (stable_id, voucher_id, target_voucher_id):
+            current = producer_pool.vault.get(asset_id)
+            if current > 0.0:
+                engine._vault_sub(producer_pool, asset_id, current, "test_clear", "test")
+        engine._vault_add(producer_pool, voucher_id, 25.0, "test_seed", "test")
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+            contract_cash_service=False,
+        )
+        before_failures = sum(1 for event in engine.log.events if event.event_type == "ROUTE_FAILED")
+
+        attempted = engine._random_route_request(source_pool=producer_pool, max_assets=1)
+        after_failures = sum(1 for event in engine.log.events if event.event_type == "ROUTE_FAILED")
+
+        self.assertEqual(attempted, 0)
+        self.assertEqual(before_failures, after_failures)
+
     def test_bond_assessment_sustain_offset_reduces_only_sustain_target(self):
         def sustain_calls(offset_enabled: bool) -> tuple[int, int]:
             engine = SimulationEngine(
@@ -2458,6 +2634,15 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertTrue(cfg.producer_bond_assessment_sustain_offset_enabled)
         self.assertTrue(cfg.ordinary_own_voucher_stable_borrowing_enabled)
         self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.70)
+        self.assertTrue(cfg.producer_activity_composition_shift_enabled)
+        self.assertAlmostEqual(cfg.producer_activity_composition_shift_scale, 1.0)
+        self.assertAlmostEqual(cfg.producer_activity_composition_shift_max_share, 0.60)
+        self.assertAlmostEqual(cfg.producer_activity_composition_shift_min_pressure_usd, 0.0)
+        self.assertAlmostEqual(cfg.producer_activity_composition_shift_to_v2s_share, 1.0)
+        self.assertAlmostEqual(
+            cfg.producer_activity_composition_own_voucher_stable_probability_max,
+            0.95,
+        )
         self.assertTrue(cfg.producer_debt_penalty_enabled)
         self.assertFalse(cfg.offramps_enabled)
         self.assertIsNone(cfg.historical_stable_backing_tick)
@@ -2526,6 +2711,12 @@ class RegenBondRevisionTests(unittest.TestCase):
             "producer_bond_assessment_sustain_offset_enabled",
             "ordinary_own_voucher_stable_borrowing_enabled",
             "ordinary_own_voucher_stable_borrowing_probability",
+            "producer_activity_composition_shift_enabled",
+            "producer_activity_composition_shift_scale",
+            "producer_activity_composition_shift_max_share",
+            "producer_activity_composition_shift_min_pressure_usd",
+            "producer_activity_composition_shift_to_v2s_share",
+            "producer_activity_composition_own_voucher_stable_probability_max",
             "producer_debt_penalty_enabled",
         ):
             self.assertEqual(getattr(cfg_baseline, attr), getattr(cfg, attr))
@@ -2599,6 +2790,13 @@ class RegenBondRevisionTests(unittest.TestCase):
             "enable_producer_bond_assessment_pressure",
             "producer_bond_assessment_pressure_scale",
             "disable_producer_bond_assessment_sustain_offset",
+            "enable_producer_activity_composition_shift",
+            "disable_producer_activity_composition_shift",
+            "producer_activity_composition_shift_scale",
+            "producer_activity_composition_shift_max_share",
+            "producer_activity_composition_shift_min_pressure_usd",
+            "producer_activity_composition_shift_to_v2s_share",
+            "producer_activity_composition_own_voucher_stable_probability_max",
             "disable_producer_debt_pressure_batching",
             "disable_producer_debt_penalty",
             "producer_debt_penalty_rate_per_period",
@@ -2665,6 +2863,9 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertFalse(cfg.producer_bond_assessment_sustain_offset_enabled)
         self.assertTrue(cfg.ordinary_own_voucher_stable_borrowing_enabled)
         self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.70)
+        self.assertTrue(cfg.producer_activity_composition_shift_enabled)
+        self.assertAlmostEqual(cfg.producer_activity_composition_shift_scale, 1.0)
+        self.assertAlmostEqual(cfg.producer_activity_composition_shift_max_share, 0.60)
         self.assertTrue(cfg.producer_debt_penalty_enabled)
 
     def test_sarafu_activity_controls_load_settlement_motif_targets(self):

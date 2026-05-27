@@ -281,6 +281,25 @@ class SimulationEngine:
         self._producer_bond_assessment_sustain_offset_v2v_attempts_total: float = 0.0
         self._producer_bond_assessment_sustain_target_reduction_tick: int = 0
         self._producer_bond_assessment_sustain_target_reduction_total: int = 0
+        self._producer_activity_composition_pressure_usd_tick: float = 0.0
+        self._producer_activity_composition_pressure_usd_total: float = 0.0
+        self._producer_activity_composition_shift_share_sum_tick: float = 0.0
+        self._producer_activity_composition_shift_share_count_tick: int = 0
+        self._producer_activity_composition_shift_share_max_tick: float = 0.0
+        self._producer_activity_composition_reference_usd_sum_tick: float = 0.0
+        self._producer_activity_composition_reference_count_tick: int = 0
+        self._producer_activity_composition_v2v_weight_removed_tick: float = 0.0
+        self._producer_activity_composition_v2v_weight_removed_total: float = 0.0
+        self._producer_activity_composition_v2s_weight_added_tick: float = 0.0
+        self._producer_activity_composition_v2s_weight_added_total: float = 0.0
+        self._producer_activity_composition_shifted_route_attempts_tick: int = 0
+        self._producer_activity_composition_shifted_route_attempts_total: int = 0
+        self._producer_activity_composition_shifted_v2s_attempts_tick: int = 0
+        self._producer_activity_composition_shifted_v2s_attempts_total: int = 0
+        self._producer_activity_composition_own_voucher_stable_probability_sum_tick: float = 0.0
+        self._producer_activity_composition_own_voucher_stable_probability_count_tick: int = 0
+        self._producer_activity_composition_own_voucher_stable_probability_max_tick: float = 0.0
+        self._producer_activity_composition_share_cache: Dict[str, tuple[int, float, float, float]] = {}
         self._producer_ordinary_v2v_volume_history: Dict[str, deque[Tuple[int, float]]] = {}
         self._producer_debt_penalty_accrued_usd_tick: float = 0.0
         self._producer_debt_penalty_accrued_usd_total: float = 0.0
@@ -2627,6 +2646,102 @@ class SimulationEngine:
         share = scale * pressure / max(1e-9, pressure + reference)
         return min(max_share, max(0.0, share)), pressure, reference
 
+    def _producer_activity_composition_shift_share(self, pool: "Pool") -> tuple[float, float, float]:
+        if not bool(getattr(self.cfg, "producer_activity_composition_shift_enabled", False)):
+            return 0.0, 0.0, 0.0
+        if pool.policy.role != "producer":
+            return 0.0, 0.0, 0.0
+        cached = self._producer_activity_composition_share_cache.get(pool.pool_id)
+        if cached is not None and cached[0] == self.tick:
+            return cached[1], cached[2], cached[3]
+        pressure = self._producer_debt_attention_pressure_usd(pool)
+        reference = self._producer_debt_attention_reference_usd(pool)
+        min_pressure = max(
+            0.0,
+            float(
+                getattr(
+                    self.cfg,
+                    "producer_activity_composition_shift_min_pressure_usd",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        if pressure <= 1e-9 or pressure < min_pressure:
+            result = (0.0, pressure, reference)
+            self._producer_activity_composition_share_cache[pool.pool_id] = (
+                self.tick,
+                result[0],
+                result[1],
+                result[2],
+            )
+            return result
+        scale = max(
+            0.0,
+            float(getattr(self.cfg, "producer_activity_composition_shift_scale", 1.0) or 0.0),
+        )
+        max_share = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        self.cfg,
+                        "producer_activity_composition_shift_max_share",
+                        0.60,
+                    )
+                    or 0.0
+                ),
+            ),
+        )
+        share = scale * pressure / max(1e-9, pressure + reference)
+        result = (min(max_share, max(0.0, share)), pressure, reference)
+        self._producer_activity_composition_share_cache[pool.pool_id] = (
+            self.tick,
+            result[0],
+            result[1],
+            result[2],
+        )
+        return result
+
+    def _record_producer_activity_composition_shift(
+        self,
+        *,
+        share: float,
+        pressure: float,
+        reference: float,
+        v2v_removed: float,
+        v2s_added: float,
+        motif: Optional[str],
+    ) -> None:
+        self._producer_activity_composition_reference_usd_sum_tick += reference
+        self._producer_activity_composition_reference_count_tick += 1
+        if pressure > 1e-9:
+            self._producer_activity_composition_pressure_usd_tick += pressure
+            self._producer_activity_composition_pressure_usd_total += pressure
+        self._producer_activity_composition_shift_share_sum_tick += share
+        self._producer_activity_composition_shift_share_count_tick += 1
+        self._producer_activity_composition_shift_share_max_tick = max(
+            self._producer_activity_composition_shift_share_max_tick,
+            share,
+        )
+        if share <= 1e-12:
+            return
+        self._producer_activity_composition_shifted_route_attempts_tick += 1
+        self._producer_activity_composition_shifted_route_attempts_total += 1
+        if motif == "voucher_to_stable":
+            self._producer_activity_composition_shifted_v2s_attempts_tick += 1
+            self._producer_activity_composition_shifted_v2s_attempts_total += 1
+        if v2v_removed > 1e-12:
+            self._producer_activity_composition_v2v_weight_removed_tick += v2v_removed
+            self._producer_activity_composition_v2v_weight_removed_total += v2v_removed
+        if v2s_added > 1e-12:
+            self._producer_activity_composition_v2s_weight_added_tick += v2s_added
+            self._producer_activity_composition_v2s_weight_added_total += v2s_added
+
+    def _invalidate_producer_activity_composition_share_cache(self, pool_id: str) -> None:
+        self._producer_activity_composition_share_cache.pop(pool_id, None)
+
     def _apply_producer_debt_attention_crowdout(self, pool: "Pool", remaining_attempts: int) -> int:
         if remaining_attempts <= 0:
             return 0
@@ -3020,7 +3135,11 @@ class SimulationEngine:
             v2s *= max(0.0, 1.0 - min(1.0, s2v))
         return v2v, v2s, s2v
 
-    def _settlement_motif_targets(self) -> Dict[str, float]:
+    def _settlement_motif_targets(
+        self,
+        source_pool: Optional["Pool"] = None,
+        route_context: str = "ordinary",
+    ) -> Dict[str, float]:
         if not bool(getattr(self.cfg, "settlement_motif_targeting_enabled", False)):
             return {}
         v2v, v2s, s2v = self._settlement_motif_weights()
@@ -3032,10 +3151,48 @@ class SimulationEngine:
         total = sum(weights.values())
         if total <= 1e-12:
             return {}
-        return {k: v / total for k, v in weights.items() if v > 0.0}
+        targets = {k: v / total for k, v in weights.items() if v > 0.0}
+        if (
+            source_pool is None
+            or str(route_context or "ordinary") != "ordinary"
+            or source_pool.policy.role != "producer"
+            or not bool(getattr(self.cfg, "producer_activity_composition_shift_enabled", False))
+        ):
+            return targets
 
-    def _settlement_motif_choice(self) -> Optional[str]:
-        targets = self._settlement_motif_targets()
+        share, _pressure, _reference = self._producer_activity_composition_shift_share(source_pool)
+        if share <= 1e-12:
+            return targets
+
+        transfer_share = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        self.cfg,
+                        "producer_activity_composition_shift_to_v2s_share",
+                        1.0,
+                    )
+                    or 0.0
+                ),
+            ),
+        )
+        v2v_weight = targets.get("voucher_to_voucher", 0.0)
+        v2v_removed = min(v2v_weight, v2v_weight * share * transfer_share)
+        if v2v_removed <= 1e-12:
+            return targets
+        adjusted = dict(targets)
+        adjusted["voucher_to_voucher"] = max(0.0, v2v_weight - v2v_removed)
+        adjusted["voucher_to_stable"] = adjusted.get("voucher_to_stable", 0.0) + v2v_removed
+        return {k: v for k, v in adjusted.items() if v > 1e-12}
+
+    def _settlement_motif_choice(
+        self,
+        source_pool: Optional["Pool"] = None,
+        route_context: str = "ordinary",
+    ) -> Optional[str]:
+        targets = self._settlement_motif_targets(source_pool=source_pool, route_context=route_context)
         if not targets:
             return None
         # These shares are behavioral priors from the empirical settlement mix,
@@ -3046,8 +3203,31 @@ class SimulationEngine:
         for motif, weight in targets.items():
             cumulative += weight
             if draw <= cumulative:
-                return motif
-        return next(iter(targets))
+                choice = motif
+                break
+        else:
+            choice = next(iter(targets))
+        if (
+            source_pool is not None
+            and str(route_context or "ordinary") == "ordinary"
+            and source_pool.policy.role == "producer"
+            and bool(getattr(self.cfg, "producer_activity_composition_shift_enabled", False))
+        ):
+            base_targets = self._settlement_motif_targets()
+            share, pressure, reference = self._producer_activity_composition_shift_share(source_pool)
+            base_v2v = base_targets.get("voucher_to_voucher", 0.0)
+            base_v2s = base_targets.get("voucher_to_stable", 0.0)
+            adjusted_v2v = targets.get("voucher_to_voucher", 0.0)
+            adjusted_v2s = targets.get("voucher_to_stable", 0.0)
+            self._record_producer_activity_composition_shift(
+                share=share,
+                pressure=pressure,
+                reference=reference,
+                v2v_removed=max(0.0, base_v2v - adjusted_v2v),
+                v2s_added=max(0.0, adjusted_v2s - base_v2s),
+                motif=choice,
+            )
+        return choice
 
     def _settlement_motif_classes(self, motif: Optional[str]) -> tuple[Optional[str], Optional[str]]:
         if motif == "voucher_to_voucher":
@@ -3083,8 +3263,11 @@ class SimulationEngine:
             and self._is_producer_own_voucher(source_pool, asset_in)
         )
 
-    def _ordinary_own_voucher_stable_borrowing_probability(self) -> float:
-        return max(
+    def _ordinary_own_voucher_stable_borrowing_probability(
+        self,
+        source_pool: Optional["Pool"] = None,
+    ) -> float:
+        base_probability = max(
             0.0,
             min(
                 1.0,
@@ -3098,6 +3281,32 @@ class SimulationEngine:
                 ),
             ),
         )
+        if (
+            source_pool is None
+            or source_pool.policy.role != "producer"
+            or not bool(getattr(self.cfg, "producer_activity_composition_shift_enabled", False))
+        ):
+            return base_probability
+        share, _pressure, _reference = self._producer_activity_composition_shift_share(source_pool)
+        if share <= 1e-12:
+            return base_probability
+        max_probability = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        self.cfg,
+                        "producer_activity_composition_own_voucher_stable_probability_max",
+                        0.95,
+                    )
+                    or 0.0
+                ),
+            ),
+        )
+        if max_probability <= base_probability:
+            return base_probability
+        return base_probability + (max_probability - base_probability) * share
 
     def _ordinary_own_voucher_stable_target_blocked_for_attempt(
         self,
@@ -3112,7 +3321,14 @@ class SimulationEngine:
             return False
         if not bool(getattr(self.cfg, "ordinary_own_voucher_stable_borrowing_enabled", False)):
             return True
-        probability = self._ordinary_own_voucher_stable_borrowing_probability()
+        probability = self._ordinary_own_voucher_stable_borrowing_probability(source_pool)
+        if bool(getattr(self.cfg, "producer_activity_composition_shift_enabled", False)):
+            self._producer_activity_composition_own_voucher_stable_probability_sum_tick += probability
+            self._producer_activity_composition_own_voucher_stable_probability_count_tick += 1
+            self._producer_activity_composition_own_voucher_stable_probability_max_tick = max(
+                self._producer_activity_composition_own_voucher_stable_probability_max_tick,
+                probability,
+            )
         if probability >= 1.0:
             return False
         if probability <= 0.0:
@@ -4936,6 +5152,7 @@ class SimulationEngine:
         self._next_producer_debt_obligation_id += 1
         self._producer_debt_obligations.append(obligation)
         self._index_producer_debt_obligation(obligation)
+        self._invalidate_producer_activity_composition_share_cache(producer_pool_id)
         self._producer_debt_originated_usd_tick += float(borrowed_usd)
         self._producer_debt_originated_usd_total += float(borrowed_usd)
         self._producer_debt_cash_service_due_usd_tick += cash_service_due
@@ -4987,6 +5204,7 @@ class SimulationEngine:
                 continue
             used = min(remaining, obligation.remaining_voucher_units)
             obligation.remaining_voucher_units = max(0.0, obligation.remaining_voucher_units - used)
+            self._invalidate_producer_activity_composition_share_cache(obligation.producer_pool_id)
             remaining -= used
             reduced_units += used
             reduced_usd = used * unit_value
@@ -5279,6 +5497,7 @@ class SimulationEngine:
         lender_pool = self.pools.get(obligation.lender_pool_id)
         if lender_pool is None:
             obligation.remaining_voucher_units = max(0.0, obligation.remaining_voucher_units - close_units)
+            self._invalidate_producer_activity_composition_share_cache(obligation.producer_pool_id)
             return close_units
 
         held_units = min(close_units, lender_pool.vault.get(obligation.voucher_id))
@@ -5313,6 +5532,7 @@ class SimulationEngine:
                 )
 
         obligation.remaining_voucher_units = max(0.0, obligation.remaining_voucher_units - close_units)
+        self._invalidate_producer_activity_composition_share_cache(obligation.producer_pool_id)
         self._reduce_lender_producer_voucher_exposure(
             obligation.lender_pool_id,
             obligation.voucher_id,
@@ -5382,6 +5602,7 @@ class SimulationEngine:
             eligible_amount_usd=min(payment_usd, eligible_basis_usd),
         )
         obligation.cash_service_remaining_usd = max(0.0, cash_remaining - payment_usd)
+        self._invalidate_producer_activity_composition_share_cache(obligation.producer_pool_id)
         self._record_producer_debt_cash_service_paid(payment_usd)
 
         service_multiplier = self._obligation_cash_service_multiplier(obligation)
@@ -7583,6 +7804,20 @@ class SimulationEngine:
             self._producer_bond_assessment_sustain_offset_attempts_tick = 0.0
             self._producer_bond_assessment_sustain_offset_v2v_attempts_tick = 0.0
             self._producer_bond_assessment_sustain_target_reduction_tick = 0
+            self._producer_activity_composition_pressure_usd_tick = 0.0
+            self._producer_activity_composition_shift_share_sum_tick = 0.0
+            self._producer_activity_composition_shift_share_count_tick = 0
+            self._producer_activity_composition_shift_share_max_tick = 0.0
+            self._producer_activity_composition_reference_usd_sum_tick = 0.0
+            self._producer_activity_composition_reference_count_tick = 0
+            self._producer_activity_composition_v2v_weight_removed_tick = 0.0
+            self._producer_activity_composition_v2s_weight_added_tick = 0.0
+            self._producer_activity_composition_shifted_route_attempts_tick = 0
+            self._producer_activity_composition_shifted_v2s_attempts_tick = 0
+            self._producer_activity_composition_own_voucher_stable_probability_sum_tick = 0.0
+            self._producer_activity_composition_own_voucher_stable_probability_count_tick = 0
+            self._producer_activity_composition_own_voucher_stable_probability_max_tick = 0.0
+            self._producer_activity_composition_share_cache = {}
             self._producer_debt_penalty_accrued_usd_tick = 0.0
             self._producer_debt_penalty_paid_usd_tick = 0.0
             self._producer_loan_attempts_tick = 0
@@ -7921,7 +8156,10 @@ class SimulationEngine:
         motif_source_class: Optional[str] = None
         motif_target_class: Optional[str] = None
         if route_context == "ordinary":
-            motif = self._settlement_motif_choice()
+            motif = self._settlement_motif_choice(
+                source_pool=source_pool,
+                route_context=route_context,
+            )
             motif_source_class, motif_target_class = self._settlement_motif_classes(motif)
 
         # try each asset_in with positive ordinary-spendable inventory
@@ -8799,6 +9037,7 @@ class SimulationEngine:
         obligation.cash_service_remaining_usd += penalty
         obligation.cash_service_arrears_usd += penalty
         obligation.cash_service_penalty_remaining_usd += penalty
+        self._invalidate_producer_activity_composition_share_cache(obligation.producer_pool_id)
         self._producer_debt_penalty_accrued_usd_tick += penalty
         self._producer_debt_penalty_accrued_usd_total += penalty
         self.log.add(Event(
@@ -8863,6 +9102,7 @@ class SimulationEngine:
         missed = max(0.0, due - min(paid, due))
         obligation.cash_service_arrears_usd = missed
         self._apply_producer_debt_pressure_penalty(obligation, missed)
+        self._invalidate_producer_activity_composition_share_cache(obligation.producer_pool_id)
 
     def _execute_producer_self_repayment_swap(
         self,
@@ -9069,6 +9309,7 @@ class SimulationEngine:
             max(0.0, float(getattr(obligation, "pressure_deferred_usd", 0.0) or 0.0))
             + due
         )
+        self._invalidate_producer_activity_composition_share_cache(obligation.producer_pool_id)
         self._producer_debt_pressure_deferred_usd_tick += due
         self._producer_debt_pressure_deferred_usd_total += due
         self.log.add(Event(
@@ -9164,6 +9405,7 @@ class SimulationEngine:
                 applied = min(deferred, remaining_paid)
                 remaining_paid = max(0.0, remaining_paid - applied)
                 obligation.pressure_deferred_usd = 0.0
+                self._invalidate_producer_activity_composition_share_cache(obligation.producer_pool_id)
                 self._record_producer_debt_pressure_payment_allocation(
                     obligation,
                     applied,
@@ -10981,6 +11223,57 @@ class SimulationEngine:
                 ),
                 "producer_bond_assessment_sustain_target_reduction_total": int(
                     self._producer_bond_assessment_sustain_target_reduction_total
+                ),
+                "producer_activity_composition_pressure_usd_tick": float(
+                    self._producer_activity_composition_pressure_usd_tick
+                ),
+                "producer_activity_composition_pressure_usd_total": float(
+                    self._producer_activity_composition_pressure_usd_total
+                ),
+                "producer_activity_composition_shift_share_avg_tick": (
+                    self._producer_activity_composition_shift_share_sum_tick
+                    / max(1, self._producer_activity_composition_shift_share_count_tick)
+                ),
+                "producer_activity_composition_shift_share_max_tick": float(
+                    self._producer_activity_composition_shift_share_max_tick
+                ),
+                "producer_activity_composition_reference_usd": (
+                    self._producer_activity_composition_reference_usd_sum_tick
+                    / max(1, self._producer_activity_composition_reference_count_tick)
+                ),
+                "producer_activity_composition_v2v_weight_removed_tick": float(
+                    self._producer_activity_composition_v2v_weight_removed_tick
+                ),
+                "producer_activity_composition_v2v_weight_removed_total": float(
+                    self._producer_activity_composition_v2v_weight_removed_total
+                ),
+                "producer_activity_composition_v2s_weight_added_tick": float(
+                    self._producer_activity_composition_v2s_weight_added_tick
+                ),
+                "producer_activity_composition_v2s_weight_added_total": float(
+                    self._producer_activity_composition_v2s_weight_added_total
+                ),
+                "producer_activity_composition_shifted_route_attempts_tick": int(
+                    self._producer_activity_composition_shifted_route_attempts_tick
+                ),
+                "producer_activity_composition_shifted_route_attempts_total": int(
+                    self._producer_activity_composition_shifted_route_attempts_total
+                ),
+                "producer_activity_composition_shifted_v2s_attempts_tick": int(
+                    self._producer_activity_composition_shifted_v2s_attempts_tick
+                ),
+                "producer_activity_composition_shifted_v2s_attempts_total": int(
+                    self._producer_activity_composition_shifted_v2s_attempts_total
+                ),
+                "producer_activity_composition_effective_own_voucher_stable_probability_avg_tick": (
+                    self._producer_activity_composition_own_voucher_stable_probability_sum_tick
+                    / max(
+                        1,
+                        self._producer_activity_composition_own_voucher_stable_probability_count_tick,
+                    )
+                ),
+                "producer_activity_composition_effective_own_voucher_stable_probability_max_tick": float(
+                    self._producer_activity_composition_own_voucher_stable_probability_max_tick
                 ),
                 "ordinary_own_voucher_stable_borrowing_enabled": int(
                     bool(getattr(self.cfg, "ordinary_own_voucher_stable_borrowing_enabled", False))

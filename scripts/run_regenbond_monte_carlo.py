@@ -396,6 +396,49 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--enable-producer-activity-composition-shift",
+        action="store_true",
+        help=(
+            "Enable pressure-sensitive producer route preferences that shift "
+            "ordinary producer activity from V2V toward V2S under debt pressure."
+        ),
+    )
+    parser.add_argument(
+        "--disable-producer-activity-composition-shift",
+        action="store_true",
+        help="Ablation: disable pressure-sensitive producer activity composition in validation/frontier profiles.",
+    )
+    parser.add_argument(
+        "--producer-activity-composition-shift-scale",
+        type=float,
+        default=1.0,
+        help="Scale for converting producer debt pressure into producer activity composition shift.",
+    )
+    parser.add_argument(
+        "--producer-activity-composition-shift-max-share",
+        type=float,
+        default=0.60,
+        help="Maximum share of producer V2V motif weight transferable to V2S by pressure.",
+    )
+    parser.add_argument(
+        "--producer-activity-composition-shift-min-pressure-usd",
+        type=float,
+        default=0.0,
+        help="Minimum producer pressure before activity composition preferences shift.",
+    )
+    parser.add_argument(
+        "--producer-activity-composition-shift-to-v2s-share",
+        type=float,
+        default=1.0,
+        help="Share of pressure-removed producer V2V motif weight reassigned to V2S.",
+    )
+    parser.add_argument(
+        "--producer-activity-composition-own-voucher-stable-probability-max",
+        type=float,
+        default=0.95,
+        help="Pressure cap for effective own-voucher-to-stable borrowing probability.",
+    )
+    parser.add_argument(
         "--disable-producer-debt-pressure-batching",
         action="store_true",
         help="Ablation: settle monthly borrower self-repayment pressure without batching.",
@@ -928,6 +971,13 @@ SHARD_CONFIG_KEYS = (
     "enable_producer_bond_assessment_pressure",
     "producer_bond_assessment_pressure_scale",
     "disable_producer_bond_assessment_sustain_offset",
+    "enable_producer_activity_composition_shift",
+    "disable_producer_activity_composition_shift",
+    "producer_activity_composition_shift_scale",
+    "producer_activity_composition_shift_max_share",
+    "producer_activity_composition_shift_min_pressure_usd",
+    "producer_activity_composition_shift_to_v2s_share",
+    "producer_activity_composition_own_voucher_stable_probability_max",
     "disable_producer_debt_pressure_batching",
     "disable_producer_debt_penalty",
     "producer_debt_penalty_rate_per_period",
@@ -2302,6 +2352,7 @@ def configure_producer_debt_pressure(
     attention_default: bool = False,
     bond_assessment_default: bool = False,
     bond_assessment_sustain_offset_default: bool = False,
+    activity_composition_default: bool = False,
 ) -> None:
     cfg.producer_debt_pressure_enabled = not bool(
         getattr(args, "disable_producer_debt_pressure", False)
@@ -2361,11 +2412,73 @@ def configure_producer_debt_pressure(
         0.0,
         float(getattr(args, "producer_debt_attention_min_pressure_usd", 0.0) or 0.0),
     )
+    activity_composition_enabled = (
+        bool(activity_composition_default)
+        or bool(getattr(args, "enable_producer_activity_composition_shift", False))
+    ) and not bool(getattr(args, "disable_producer_activity_composition_shift", False))
+    cfg.producer_activity_composition_shift_enabled = (
+        bool(cfg.producer_debt_pressure_enabled) and activity_composition_enabled
+    )
+    cfg.producer_activity_composition_shift_scale = max(
+        0.0,
+        float(getattr(args, "producer_activity_composition_shift_scale", 1.0) or 0.0),
+    )
+    cfg.producer_activity_composition_shift_max_share = max(
+        0.0,
+        min(
+            1.0,
+            float(getattr(args, "producer_activity_composition_shift_max_share", 0.60) or 0.0),
+        ),
+    )
+    cfg.producer_activity_composition_shift_min_pressure_usd = max(
+        0.0,
+        float(
+            getattr(
+                args,
+                "producer_activity_composition_shift_min_pressure_usd",
+                0.0,
+            )
+            or 0.0
+        ),
+    )
+    cfg.producer_activity_composition_shift_to_v2s_share = max(
+        0.0,
+        min(
+            1.0,
+            float(
+                getattr(
+                    args,
+                    "producer_activity_composition_shift_to_v2s_share",
+                    1.0,
+                )
+                or 0.0
+            ),
+        ),
+    )
+    cfg.producer_activity_composition_own_voucher_stable_probability_max = max(
+        0.0,
+        min(
+            1.0,
+            float(
+                getattr(
+                    args,
+                    "producer_activity_composition_own_voucher_stable_probability_max",
+                    0.95,
+                )
+                or 0.0
+            ),
+        ),
+    )
     bond_assessment_enabled = bool(bond_assessment_default) or bool(
         getattr(args, "enable_producer_bond_assessment_pressure", False)
     )
     cfg.producer_bond_assessment_pressure_enabled = (
-        bool(cfg.producer_debt_attention_crowdout_enabled) and bond_assessment_enabled
+        bool(cfg.producer_debt_pressure_enabled)
+        and (
+            bool(cfg.producer_debt_attention_crowdout_enabled)
+            or bool(cfg.producer_activity_composition_shift_enabled)
+        )
+        and bond_assessment_enabled
     )
     cfg.producer_bond_assessment_pressure_scale = max(
         0.0,
@@ -2592,6 +2705,7 @@ def scenario_config(
             batching_default=True,
             attention_default=True,
             bond_assessment_default=True,
+            activity_composition_default=True,
         )
         cfg.ordinary_own_voucher_stable_borrowing_enabled = True
         cfg.ordinary_own_voucher_stable_borrowing_probability = (
@@ -2924,6 +3038,7 @@ def scenario_config(
             attention_default=True,
             bond_assessment_default=True,
             bond_assessment_sustain_offset_default=True,
+            activity_composition_default=True,
         )
         cfg.ordinary_own_voucher_stable_borrowing_enabled = True
         cfg.ordinary_own_voucher_stable_borrowing_probability = (
@@ -4291,6 +4406,28 @@ def run_one(
             "configured_ordinary_own_voucher_stable_borrowing_probability": safe_float(
                 getattr(cfg, "ordinary_own_voucher_stable_borrowing_probability", 1.0)
             ),
+            "configured_producer_activity_composition_shift_enabled": int(
+                bool(getattr(cfg, "producer_activity_composition_shift_enabled", False))
+            ),
+            "configured_producer_activity_composition_shift_scale": safe_float(
+                getattr(cfg, "producer_activity_composition_shift_scale", 1.0)
+            ),
+            "configured_producer_activity_composition_shift_max_share": safe_float(
+                getattr(cfg, "producer_activity_composition_shift_max_share", 0.60)
+            ),
+            "configured_producer_activity_composition_shift_min_pressure_usd": safe_float(
+                getattr(cfg, "producer_activity_composition_shift_min_pressure_usd", 0.0)
+            ),
+            "configured_producer_activity_composition_shift_to_v2s_share": safe_float(
+                getattr(cfg, "producer_activity_composition_shift_to_v2s_share", 1.0)
+            ),
+            "configured_producer_activity_composition_own_voucher_stable_probability_max": safe_float(
+                getattr(
+                    cfg,
+                    "producer_activity_composition_own_voucher_stable_probability_max",
+                    0.95,
+                )
+            ),
             "configured_producer_debt_penalty_enabled": int(
                 bool(getattr(cfg, "producer_debt_penalty_enabled", False))
             ),
@@ -5635,6 +5772,58 @@ def run_one(
             "producer_bond_assessment_sustain_target_reduction_total": latest.get(
                 "producer_bond_assessment_sustain_target_reduction_total",
                 cumulative_float["producer_bond_assessment_sustain_target_reduction_tick"],
+            ),
+            "producer_activity_composition_pressure_usd": latest.get(
+                "producer_activity_composition_pressure_usd_tick", 0.0
+            ),
+            "producer_activity_composition_pressure_usd_total": latest.get(
+                "producer_activity_composition_pressure_usd_total",
+                cumulative_float["producer_activity_composition_pressure_usd_tick"],
+            ),
+            "producer_activity_composition_shift_share_avg_tick": latest.get(
+                "producer_activity_composition_shift_share_avg_tick", 0.0
+            ),
+            "producer_activity_composition_shift_share_max_tick": latest.get(
+                "producer_activity_composition_shift_share_max_tick", 0.0
+            ),
+            "producer_activity_composition_reference_usd": latest.get(
+                "producer_activity_composition_reference_usd", 0.0
+            ),
+            "producer_activity_composition_v2v_weight_removed": latest.get(
+                "producer_activity_composition_v2v_weight_removed_tick", 0.0
+            ),
+            "producer_activity_composition_v2v_weight_removed_total": latest.get(
+                "producer_activity_composition_v2v_weight_removed_total",
+                cumulative_float["producer_activity_composition_v2v_weight_removed_tick"],
+            ),
+            "producer_activity_composition_v2s_weight_added": latest.get(
+                "producer_activity_composition_v2s_weight_added_tick", 0.0
+            ),
+            "producer_activity_composition_v2s_weight_added_total": latest.get(
+                "producer_activity_composition_v2s_weight_added_total",
+                cumulative_float["producer_activity_composition_v2s_weight_added_tick"],
+            ),
+            "producer_activity_composition_shifted_route_attempts": latest.get(
+                "producer_activity_composition_shifted_route_attempts_tick", 0
+            ),
+            "producer_activity_composition_shifted_route_attempts_total": latest.get(
+                "producer_activity_composition_shifted_route_attempts_total",
+                cumulative_float["producer_activity_composition_shifted_route_attempts_tick"],
+            ),
+            "producer_activity_composition_shifted_v2s_attempts": latest.get(
+                "producer_activity_composition_shifted_v2s_attempts_tick", 0
+            ),
+            "producer_activity_composition_shifted_v2s_attempts_total": latest.get(
+                "producer_activity_composition_shifted_v2s_attempts_total",
+                cumulative_float["producer_activity_composition_shifted_v2s_attempts_tick"],
+            ),
+            "producer_activity_composition_effective_own_voucher_stable_probability_avg_tick": latest.get(
+                "producer_activity_composition_effective_own_voucher_stable_probability_avg_tick",
+                0.0,
+            ),
+            "producer_activity_composition_effective_own_voucher_stable_probability_max_tick": latest.get(
+                "producer_activity_composition_effective_own_voucher_stable_probability_max_tick",
+                0.0,
             ),
             "ordinary_own_voucher_stable_borrowing_enabled": latest.get(
                 "ordinary_own_voucher_stable_borrowing_enabled",
@@ -7960,6 +8149,33 @@ def summarize_frontier_cell(
     producer_bond_assessment_sustain_target_reduction_values = [
         safe_float(row.get("producer_bond_assessment_sustain_target_reduction_total")) for row in rows
     ]
+    producer_activity_composition_pressure_values = [
+        safe_float(row.get("producer_activity_composition_pressure_usd_total")) for row in rows
+    ]
+    producer_activity_composition_shift_share_avg_values = [
+        safe_float(row.get("producer_activity_composition_shift_share_avg_tick")) for row in rows
+    ]
+    producer_activity_composition_shift_share_max_values = [
+        safe_float(row.get("producer_activity_composition_shift_share_max_tick")) for row in rows
+    ]
+    producer_activity_composition_v2v_weight_removed_values = [
+        safe_float(row.get("producer_activity_composition_v2v_weight_removed_total")) for row in rows
+    ]
+    producer_activity_composition_v2s_weight_added_values = [
+        safe_float(row.get("producer_activity_composition_v2s_weight_added_total")) for row in rows
+    ]
+    producer_activity_composition_shifted_route_attempt_values = [
+        safe_float(row.get("producer_activity_composition_shifted_route_attempts_total")) for row in rows
+    ]
+    producer_activity_composition_shifted_v2s_attempt_values = [
+        safe_float(row.get("producer_activity_composition_shifted_v2s_attempts_total")) for row in rows
+    ]
+    producer_activity_composition_effective_own_voucher_probability_values = [
+        safe_float(
+            row.get("producer_activity_composition_effective_own_voucher_stable_probability_avg_tick")
+        )
+        for row in rows
+    ]
     producer_debt_penalty_accrued_values = [
         safe_float(row.get("producer_debt_penalty_accrued_usd_total")) for row in rows
     ]
@@ -8588,6 +8804,30 @@ def summarize_frontier_cell(
             "configured_ordinary_own_voucher_stable_borrowing_probability",
             1.0,
         ),
+        "producer_activity_composition_shift_enabled": first.get(
+            "configured_producer_activity_composition_shift_enabled",
+            0,
+        ),
+        "producer_activity_composition_shift_scale": first.get(
+            "configured_producer_activity_composition_shift_scale",
+            1.0,
+        ),
+        "producer_activity_composition_shift_max_share": first.get(
+            "configured_producer_activity_composition_shift_max_share",
+            0.60,
+        ),
+        "producer_activity_composition_shift_min_pressure_usd": first.get(
+            "configured_producer_activity_composition_shift_min_pressure_usd",
+            0.0,
+        ),
+        "producer_activity_composition_shift_to_v2s_share": first.get(
+            "configured_producer_activity_composition_shift_to_v2s_share",
+            1.0,
+        ),
+        "producer_activity_composition_own_voucher_stable_probability_max": first.get(
+            "configured_producer_activity_composition_own_voucher_stable_probability_max",
+            0.95,
+        ),
         "producer_debt_penalty_enabled": first.get(
             "configured_producer_debt_penalty_enabled",
             0,
@@ -8856,6 +9096,30 @@ def summarize_frontier_cell(
         ),
         "producer_bond_assessment_sustain_target_reduction_total_p50": percentile(
             producer_bond_assessment_sustain_target_reduction_values, 0.50
+        ),
+        "producer_activity_composition_pressure_usd_total_p50": percentile(
+            producer_activity_composition_pressure_values, 0.50
+        ),
+        "producer_activity_composition_shift_share_avg_p50": percentile(
+            producer_activity_composition_shift_share_avg_values, 0.50
+        ),
+        "producer_activity_composition_shift_share_max_p50": percentile(
+            producer_activity_composition_shift_share_max_values, 0.50
+        ),
+        "producer_activity_composition_v2v_weight_removed_total_p50": percentile(
+            producer_activity_composition_v2v_weight_removed_values, 0.50
+        ),
+        "producer_activity_composition_v2s_weight_added_total_p50": percentile(
+            producer_activity_composition_v2s_weight_added_values, 0.50
+        ),
+        "producer_activity_composition_shifted_route_attempts_total_p50": percentile(
+            producer_activity_composition_shifted_route_attempt_values, 0.50
+        ),
+        "producer_activity_composition_shifted_v2s_attempts_total_p50": percentile(
+            producer_activity_composition_shifted_v2s_attempt_values, 0.50
+        ),
+        "producer_activity_composition_effective_own_voucher_stable_probability_avg_p50": percentile(
+            producer_activity_composition_effective_own_voucher_probability_values, 0.50
         ),
         "producer_debt_penalty_accrued_usd_total_p50": percentile(
             producer_debt_penalty_accrued_values, 0.50

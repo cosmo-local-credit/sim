@@ -71,6 +71,11 @@ append_optional_arg PRODUCER_DEBT_ATTENTION_CROWDOUT_MAX_SHARE --producer-debt-a
 append_optional_arg PRODUCER_DEBT_ATTENTION_REFERENCE_USD --producer-debt-attention-reference-usd
 append_optional_arg PRODUCER_DEBT_ATTENTION_MIN_PRESSURE_USD --producer-debt-attention-min-pressure-usd
 append_optional_arg PRODUCER_BOND_ASSESSMENT_PRESSURE_SCALE --producer-bond-assessment-pressure-scale
+append_optional_arg PRODUCER_ACTIVITY_COMPOSITION_SHIFT_SCALE --producer-activity-composition-shift-scale
+append_optional_arg PRODUCER_ACTIVITY_COMPOSITION_SHIFT_MAX_SHARE --producer-activity-composition-shift-max-share
+append_optional_arg PRODUCER_ACTIVITY_COMPOSITION_SHIFT_MIN_PRESSURE_USD --producer-activity-composition-shift-min-pressure-usd
+append_optional_arg PRODUCER_ACTIVITY_COMPOSITION_SHIFT_TO_V2S_SHARE --producer-activity-composition-shift-to-v2s-share
+append_optional_arg PRODUCER_ACTIVITY_COMPOSITION_OWN_VOUCHER_STABLE_PROBABILITY_MAX --producer-activity-composition-own-voucher-stable-probability-max
 append_optional_arg PRODUCER_DEBT_PENALTY_RATE_PER_PERIOD --producer-debt-penalty-rate-per-period
 append_optional_arg ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY --ordinary-own-voucher-stable-borrowing-probability
 case "${DISABLE_PRODUCER_DEBT_PRESSURE:-0}" in
@@ -91,6 +96,16 @@ esac
 case "${DISABLE_PRODUCER_BOND_ASSESSMENT_SUSTAIN_OFFSET:-0}" in
   1|true|TRUE|yes|YES)
     MONTE_CARLO_EXTRA_ARGS+=(--disable-producer-bond-assessment-sustain-offset)
+    ;;
+esac
+case "${ENABLE_PRODUCER_ACTIVITY_COMPOSITION_SHIFT:-0}" in
+  1|true|TRUE|yes|YES)
+    MONTE_CARLO_EXTRA_ARGS+=(--enable-producer-activity-composition-shift)
+    ;;
+esac
+case "${DISABLE_PRODUCER_ACTIVITY_COMPOSITION_SHIFT:-0}" in
+  1|true|TRUE|yes|YES)
+    MONTE_CARLO_EXTRA_ARGS+=(--disable-producer-activity-composition-shift)
     ;;
 esac
 case "${DISABLE_PRODUCER_DEBT_PRESSURE_BATCHING:-0}" in
@@ -155,6 +170,7 @@ echo "[batch] cadence=producer_period:${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4} 
 echo "[batch] producer_debt_pressure=enabled:$([[ ${DISABLE_PRODUCER_DEBT_PRESSURE:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) period:${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4} capacity_share:${PRODUCER_DEBT_PRESSURE_CAPACITY_SHARE:-1.0} prepay_share:${PRODUCER_DEBT_PRESSURE_PREPAY_SHARE:-0.10} batching_enabled:$([[ ${DISABLE_PRODUCER_DEBT_PRESSURE_BATCHING:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) min_swap:${PRODUCER_DEBT_PRESSURE_MIN_SWAP_USD:-empirical_default} penalty_enabled:$([[ ${DISABLE_PRODUCER_DEBT_PENALTY:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) penalty_rate:${PRODUCER_DEBT_PENALTY_RATE_PER_PERIOD:-pool_fee_rate} own_voucher_stable_borrowing:${ENABLE_ORDINARY_OWN_VOUCHER_STABLE_BORROWING:-scenario_default} own_voucher_stable_probability:${ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY:-scenario_default}"
 echo "[batch] producer_debt_attention=scenario_default_or:${ENABLE_PRODUCER_DEBT_ATTENTION_CROWDOUT:-0} scale:${PRODUCER_DEBT_ATTENTION_CROWDOUT_SCALE:-1.0} max_share:${PRODUCER_DEBT_ATTENTION_CROWDOUT_MAX_SHARE:-0.90} reference_usd:${PRODUCER_DEBT_ATTENTION_REFERENCE_USD:-dynamic} min_pressure:${PRODUCER_DEBT_ATTENTION_MIN_PRESSURE_USD:-0.0}"
 echo "[batch] producer_bond_assessment=scenario_default_or:${ENABLE_PRODUCER_BOND_ASSESSMENT_PRESSURE:-0} scale:${PRODUCER_BOND_ASSESSMENT_PRESSURE_SCALE:-1.0} sustain_offset_enabled:$([[ ${DISABLE_PRODUCER_BOND_ASSESSMENT_SUSTAIN_OFFSET:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo scenario_default)"
+echo "[batch] producer_activity_composition=scenario_default_or:${ENABLE_PRODUCER_ACTIVITY_COMPOSITION_SHIFT:-0} disabled:${DISABLE_PRODUCER_ACTIVITY_COMPOSITION_SHIFT:-0} scale:${PRODUCER_ACTIVITY_COMPOSITION_SHIFT_SCALE:-1.0} max_share:${PRODUCER_ACTIVITY_COMPOSITION_SHIFT_MAX_SHARE:-0.60} min_pressure:${PRODUCER_ACTIVITY_COMPOSITION_SHIFT_MIN_PRESSURE_USD:-0.0} to_v2s:${PRODUCER_ACTIVITY_COMPOSITION_SHIFT_TO_V2S_SHARE:-1.0} own_voucher_prob_max:${PRODUCER_ACTIVITY_COMPOSITION_OWN_VOUCHER_STABLE_PROBABILITY_MAX:-0.95}"
 echo "[batch] kes_per_usd=${KES_PER_USD:-missing}"
 echo "[batch] voucher_kes_value=${VOUCHER_KES_VALUE:-missing}"
 

@@ -200,6 +200,12 @@ class ScenarioConfig:
     producer_primary_voucher_borrowing_attempt_share: float = 0.0
     ordinary_own_voucher_stable_borrowing_enabled: bool = False
     ordinary_own_voucher_stable_borrowing_probability: float = 1.0
+    producer_activity_composition_shift_enabled: bool = False
+    producer_activity_composition_shift_scale: float = 1.0
+    producer_activity_composition_shift_max_share: float = 0.60
+    producer_activity_composition_shift_min_pressure_usd: float = 0.0
+    producer_activity_composition_shift_to_v2s_share: float = 1.0
+    producer_activity_composition_own_voucher_stable_probability_max: float = 0.95
     producer_voucher_loan_activity_boost_enabled: bool = False
     producer_voucher_loan_max_target_candidates: int = 3
     lender_voucher_purchase_demand_enabled: bool = False
