@@ -1222,6 +1222,47 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertGreater(pressure_with, pressure_without)
         self.assertGreater(share_with, share_without)
 
+    def test_bond_assessment_sustain_offset_reduces_only_sustain_target(self):
+        def sustain_calls(offset_enabled: bool) -> tuple[int, int]:
+            engine = SimulationEngine(
+                small_config(
+                    initial_lenders=1,
+                    initial_producers=1,
+                    initial_consumers=0,
+                    initial_liquidity_providers=0,
+                    max_pools=2,
+                    swap_sustain_enabled=True,
+                    swap_sustain_window_ticks=1,
+                    swap_sustain_floor_per_tick=0,
+                    swap_sustain_attempts_per_missing_swap=1.0,
+                    swap_sustain_max_extra_attempts=0,
+                    swap_sustain_max_rounds=20,
+                    producer_bond_assessment_sustain_offset_enabled=offset_enabled,
+                ),
+                seed=55,
+            )
+            engine._recent_swap_counts = [10]
+            engine._producer_bond_assessment_sustain_offset_attempts_tick = 3.2
+            calls = 0
+
+            def fake_random_route_request(source_pool=None, max_assets=None, route_context="ordinary"):
+                nonlocal calls
+                calls += 1
+                engine._noam_routing_swaps_tick += 1
+                return 1
+
+            engine._random_route_request = fake_random_route_request
+            engine._sustain_swap_activity()
+            return calls, engine._producer_bond_assessment_sustain_target_reduction_tick
+
+        calls_without_offset, reduction_without_offset = sustain_calls(False)
+        calls_with_offset, reduction_with_offset = sustain_calls(True)
+
+        self.assertEqual(calls_without_offset, 10)
+        self.assertEqual(reduction_without_offset, 0)
+        self.assertEqual(calls_with_offset, 7)
+        self.assertEqual(reduction_with_offset, 3)
+
     def test_debt_pressure_repayment_draws_capacity_for_own_voucher_swap(self):
         engine = SimulationEngine(
             small_config(
@@ -2414,6 +2455,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.producer_debt_attention_min_pressure_usd, 0.0)
         self.assertTrue(cfg.producer_bond_assessment_pressure_enabled)
         self.assertAlmostEqual(cfg.producer_bond_assessment_pressure_scale, 1.0)
+        self.assertTrue(cfg.producer_bond_assessment_sustain_offset_enabled)
         self.assertTrue(cfg.ordinary_own_voucher_stable_borrowing_enabled)
         self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.70)
         self.assertTrue(cfg.producer_debt_penalty_enabled)
@@ -2481,6 +2523,7 @@ class RegenBondRevisionTests(unittest.TestCase):
             "producer_debt_attention_min_pressure_usd",
             "producer_bond_assessment_pressure_enabled",
             "producer_bond_assessment_pressure_scale",
+            "producer_bond_assessment_sustain_offset_enabled",
             "ordinary_own_voucher_stable_borrowing_enabled",
             "ordinary_own_voucher_stable_borrowing_probability",
             "producer_debt_penalty_enabled",
@@ -2555,6 +2598,7 @@ class RegenBondRevisionTests(unittest.TestCase):
             "producer_debt_attention_min_pressure_usd",
             "enable_producer_bond_assessment_pressure",
             "producer_bond_assessment_pressure_scale",
+            "disable_producer_bond_assessment_sustain_offset",
             "disable_producer_debt_pressure_batching",
             "disable_producer_debt_penalty",
             "producer_debt_penalty_rate_per_period",
@@ -2618,6 +2662,7 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.producer_debt_attention_min_pressure_usd, 0.0)
         self.assertTrue(cfg.producer_bond_assessment_pressure_enabled)
         self.assertAlmostEqual(cfg.producer_bond_assessment_pressure_scale, 1.0)
+        self.assertFalse(cfg.producer_bond_assessment_sustain_offset_enabled)
         self.assertTrue(cfg.ordinary_own_voucher_stable_borrowing_enabled)
         self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.70)
         self.assertTrue(cfg.producer_debt_penalty_enabled)

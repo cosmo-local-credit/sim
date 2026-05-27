@@ -275,6 +275,12 @@ class SimulationEngine:
         self._producer_debt_attention_reference_count_tick: int = 0
         self._producer_bond_assessment_pressure_usd_tick: float = 0.0
         self._producer_bond_assessment_pressure_usd_total: float = 0.0
+        self._producer_bond_assessment_sustain_offset_attempts_tick: float = 0.0
+        self._producer_bond_assessment_sustain_offset_attempts_total: float = 0.0
+        self._producer_bond_assessment_sustain_offset_v2v_attempts_tick: float = 0.0
+        self._producer_bond_assessment_sustain_offset_v2v_attempts_total: float = 0.0
+        self._producer_bond_assessment_sustain_target_reduction_tick: int = 0
+        self._producer_bond_assessment_sustain_target_reduction_total: int = 0
         self._producer_ordinary_v2v_volume_history: Dict[str, deque[Tuple[int, float]]] = {}
         self._producer_debt_penalty_accrued_usd_tick: float = 0.0
         self._producer_debt_penalty_accrued_usd_total: float = 0.0
@@ -2627,6 +2633,7 @@ class SimulationEngine:
         share, pressure, reference = self._producer_debt_attention_share(pool)
         self._producer_debt_attention_reference_usd_sum_tick += reference
         self._producer_debt_attention_reference_count_tick += 1
+        bond_pressure = 0.0
         if pressure > 1e-9:
             self._producer_debt_attention_pressure_usd_tick += pressure
             self._producer_debt_attention_pressure_usd_total += pressure
@@ -2652,6 +2659,14 @@ class SimulationEngine:
         if has_voucher_source:
             self._producer_debt_attention_suppressed_v2v_attempts_tick += suppressed
             self._producer_debt_attention_suppressed_v2v_attempts_total += suppressed
+        assessment_offset_attempts = 0.0
+        if bond_pressure > 1e-9 and pressure > 1e-9:
+            assessment_offset_attempts = suppressed * min(1.0, bond_pressure / pressure)
+            self._producer_bond_assessment_sustain_offset_attempts_tick += assessment_offset_attempts
+            self._producer_bond_assessment_sustain_offset_attempts_total += assessment_offset_attempts
+            if has_voucher_source:
+                self._producer_bond_assessment_sustain_offset_v2v_attempts_tick += assessment_offset_attempts
+                self._producer_bond_assessment_sustain_offset_v2v_attempts_total += assessment_offset_attempts
         self.log.add(Event(
             self.tick,
             "PRODUCER_DEBT_ATTENTION_CROWDOUT",
@@ -2663,6 +2678,8 @@ class SimulationEngine:
                 "attention_share": share,
                 "suppressed_attempts": suppressed,
                 "voucher_source_available": has_voucher_source,
+                "bond_assessment_pressure_usd": bond_pressure,
+                "bond_assessment_sustain_offset_attempts": assessment_offset_attempts,
             },
         ))
         return suppressed
@@ -3668,6 +3685,17 @@ class SimulationEngine:
         target = self._swap_sustain_target()
         if target <= 0:
             return
+        if bool(getattr(self.cfg, "producer_bond_assessment_sustain_offset_enabled", False)):
+            offset = max(0.0, float(self._producer_bond_assessment_sustain_offset_attempts_tick or 0.0))
+            if offset > 1e-9:
+                adjusted_target = max(0, int(math.ceil(max(0.0, target - offset))))
+                target_reduction = max(0, target - adjusted_target)
+                if target_reduction > 0:
+                    self._producer_bond_assessment_sustain_target_reduction_tick += target_reduction
+                    self._producer_bond_assessment_sustain_target_reduction_total += target_reduction
+                target = adjusted_target
+                if target <= 0:
+                    return
         executed = self._noam_routing_swaps_tick + self._noam_clearing_swaps_tick
         if executed >= target:
             return
@@ -7552,6 +7580,9 @@ class SimulationEngine:
             self._producer_debt_attention_reference_usd_sum_tick = 0.0
             self._producer_debt_attention_reference_count_tick = 0
             self._producer_bond_assessment_pressure_usd_tick = 0.0
+            self._producer_bond_assessment_sustain_offset_attempts_tick = 0.0
+            self._producer_bond_assessment_sustain_offset_v2v_attempts_tick = 0.0
+            self._producer_bond_assessment_sustain_target_reduction_tick = 0
             self._producer_debt_penalty_accrued_usd_tick = 0.0
             self._producer_debt_penalty_paid_usd_tick = 0.0
             self._producer_loan_attempts_tick = 0
@@ -10932,6 +10963,24 @@ class SimulationEngine:
                 ),
                 "producer_bond_assessment_pressure_usd_total": float(
                     self._producer_bond_assessment_pressure_usd_total
+                ),
+                "producer_bond_assessment_sustain_offset_attempts_tick": float(
+                    self._producer_bond_assessment_sustain_offset_attempts_tick
+                ),
+                "producer_bond_assessment_sustain_offset_attempts_total": float(
+                    self._producer_bond_assessment_sustain_offset_attempts_total
+                ),
+                "producer_bond_assessment_sustain_offset_v2v_attempts_tick": float(
+                    self._producer_bond_assessment_sustain_offset_v2v_attempts_tick
+                ),
+                "producer_bond_assessment_sustain_offset_v2v_attempts_total": float(
+                    self._producer_bond_assessment_sustain_offset_v2v_attempts_total
+                ),
+                "producer_bond_assessment_sustain_target_reduction_tick": int(
+                    self._producer_bond_assessment_sustain_target_reduction_tick
+                ),
+                "producer_bond_assessment_sustain_target_reduction_total": int(
+                    self._producer_bond_assessment_sustain_target_reduction_total
                 ),
                 "ordinary_own_voucher_stable_borrowing_enabled": int(
                     bool(getattr(self.cfg, "ordinary_own_voucher_stable_borrowing_enabled", False))

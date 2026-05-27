@@ -388,6 +388,14 @@ def parse_args() -> argparse.Namespace:
         help="Scale applied to upcoming issuer service need before allocating assessment pressure.",
     )
     parser.add_argument(
+        "--disable-producer-bond-assessment-sustain-offset",
+        action="store_true",
+        help=(
+            "Ablation: allow swap-sustain activity to refill demand suppressed by "
+            "bond-assessment attention pressure."
+        ),
+    )
+    parser.add_argument(
         "--disable-producer-debt-pressure-batching",
         action="store_true",
         help="Ablation: settle monthly borrower self-repayment pressure without batching.",
@@ -919,6 +927,7 @@ SHARD_CONFIG_KEYS = (
     "producer_debt_attention_min_pressure_usd",
     "enable_producer_bond_assessment_pressure",
     "producer_bond_assessment_pressure_scale",
+    "disable_producer_bond_assessment_sustain_offset",
     "disable_producer_debt_pressure_batching",
     "disable_producer_debt_penalty",
     "producer_debt_penalty_rate_per_period",
@@ -2292,6 +2301,7 @@ def configure_producer_debt_pressure(
     batching_default: bool = False,
     attention_default: bool = False,
     bond_assessment_default: bool = False,
+    bond_assessment_sustain_offset_default: bool = False,
 ) -> None:
     cfg.producer_debt_pressure_enabled = not bool(
         getattr(args, "disable_producer_debt_pressure", False)
@@ -2360,6 +2370,11 @@ def configure_producer_debt_pressure(
     cfg.producer_bond_assessment_pressure_scale = max(
         0.0,
         float(getattr(args, "producer_bond_assessment_pressure_scale", 1.0) or 0.0),
+    )
+    cfg.producer_bond_assessment_sustain_offset_enabled = (
+        bool(cfg.producer_bond_assessment_pressure_enabled)
+        and bool(bond_assessment_sustain_offset_default)
+        and not bool(getattr(args, "disable_producer_bond_assessment_sustain_offset", False))
     )
 
 
@@ -2908,6 +2923,7 @@ def scenario_config(
             batching_default=True,
             attention_default=True,
             bond_assessment_default=True,
+            bond_assessment_sustain_offset_default=True,
         )
         cfg.ordinary_own_voucher_stable_borrowing_enabled = True
         cfg.ordinary_own_voucher_stable_borrowing_probability = (
@@ -3903,6 +3919,9 @@ def run_one(
             "producer_debt_attention_suppressed_attempts_tick",
             "producer_debt_attention_suppressed_v2v_attempts_tick",
             "producer_bond_assessment_pressure_usd_tick",
+            "producer_bond_assessment_sustain_offset_attempts_tick",
+            "producer_bond_assessment_sustain_offset_v2v_attempts_tick",
+            "producer_bond_assessment_sustain_target_reduction_tick",
             "producer_debt_penalty_accrued_usd_tick",
             "producer_debt_penalty_paid_usd_tick",
             "producer_debt_matured_usd_tick",
@@ -4262,6 +4281,9 @@ def run_one(
             ),
             "configured_producer_bond_assessment_pressure_scale": safe_float(
                 getattr(cfg, "producer_bond_assessment_pressure_scale", 1.0)
+            ),
+            "configured_producer_bond_assessment_sustain_offset_enabled": int(
+                bool(getattr(cfg, "producer_bond_assessment_sustain_offset_enabled", False))
             ),
             "configured_ordinary_own_voucher_stable_borrowing_enabled": int(
                 bool(getattr(cfg, "ordinary_own_voucher_stable_borrowing_enabled", False))
@@ -5592,6 +5614,27 @@ def run_one(
             "producer_bond_assessment_pressure_usd_total": latest.get(
                 "producer_bond_assessment_pressure_usd_total",
                 cumulative_float["producer_bond_assessment_pressure_usd_tick"],
+            ),
+            "producer_bond_assessment_sustain_offset_attempts": latest.get(
+                "producer_bond_assessment_sustain_offset_attempts_tick", 0.0
+            ),
+            "producer_bond_assessment_sustain_offset_attempts_total": latest.get(
+                "producer_bond_assessment_sustain_offset_attempts_total",
+                cumulative_float["producer_bond_assessment_sustain_offset_attempts_tick"],
+            ),
+            "producer_bond_assessment_sustain_offset_v2v_attempts": latest.get(
+                "producer_bond_assessment_sustain_offset_v2v_attempts_tick", 0.0
+            ),
+            "producer_bond_assessment_sustain_offset_v2v_attempts_total": latest.get(
+                "producer_bond_assessment_sustain_offset_v2v_attempts_total",
+                cumulative_float["producer_bond_assessment_sustain_offset_v2v_attempts_tick"],
+            ),
+            "producer_bond_assessment_sustain_target_reduction": latest.get(
+                "producer_bond_assessment_sustain_target_reduction_tick", 0
+            ),
+            "producer_bond_assessment_sustain_target_reduction_total": latest.get(
+                "producer_bond_assessment_sustain_target_reduction_total",
+                cumulative_float["producer_bond_assessment_sustain_target_reduction_tick"],
             ),
             "ordinary_own_voucher_stable_borrowing_enabled": latest.get(
                 "ordinary_own_voucher_stable_borrowing_enabled",
@@ -7908,6 +7951,15 @@ def summarize_frontier_cell(
     producer_bond_assessment_pressure_values = [
         safe_float(row.get("producer_bond_assessment_pressure_usd_total")) for row in rows
     ]
+    producer_bond_assessment_sustain_offset_attempt_values = [
+        safe_float(row.get("producer_bond_assessment_sustain_offset_attempts_total")) for row in rows
+    ]
+    producer_bond_assessment_sustain_offset_v2v_attempt_values = [
+        safe_float(row.get("producer_bond_assessment_sustain_offset_v2v_attempts_total")) for row in rows
+    ]
+    producer_bond_assessment_sustain_target_reduction_values = [
+        safe_float(row.get("producer_bond_assessment_sustain_target_reduction_total")) for row in rows
+    ]
     producer_debt_penalty_accrued_values = [
         safe_float(row.get("producer_debt_penalty_accrued_usd_total")) for row in rows
     ]
@@ -8524,6 +8576,10 @@ def summarize_frontier_cell(
             "configured_producer_debt_pressure_min_swap_usd",
             0.0,
         ),
+        "producer_bond_assessment_sustain_offset_enabled": first.get(
+            "configured_producer_bond_assessment_sustain_offset_enabled",
+            0,
+        ),
         "ordinary_own_voucher_stable_borrowing_enabled": first.get(
             "configured_ordinary_own_voucher_stable_borrowing_enabled",
             0,
@@ -8791,6 +8847,15 @@ def summarize_frontier_cell(
         ),
         "producer_bond_assessment_pressure_usd_total_p50": percentile(
             producer_bond_assessment_pressure_values, 0.50
+        ),
+        "producer_bond_assessment_sustain_offset_attempts_total_p50": percentile(
+            producer_bond_assessment_sustain_offset_attempt_values, 0.50
+        ),
+        "producer_bond_assessment_sustain_offset_v2v_attempts_total_p50": percentile(
+            producer_bond_assessment_sustain_offset_v2v_attempt_values, 0.50
+        ),
+        "producer_bond_assessment_sustain_target_reduction_total_p50": percentile(
+            producer_bond_assessment_sustain_target_reduction_values, 0.50
         ),
         "producer_debt_penalty_accrued_usd_total_p50": percentile(
             producer_debt_penalty_accrued_values, 0.50

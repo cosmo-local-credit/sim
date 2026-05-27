@@ -338,6 +338,7 @@ class ScenarioConfig:
     producer_debt_attention_min_pressure_usd: float = 0.0
     producer_bond_assessment_pressure_enabled: bool = False
     producer_bond_assessment_pressure_scale: float = 1.0
+    producer_bond_assessment_sustain_offset_enabled: bool = False
 
     # Swap sizing (share of pool value, per attempt)
     swap_size_mean_frac: float = 0.02

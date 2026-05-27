@@ -88,6 +88,11 @@ case "${ENABLE_PRODUCER_BOND_ASSESSMENT_PRESSURE:-0}" in
     MONTE_CARLO_EXTRA_ARGS+=(--enable-producer-bond-assessment-pressure)
     ;;
 esac
+case "${DISABLE_PRODUCER_BOND_ASSESSMENT_SUSTAIN_OFFSET:-0}" in
+  1|true|TRUE|yes|YES)
+    MONTE_CARLO_EXTRA_ARGS+=(--disable-producer-bond-assessment-sustain-offset)
+    ;;
+esac
 case "${DISABLE_PRODUCER_DEBT_PRESSURE_BATCHING:-0}" in
   1|true|TRUE|yes|YES)
     MONTE_CARLO_EXTRA_ARGS+=(--disable-producer-debt-pressure-batching)
@@ -149,7 +154,7 @@ echo "[batch] voucher_settlement_mode=${VOUCHER_SETTLEMENT_MODE:-redeem_outputs}
 echo "[batch] cadence=producer_period:${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4} producer_maturity:${PRODUCER_DEBT_MATURITY_TICKS:-13} pool_clearing:${POOL_CLEARING_STRIDE:-13} issuer_payment:${ISSUER_PAYMENT_STRIDE:-13}"
 echo "[batch] producer_debt_pressure=enabled:$([[ ${DISABLE_PRODUCER_DEBT_PRESSURE:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) period:${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4} capacity_share:${PRODUCER_DEBT_PRESSURE_CAPACITY_SHARE:-1.0} prepay_share:${PRODUCER_DEBT_PRESSURE_PREPAY_SHARE:-0.10} batching_enabled:$([[ ${DISABLE_PRODUCER_DEBT_PRESSURE_BATCHING:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) min_swap:${PRODUCER_DEBT_PRESSURE_MIN_SWAP_USD:-empirical_default} penalty_enabled:$([[ ${DISABLE_PRODUCER_DEBT_PENALTY:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) penalty_rate:${PRODUCER_DEBT_PENALTY_RATE_PER_PERIOD:-pool_fee_rate} own_voucher_stable_borrowing:${ENABLE_ORDINARY_OWN_VOUCHER_STABLE_BORROWING:-scenario_default} own_voucher_stable_probability:${ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY:-scenario_default}"
 echo "[batch] producer_debt_attention=scenario_default_or:${ENABLE_PRODUCER_DEBT_ATTENTION_CROWDOUT:-0} scale:${PRODUCER_DEBT_ATTENTION_CROWDOUT_SCALE:-1.0} max_share:${PRODUCER_DEBT_ATTENTION_CROWDOUT_MAX_SHARE:-0.90} reference_usd:${PRODUCER_DEBT_ATTENTION_REFERENCE_USD:-dynamic} min_pressure:${PRODUCER_DEBT_ATTENTION_MIN_PRESSURE_USD:-0.0}"
-echo "[batch] producer_bond_assessment=scenario_default_or:${ENABLE_PRODUCER_BOND_ASSESSMENT_PRESSURE:-0} scale:${PRODUCER_BOND_ASSESSMENT_PRESSURE_SCALE:-1.0}"
+echo "[batch] producer_bond_assessment=scenario_default_or:${ENABLE_PRODUCER_BOND_ASSESSMENT_PRESSURE:-0} scale:${PRODUCER_BOND_ASSESSMENT_PRESSURE_SCALE:-1.0} sustain_offset_enabled:$([[ ${DISABLE_PRODUCER_BOND_ASSESSMENT_SUSTAIN_OFFSET:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo scenario_default)"
 echo "[batch] kes_per_usd=${KES_PER_USD:-missing}"
 echo "[batch] voucher_kes_value=${VOUCHER_KES_VALUE:-missing}"
 
