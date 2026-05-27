@@ -74,6 +74,7 @@ class ProducerDebtObligation:
 @dataclass(slots=True)
 class ProducerBorrowingCapacity:
     voucher_id: str
+    aggregate_cap_usd: float
     total_cap_usd: float
     current_exposure_usd: float
     remaining_limit_usd: float
@@ -92,6 +93,12 @@ class ProducerBorrowingCapacity:
         if self.total_cap_usd <= 1e-9:
             return 0.0
         return max(0.0, min(1.0, self.current_exposure_usd / self.total_cap_usd))
+
+    @property
+    def aggregate_utilization(self) -> float:
+        if self.aggregate_cap_usd <= 1e-9:
+            return 0.0
+        return max(0.0, min(1.0, self.current_exposure_usd / self.aggregate_cap_usd))
 
 class SimulationEngine:
     def __init__(self, cfg: ScenarioConfig, seed: int = 1) -> None:
@@ -4810,6 +4817,13 @@ class SimulationEngine:
         *,
         target_asset: Optional[str] = None,
     ) -> ProducerBorrowingCapacity:
+        deposit_multiple = max(0.0, float(self.cfg.lender_voucher_cap_deposit_multiple or 0.0))
+        deposit_value = float(self._producer_deposit_value_by_voucher.get(voucher_id, 0.0))
+        aggregate_cap_usd = (
+            deposit_value * deposit_multiple
+            if bool(self.cfg.producer_deposits_enabled) and deposit_multiple > 0.0
+            else 0.0
+        )
         total_cap_usd = 0.0
         exposure_usd = 0.0
         remaining_limit_usd = 0.0
@@ -4880,6 +4894,7 @@ class SimulationEngine:
 
         return ProducerBorrowingCapacity(
             voucher_id=voucher_id,
+            aggregate_cap_usd=aggregate_cap_usd if aggregate_cap_usd > 0.0 else total_cap_usd,
             total_cap_usd=total_cap_usd,
             current_exposure_usd=exposure_usd,
             remaining_limit_usd=remaining_limit_usd,
@@ -4903,31 +4918,91 @@ class SimulationEngine:
             return {
                 "producer_borrowing_capacity_usd": 0.0,
                 "producer_borrowing_capacity_remaining_usd": 0.0,
+                "producer_borrowing_current_exposure_usd": 0.0,
+                "producer_borrowing_current_summed_lender_cap_usd": 0.0,
+                "producer_borrowing_aggregate_deposit_cap_usd": 0.0,
+                "producer_borrowing_active_aggregate_deposit_cap_usd": 0.0,
+                "producer_borrowing_current_summed_lender_cap_utilization_total": 0.0,
+                "producer_borrowing_aggregate_deposit_cap_utilization_total": 0.0,
+                "producer_borrowing_active_aggregate_deposit_cap_utilization_total": 0.0,
+                "producer_borrowing_aggregate_deposit_cap_utilization_p50": 0.0,
+                "producer_borrowing_aggregate_deposit_cap_utilization_p95": 0.0,
+                "producer_borrowing_active_aggregate_deposit_cap_utilization_p50": 0.0,
+                "producer_borrowing_active_aggregate_deposit_cap_utilization_p95": 0.0,
+                "producer_borrowing_cap_multiplicity_factor": 0.0,
+                "producer_borrowing_active_borrower_count": 0,
                 "producer_borrowing_capacity_utilization_p50": 0.0,
                 "producer_borrowing_capacity_utilization_p95": 0.0,
                 "producer_cap_bound_pool_count": 0,
             }
         utilizations = sorted(cap.utilization for cap in capacities)
+        aggregate_utilizations = sorted(cap.aggregate_utilization for cap in capacities)
+        active_capacities = [cap for cap in capacities if cap.current_exposure_usd > 1e-9]
+        active_aggregate_utilizations = sorted(cap.aggregate_utilization for cap in active_capacities)
 
-        def percentile(prob: float) -> float:
-            if len(utilizations) == 1:
-                return utilizations[0]
-            pos = (len(utilizations) - 1) * max(0.0, min(1.0, prob))
+        def percentile(values: list[float], prob: float) -> float:
+            if not values:
+                return 0.0
+            if len(values) == 1:
+                return values[0]
+            pos = (len(values) - 1) * max(0.0, min(1.0, prob))
             low = math.floor(pos)
             high = math.ceil(pos)
             if low == high:
-                return utilizations[int(pos)]
-            return utilizations[low] + (utilizations[high] - utilizations[low]) * (pos - low)
+                return values[int(pos)]
+            return values[low] + (values[high] - values[low]) * (pos - low)
 
         hard = max(
             0.0,
             min(1.0, float(getattr(self.cfg, "producer_debt_capacity_hard_threshold", 0.98) or 0.0)),
         )
+        current_exposure_usd = sum(cap.current_exposure_usd for cap in capacities)
+        current_summed_cap_usd = sum(cap.total_cap_usd for cap in capacities)
+        aggregate_deposit_cap_usd = sum(cap.aggregate_cap_usd for cap in capacities)
+        active_exposure_usd = sum(cap.current_exposure_usd for cap in active_capacities)
+        active_aggregate_cap_usd = sum(cap.aggregate_cap_usd for cap in active_capacities)
         return {
-            "producer_borrowing_capacity_usd": sum(cap.total_cap_usd for cap in capacities),
+            "producer_borrowing_capacity_usd": current_summed_cap_usd,
             "producer_borrowing_capacity_remaining_usd": sum(cap.remaining_usd for cap in capacities),
-            "producer_borrowing_capacity_utilization_p50": percentile(0.50),
-            "producer_borrowing_capacity_utilization_p95": percentile(0.95),
+            "producer_borrowing_current_exposure_usd": current_exposure_usd,
+            "producer_borrowing_current_summed_lender_cap_usd": current_summed_cap_usd,
+            "producer_borrowing_aggregate_deposit_cap_usd": aggregate_deposit_cap_usd,
+            "producer_borrowing_active_aggregate_deposit_cap_usd": active_aggregate_cap_usd,
+            "producer_borrowing_current_summed_lender_cap_utilization_total": (
+                current_exposure_usd / current_summed_cap_usd if current_summed_cap_usd > 1e-9 else 0.0
+            ),
+            "producer_borrowing_aggregate_deposit_cap_utilization_total": (
+                current_exposure_usd / aggregate_deposit_cap_usd
+                if aggregate_deposit_cap_usd > 1e-9
+                else 0.0
+            ),
+            "producer_borrowing_active_aggregate_deposit_cap_utilization_total": (
+                active_exposure_usd / active_aggregate_cap_usd if active_aggregate_cap_usd > 1e-9 else 0.0
+            ),
+            "producer_borrowing_aggregate_deposit_cap_utilization_p50": percentile(
+                aggregate_utilizations,
+                0.50,
+            ),
+            "producer_borrowing_aggregate_deposit_cap_utilization_p95": percentile(
+                aggregate_utilizations,
+                0.95,
+            ),
+            "producer_borrowing_active_aggregate_deposit_cap_utilization_p50": percentile(
+                active_aggregate_utilizations,
+                0.50,
+            ),
+            "producer_borrowing_active_aggregate_deposit_cap_utilization_p95": percentile(
+                active_aggregate_utilizations,
+                0.95,
+            ),
+            "producer_borrowing_cap_multiplicity_factor": (
+                current_summed_cap_usd / aggregate_deposit_cap_usd
+                if aggregate_deposit_cap_usd > 1e-9
+                else 0.0
+            ),
+            "producer_borrowing_active_borrower_count": len(active_capacities),
+            "producer_borrowing_capacity_utilization_p50": percentile(utilizations, 0.50),
+            "producer_borrowing_capacity_utilization_p95": percentile(utilizations, 0.95),
             "producer_cap_bound_pool_count": sum(1 for cap in capacities if cap.utilization >= hard),
         }
 
@@ -11681,6 +11756,59 @@ class SimulationEngine:
                 ),
                 "producer_borrowing_capacity_remaining_usd": float(
                     producer_borrowing_capacity["producer_borrowing_capacity_remaining_usd"]
+                ),
+                "producer_borrowing_current_exposure_usd": float(
+                    producer_borrowing_capacity["producer_borrowing_current_exposure_usd"]
+                ),
+                "producer_borrowing_current_summed_lender_cap_usd": float(
+                    producer_borrowing_capacity["producer_borrowing_current_summed_lender_cap_usd"]
+                ),
+                "producer_borrowing_aggregate_deposit_cap_usd": float(
+                    producer_borrowing_capacity["producer_borrowing_aggregate_deposit_cap_usd"]
+                ),
+                "producer_borrowing_active_aggregate_deposit_cap_usd": float(
+                    producer_borrowing_capacity["producer_borrowing_active_aggregate_deposit_cap_usd"]
+                ),
+                "producer_borrowing_current_summed_lender_cap_utilization_total": float(
+                    producer_borrowing_capacity[
+                        "producer_borrowing_current_summed_lender_cap_utilization_total"
+                    ]
+                ),
+                "producer_borrowing_aggregate_deposit_cap_utilization_total": float(
+                    producer_borrowing_capacity[
+                        "producer_borrowing_aggregate_deposit_cap_utilization_total"
+                    ]
+                ),
+                "producer_borrowing_active_aggregate_deposit_cap_utilization_total": float(
+                    producer_borrowing_capacity[
+                        "producer_borrowing_active_aggregate_deposit_cap_utilization_total"
+                    ]
+                ),
+                "producer_borrowing_aggregate_deposit_cap_utilization_p50": float(
+                    producer_borrowing_capacity[
+                        "producer_borrowing_aggregate_deposit_cap_utilization_p50"
+                    ]
+                ),
+                "producer_borrowing_aggregate_deposit_cap_utilization_p95": float(
+                    producer_borrowing_capacity[
+                        "producer_borrowing_aggregate_deposit_cap_utilization_p95"
+                    ]
+                ),
+                "producer_borrowing_active_aggregate_deposit_cap_utilization_p50": float(
+                    producer_borrowing_capacity[
+                        "producer_borrowing_active_aggregate_deposit_cap_utilization_p50"
+                    ]
+                ),
+                "producer_borrowing_active_aggregate_deposit_cap_utilization_p95": float(
+                    producer_borrowing_capacity[
+                        "producer_borrowing_active_aggregate_deposit_cap_utilization_p95"
+                    ]
+                ),
+                "producer_borrowing_cap_multiplicity_factor": float(
+                    producer_borrowing_capacity["producer_borrowing_cap_multiplicity_factor"]
+                ),
+                "producer_borrowing_active_borrower_count": int(
+                    producer_borrowing_capacity["producer_borrowing_active_borrower_count"]
                 ),
                 "producer_borrowing_capacity_utilization_p50": float(
                     producer_borrowing_capacity["producer_borrowing_capacity_utilization_p50"]

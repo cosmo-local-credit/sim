@@ -4180,6 +4180,12 @@ def run_one(
             "productive_credit_stable_retained_usd_tick",
             "productive_credit_voucher_deposit_usd_tick",
             "productive_credit_voucher_deposit_cap_clipped_usd_tick",
+            "productive_credit_debt_return_scheduled_usd_tick",
+            "productive_credit_debt_return_received_usd_tick",
+            "productive_credit_debt_return_scheduled_stable_usd_tick",
+            "productive_credit_debt_return_scheduled_voucher_usd_tick",
+            "productive_credit_debt_return_received_stable_usd_tick",
+            "productive_credit_debt_return_received_voucher_usd_tick",
             "producer_debt_cash_service_due_usd_tick",
             "producer_debt_cash_service_paid_usd_tick",
             "producer_debt_service_capacity_credited_usd_tick",
@@ -5808,6 +5814,58 @@ def run_one(
             "producer_borrowing_capacity_remaining_usd": latest.get(
                 "producer_borrowing_capacity_remaining_usd",
                 0.0,
+            ),
+            "producer_borrowing_current_exposure_usd": latest.get(
+                "producer_borrowing_current_exposure_usd",
+                latest.get("lender_held_producer_voucher_inventory_usd", 0.0),
+            ),
+            "producer_borrowing_current_summed_lender_cap_usd": latest.get(
+                "producer_borrowing_current_summed_lender_cap_usd",
+                latest.get("producer_borrowing_capacity_usd", 0.0),
+            ),
+            "producer_borrowing_aggregate_deposit_cap_usd": latest.get(
+                "producer_borrowing_aggregate_deposit_cap_usd",
+                latest.get("producer_deposit_credit_capacity_usd", 0.0),
+            ),
+            "producer_borrowing_active_aggregate_deposit_cap_usd": latest.get(
+                "producer_borrowing_active_aggregate_deposit_cap_usd",
+                latest.get("producer_deposit_credit_capacity_usd", 0.0),
+            ),
+            "producer_borrowing_current_summed_lender_cap_utilization_total": latest.get(
+                "producer_borrowing_current_summed_lender_cap_utilization_total",
+                0.0,
+            ),
+            "producer_borrowing_aggregate_deposit_cap_utilization_total": latest.get(
+                "producer_borrowing_aggregate_deposit_cap_utilization_total",
+                0.0,
+            ),
+            "producer_borrowing_active_aggregate_deposit_cap_utilization_total": latest.get(
+                "producer_borrowing_active_aggregate_deposit_cap_utilization_total",
+                0.0,
+            ),
+            "producer_borrowing_aggregate_deposit_cap_utilization_p50": latest.get(
+                "producer_borrowing_aggregate_deposit_cap_utilization_p50",
+                0.0,
+            ),
+            "producer_borrowing_aggregate_deposit_cap_utilization_p95": latest.get(
+                "producer_borrowing_aggregate_deposit_cap_utilization_p95",
+                0.0,
+            ),
+            "producer_borrowing_active_aggregate_deposit_cap_utilization_p50": latest.get(
+                "producer_borrowing_active_aggregate_deposit_cap_utilization_p50",
+                0.0,
+            ),
+            "producer_borrowing_active_aggregate_deposit_cap_utilization_p95": latest.get(
+                "producer_borrowing_active_aggregate_deposit_cap_utilization_p95",
+                0.0,
+            ),
+            "producer_borrowing_cap_multiplicity_factor": latest.get(
+                "producer_borrowing_cap_multiplicity_factor",
+                0.0,
+            ),
+            "producer_borrowing_active_borrower_count": latest.get(
+                "producer_borrowing_active_borrower_count",
+                0,
             ),
             "producer_borrowing_capacity_utilization_p50": latest.get(
                 "producer_borrowing_capacity_utilization_p50",
@@ -8488,6 +8546,68 @@ def summarize_frontier_cell(
     producer_borrowing_capacity_remaining_values = [
         safe_float(row.get("producer_borrowing_capacity_remaining_usd")) for row in rows
     ]
+    producer_borrowing_current_exposure_values = [
+        safe_float(
+            row.get(
+                "producer_borrowing_current_exposure_usd",
+                row.get("lender_held_producer_voucher_inventory_usd"),
+            )
+        )
+        for row in rows
+    ]
+    producer_borrowing_current_summed_lender_cap_values = [
+        safe_float(
+            row.get(
+                "producer_borrowing_current_summed_lender_cap_usd",
+                row.get("producer_borrowing_capacity_usd"),
+            )
+        )
+        for row in rows
+    ]
+    producer_borrowing_aggregate_deposit_cap_values = [
+        safe_float(
+            row.get(
+                "producer_borrowing_aggregate_deposit_cap_usd",
+                row.get("producer_deposit_credit_capacity_usd"),
+            )
+        )
+        for row in rows
+    ]
+    producer_borrowing_active_aggregate_deposit_cap_values = [
+        safe_float(
+            row.get(
+                "producer_borrowing_active_aggregate_deposit_cap_usd",
+                row.get("producer_deposit_credit_capacity_usd"),
+            )
+        )
+        for row in rows
+    ]
+    producer_borrowing_current_summed_lender_cap_utilization_total_values = [
+        safe_float(row.get("producer_borrowing_current_summed_lender_cap_utilization_total"))
+        for row in rows
+    ]
+    producer_borrowing_aggregate_deposit_cap_utilization_total_values = [
+        safe_float(row.get("producer_borrowing_aggregate_deposit_cap_utilization_total"))
+        for row in rows
+    ]
+    producer_borrowing_active_aggregate_deposit_cap_utilization_total_values = [
+        safe_float(row.get("producer_borrowing_active_aggregate_deposit_cap_utilization_total"))
+        for row in rows
+    ]
+    producer_borrowing_aggregate_deposit_cap_utilization_p95_values = [
+        safe_float(row.get("producer_borrowing_aggregate_deposit_cap_utilization_p95"))
+        for row in rows
+    ]
+    producer_borrowing_active_aggregate_deposit_cap_utilization_p95_values = [
+        safe_float(row.get("producer_borrowing_active_aggregate_deposit_cap_utilization_p95"))
+        for row in rows
+    ]
+    producer_borrowing_cap_multiplicity_values = [
+        safe_float(row.get("producer_borrowing_cap_multiplicity_factor")) for row in rows
+    ]
+    producer_borrowing_active_borrower_count_values = [
+        safe_float(row.get("producer_borrowing_active_borrower_count")) for row in rows
+    ]
     producer_borrowing_capacity_utilization_p50_values = [
         safe_float(row.get("producer_borrowing_capacity_utilization_p50")) for row in rows
     ]
@@ -9537,6 +9657,50 @@ def summarize_frontier_cell(
         "producer_borrowing_capacity_usd_p50": percentile(producer_borrowing_capacity_values, 0.50),
         "producer_borrowing_capacity_remaining_usd_p50": percentile(
             producer_borrowing_capacity_remaining_values,
+            0.50,
+        ),
+        "producer_borrowing_current_exposure_usd_p50": percentile(
+            producer_borrowing_current_exposure_values,
+            0.50,
+        ),
+        "producer_borrowing_current_summed_lender_cap_usd_p50": percentile(
+            producer_borrowing_current_summed_lender_cap_values,
+            0.50,
+        ),
+        "producer_borrowing_aggregate_deposit_cap_usd_p50": percentile(
+            producer_borrowing_aggregate_deposit_cap_values,
+            0.50,
+        ),
+        "producer_borrowing_active_aggregate_deposit_cap_usd_p50": percentile(
+            producer_borrowing_active_aggregate_deposit_cap_values,
+            0.50,
+        ),
+        "producer_borrowing_current_summed_lender_cap_utilization_total_p50": percentile(
+            producer_borrowing_current_summed_lender_cap_utilization_total_values,
+            0.50,
+        ),
+        "producer_borrowing_aggregate_deposit_cap_utilization_total_p50": percentile(
+            producer_borrowing_aggregate_deposit_cap_utilization_total_values,
+            0.50,
+        ),
+        "producer_borrowing_active_aggregate_deposit_cap_utilization_total_p50": percentile(
+            producer_borrowing_active_aggregate_deposit_cap_utilization_total_values,
+            0.50,
+        ),
+        "producer_borrowing_aggregate_deposit_cap_utilization_p95_p50": percentile(
+            producer_borrowing_aggregate_deposit_cap_utilization_p95_values,
+            0.50,
+        ),
+        "producer_borrowing_active_aggregate_deposit_cap_utilization_p95_p50": percentile(
+            producer_borrowing_active_aggregate_deposit_cap_utilization_p95_values,
+            0.50,
+        ),
+        "producer_borrowing_cap_multiplicity_factor_p50": percentile(
+            producer_borrowing_cap_multiplicity_values,
+            0.50,
+        ),
+        "producer_borrowing_active_borrower_count_p50": percentile(
+            producer_borrowing_active_borrower_count_values,
             0.50,
         ),
         "producer_borrowing_capacity_utilization_p50_p50": percentile(

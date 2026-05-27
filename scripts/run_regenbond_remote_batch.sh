@@ -361,6 +361,9 @@ run_frontier() {
   if [[ -n "${PRODUCTIVE_CREDIT_DEBT_RETURN_SCHEDULE:-}" ]]; then
     frontier_extra_args+=(--productive-credit-debt-return-schedule "$PRODUCTIVE_CREDIT_DEBT_RETURN_SCHEDULE")
   fi
+  if [[ -n "${LENDER_VOUCHER_CAP_DEPOSIT_MULTIPLE:-}" ]]; then
+    frontier_extra_args+=(--lender-voucher-cap-deposit-multiple "$LENDER_VOUCHER_CAP_DEPOSIT_MULTIPLE")
+  fi
   case "${ENABLE_PRODUCER_DEBT_CAPACITY_FEEDBACK:-0}" in
     1|true|TRUE|yes|YES)
       frontier_extra_args+=(--enable-producer-debt-capacity-feedback)
@@ -652,6 +655,57 @@ case "$JOB" in
       PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
       run_frontier 3 52 bond_issuer_frontier_capacity_mechanism_smoke current 0.05,0.25,0.50,1.00,2.00 0,0.08,0.15,0.30 1.0
     ;;
+  frontier-cap-sensitivity-smoke)
+    cap_sweep_output_root="${OUTPUT:-$OUTPUT_ROOT/bond_issuer_frontier_cap_sensitivity_smoke}"
+    cap_sweep_dirs=()
+    cap_sweep_multiples="${CAP_SWEEP_MULTIPLES:-5.0 3.0 2.0 1.0}"
+    cap_sweep_multiples="${cap_sweep_multiples//,/ }"
+    for cap_multiple in $cap_sweep_multiples; do
+      cap_label="${cap_multiple//./p}"
+      cap_output="$cap_sweep_output_root/multiple_${cap_label}"
+      cap_sweep_dirs+=("$cap_output")
+      echo "[batch] cap-sensitivity smoke: lender_voucher_cap_deposit_multiple=$cap_multiple output=$cap_output"
+      (
+        export OUTPUT="$cap_output"
+        export LENDER_VOUCHER_CAP_DEPOSIT_MULTIPLE="$cap_multiple"
+        export FRONTIER_MODE="${FRONTIER_MODE:-grid}"
+        export FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}"
+        export ISSUER_PAYMENT_STRIDE="${ISSUER_PAYMENT_STRIDE:-26}"
+        export POOL_CLEARING_STRIDE="${POOL_CLEARING_STRIDE:-13}"
+        export PRODUCER_DEBT_PRESSURE_PERIOD_TICKS="${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4}"
+        export PRODUCER_DEBT_MATURITY_TICKS="${PRODUCER_DEBT_MATURITY_TICKS:-13}"
+        export ENABLE_PRODUCER_DEBT_ATTENTION_CROWDOUT="${ENABLE_PRODUCER_DEBT_ATTENTION_CROWDOUT:-1}"
+        export ENABLE_PRODUCER_BOND_ASSESSMENT_PRESSURE="${ENABLE_PRODUCER_BOND_ASSESSMENT_PRESSURE:-1}"
+        export ENABLE_PRODUCER_ACTIVITY_COMPOSITION_SHIFT="${ENABLE_PRODUCER_ACTIVITY_COMPOSITION_SHIFT:-1}"
+        export ENABLE_PRODUCTIVE_CREDIT_ON_DEBT_ORIGINATION="${ENABLE_PRODUCTIVE_CREDIT_ON_DEBT_ORIGINATION:-1}"
+        export PRODUCTIVE_CREDIT_DEBT_RETURN_SCHEDULE="${PRODUCTIVE_CREDIT_DEBT_RETURN_SCHEDULE:-amortized_monthly}"
+        export ENABLE_PRODUCER_DEBT_CAPACITY_FEEDBACK="${ENABLE_PRODUCER_DEBT_CAPACITY_FEEDBACK:-1}"
+        export ENABLE_PRODUCER_DEBT_STABLE_REPAYMENT_RESERVE="${ENABLE_PRODUCER_DEBT_STABLE_REPAYMENT_RESERVE:-1}"
+        export ENABLE_ORDINARY_OWN_VOUCHER_STABLE_BORROWING="${ENABLE_ORDINARY_OWN_VOUCHER_STABLE_BORROWING:-1}"
+        export ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY="${ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY:-0.70}"
+        export VOUCHER_SETTLEMENT_MODE="${VOUCHER_SETTLEMENT_MODE:-redeem_outputs}"
+        export ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK="${ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK:-1}"
+        export ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST="${ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST:-1}"
+        export ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING="${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-1}"
+        export ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND="${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-1}"
+        export LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK="${LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK:-5}"
+        export LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE="${LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE:-0.75}"
+        export LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE="${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05}"
+        export LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK="${LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK:-184.061305}"
+        export PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}"
+        run_frontier 3 52 bond_issuer_frontier_cap_sensitivity_smoke "current" "0.05,0.25,0.50,1.00,2.00" "0,0.08,0.15,0.30" "1.0"
+      )
+    done
+    cap_analysis_args=()
+    for cap_dir in "${cap_sweep_dirs[@]}"; do
+      cap_analysis_args+=(--input-dir "$cap_dir")
+    done
+    if ! is_dry_run; then
+      "$PYTHON_BIN" scripts/analyze_borrowing_cap_permissiveness.py \
+        --output-dir "$cap_sweep_output_root/borrowing_cap_permissiveness" \
+        "${cap_analysis_args[@]}"
+    fi
+    ;;
   frontier-publication)
     FRONTIER_MODE="${FRONTIER_MODE:-grid}" \
       FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}" \
@@ -664,7 +718,7 @@ case "$JOB" in
     ;;
   *)
     echo "Unknown job: $JOB" >&2
-    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, validation-debt-pressure-sensitivity, validation-debt-pressure-sensitivity-full, frontier-smoke, frontier-maturity-smoke, frontier-feedback-probe, frontier-low-principal-probe, frontier-activity-ablation-probe, frontier-rola-regeneration-probe, frontier-pilot, frontier-current-grid-pilot, frontier-stress-pilot, frontier-capacity-mechanism-smoke, frontier-publication" >&2
+    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, validation-debt-pressure-sensitivity, validation-debt-pressure-sensitivity-full, frontier-smoke, frontier-maturity-smoke, frontier-feedback-probe, frontier-low-principal-probe, frontier-activity-ablation-probe, frontier-rola-regeneration-probe, frontier-pilot, frontier-current-grid-pilot, frontier-stress-pilot, frontier-capacity-mechanism-smoke, frontier-cap-sensitivity-smoke, frontier-publication" >&2
     exit 2
     ;;
 esac
