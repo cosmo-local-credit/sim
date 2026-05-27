@@ -248,6 +248,18 @@ def parse_args() -> argparse.Namespace:
         help="Issuer scheduled payment interval in weekly ticks.",
     )
     parser.add_argument(
+        "--pool-clearing-stride",
+        type=int,
+        default=13,
+        help="Pool-to-issuer clearing interval in weekly ticks for bond_issuer_frontier.",
+    )
+    parser.add_argument(
+        "--producer-debt-maturity-ticks",
+        type=int,
+        default=13,
+        help="Producer own-voucher debt maturity interval in weekly ticks for frontier credit contracts.",
+    )
+    parser.add_argument(
         "--bond-service-lockbox-mode",
         default="remaining_schedule",
         choices=("next_due", "remaining_schedule"),
@@ -324,6 +336,56 @@ def parse_args() -> argparse.Namespace:
             "Minimum visible borrower repayment swap ticket. Validation/frontier "
             "default to max(1, 25% of calibrated lender purchase size) when omitted."
         ),
+    )
+    parser.add_argument(
+        "--enable-producer-debt-attention-crowdout",
+        action="store_true",
+        help=(
+            "Enable pressure-based producer route-attempt crowd-out. Validation/frontier "
+            "profiles enable this by default so low-level lending is continuous with "
+            "higher-stress bond cells."
+        ),
+    )
+    parser.add_argument(
+        "--producer-debt-attention-crowdout-scale",
+        type=float,
+        default=1.0,
+        help="Scale for converting producer debt pressure into ordinary route-attempt crowd-out.",
+    )
+    parser.add_argument(
+        "--producer-debt-attention-crowdout-max-share",
+        type=float,
+        default=0.90,
+        help="Maximum share of remaining producer ordinary route attempts suppressible by debt pressure.",
+    )
+    parser.add_argument(
+        "--producer-debt-attention-reference-usd",
+        type=float,
+        default=None,
+        help=(
+            "Optional reference USD denominator for debt-attention crowd-out. When omitted, "
+            "the engine uses recent producer ordinary V2V volume, then sampled-route fallback."
+        ),
+    )
+    parser.add_argument(
+        "--producer-debt-attention-min-pressure-usd",
+        type=float,
+        default=0.0,
+        help="Minimum producer debt pressure before attention crowd-out can suppress route attempts.",
+    )
+    parser.add_argument(
+        "--enable-producer-bond-assessment-pressure",
+        action="store_true",
+        help=(
+            "Enable issuer-service-driven pool-to-producer assessment pressure. "
+            "Frontier profiles enable this by default; no-principal baselines contribute zero."
+        ),
+    )
+    parser.add_argument(
+        "--producer-bond-assessment-pressure-scale",
+        type=float,
+        default=1.0,
+        help="Scale applied to upcoming issuer service need before allocating assessment pressure.",
     )
     parser.add_argument(
         "--disable-producer-debt-pressure-batching",
@@ -838,6 +900,8 @@ SHARD_CONFIG_KEYS = (
     "certification_policy",
     "issuer_reserve_share",
     "issuer_payment_stride",
+    "pool_clearing_stride",
+    "producer_debt_maturity_ticks",
     "bond_service_lockbox_mode",
     "bond_service_lockbox_coverage_ratio",
     "producer_debt_contract_service_margin_rate",
@@ -848,6 +912,13 @@ SHARD_CONFIG_KEYS = (
     "producer_debt_pressure_capacity_share",
     "producer_debt_pressure_prepay_share",
     "producer_debt_pressure_min_swap_usd",
+    "enable_producer_debt_attention_crowdout",
+    "producer_debt_attention_crowdout_scale",
+    "producer_debt_attention_crowdout_max_share",
+    "producer_debt_attention_reference_usd",
+    "producer_debt_attention_min_pressure_usd",
+    "enable_producer_bond_assessment_pressure",
+    "producer_bond_assessment_pressure_scale",
     "disable_producer_debt_pressure_batching",
     "disable_producer_debt_penalty",
     "producer_debt_penalty_rate_per_period",
@@ -2219,6 +2290,8 @@ def configure_producer_debt_pressure(
     args: argparse.Namespace,
     *,
     batching_default: bool = False,
+    attention_default: bool = False,
+    bond_assessment_default: bool = False,
 ) -> None:
     cfg.producer_debt_pressure_enabled = not bool(
         getattr(args, "disable_producer_debt_pressure", False)
@@ -2252,6 +2325,41 @@ def configure_producer_debt_pressure(
     penalty_rate = getattr(args, "producer_debt_penalty_rate_per_period", None)
     cfg.producer_debt_penalty_rate_per_period = (
         None if penalty_rate is None else max(0.0, float(penalty_rate))
+    )
+    attention_enabled = bool(attention_default) or bool(
+        getattr(args, "enable_producer_debt_attention_crowdout", False)
+    )
+    cfg.producer_debt_attention_crowdout_enabled = (
+        bool(cfg.producer_debt_pressure_enabled) and attention_enabled
+    )
+    cfg.producer_debt_attention_crowdout_scale = max(
+        0.0,
+        float(getattr(args, "producer_debt_attention_crowdout_scale", 1.0) or 0.0),
+    )
+    cfg.producer_debt_attention_crowdout_max_share = max(
+        0.0,
+        min(
+            1.0,
+            float(getattr(args, "producer_debt_attention_crowdout_max_share", 0.90) or 0.0),
+        ),
+    )
+    reference_usd = getattr(args, "producer_debt_attention_reference_usd", None)
+    cfg.producer_debt_attention_reference_usd = (
+        None if reference_usd is None else max(0.0, float(reference_usd))
+    )
+    cfg.producer_debt_attention_min_pressure_usd = max(
+        0.0,
+        float(getattr(args, "producer_debt_attention_min_pressure_usd", 0.0) or 0.0),
+    )
+    bond_assessment_enabled = bool(bond_assessment_default) or bool(
+        getattr(args, "enable_producer_bond_assessment_pressure", False)
+    )
+    cfg.producer_bond_assessment_pressure_enabled = (
+        bool(cfg.producer_debt_attention_crowdout_enabled) and bond_assessment_enabled
+    )
+    cfg.producer_bond_assessment_pressure_scale = max(
+        0.0,
+        float(getattr(args, "producer_bond_assessment_pressure_scale", 1.0) or 0.0),
     )
 
 
@@ -2463,7 +2571,13 @@ def scenario_config(
         )
         cfg.producer_debt_maturity_preserve_reserve = True
         cfg.loan_term_weeks = cfg.producer_debt_maturity_ticks
-        configure_producer_debt_pressure(cfg, args, batching_default=True)
+        configure_producer_debt_pressure(
+            cfg,
+            args,
+            batching_default=True,
+            attention_default=True,
+            bond_assessment_default=True,
+        )
         cfg.ordinary_own_voucher_stable_borrowing_enabled = True
         cfg.ordinary_own_voucher_stable_borrowing_probability = (
             ordinary_own_voucher_stable_borrowing_probability(args, 0.70)
@@ -2726,7 +2840,10 @@ def scenario_config(
             ),
         )
         cfg.producer_debt_maturity_enabled = True
-        cfg.producer_debt_maturity_ticks = max(1, int(getattr(args, "issuer_payment_stride", 13)))
+        cfg.producer_debt_maturity_ticks = max(
+            1,
+            int(getattr(args, "producer_debt_maturity_ticks", 13) or 13),
+        )
         cfg.producer_debt_maturity_recovery_rate = max(
             0.0,
             min(
@@ -2738,7 +2855,10 @@ def scenario_config(
         cfg.loan_term_weeks = cfg.producer_debt_maturity_ticks
         cfg.voucher_fee_conversion_enabled = True
         cfg.quarterly_clearing_enabled = True
-        cfg.quarterly_clearing_stride_ticks = max(1, int(getattr(args, "issuer_payment_stride", 13)))
+        cfg.quarterly_clearing_stride_ticks = max(
+            1,
+            int(getattr(args, "pool_clearing_stride", 13) or 13),
+        )
         cfg.quarterly_clearing_surplus_share = max(
             0.0, min(1.0, float(getattr(args, "_frontier_quarterly_clearing_surplus_share", 1.0)))
         )
@@ -2782,7 +2902,13 @@ def scenario_config(
             cfg.productive_credit_return_rate,
             1.0 + stable_contract_margin,
         )
-        configure_producer_debt_pressure(cfg, args, batching_default=True)
+        configure_producer_debt_pressure(
+            cfg,
+            args,
+            batching_default=True,
+            attention_default=True,
+            bond_assessment_default=True,
+        )
         cfg.ordinary_own_voucher_stable_borrowing_enabled = True
         cfg.ordinary_own_voucher_stable_borrowing_probability = (
             ordinary_own_voucher_stable_borrowing_probability(args, 0.70)
@@ -3773,6 +3899,10 @@ def run_one(
             "producer_debt_pressure_deferred_usd_tick",
             "producer_debt_pressure_batched_swap_count_tick",
             "producer_debt_pressure_batched_swap_volume_usd_tick",
+            "producer_debt_attention_pressure_usd_tick",
+            "producer_debt_attention_suppressed_attempts_tick",
+            "producer_debt_attention_suppressed_v2v_attempts_tick",
+            "producer_bond_assessment_pressure_usd_tick",
             "producer_debt_penalty_accrued_usd_tick",
             "producer_debt_penalty_paid_usd_tick",
             "producer_debt_matured_usd_tick",
@@ -4109,6 +4239,29 @@ def run_one(
             ),
             "configured_producer_debt_pressure_min_swap_usd": safe_float(
                 getattr(cfg, "producer_debt_pressure_min_swap_usd", 0.0)
+            ),
+            "configured_producer_debt_attention_crowdout_enabled": int(
+                bool(getattr(cfg, "producer_debt_attention_crowdout_enabled", False))
+            ),
+            "configured_producer_debt_attention_crowdout_scale": safe_float(
+                getattr(cfg, "producer_debt_attention_crowdout_scale", 1.0)
+            ),
+            "configured_producer_debt_attention_crowdout_max_share": safe_float(
+                getattr(cfg, "producer_debt_attention_crowdout_max_share", 0.90)
+            ),
+            "configured_producer_debt_attention_reference_usd": (
+                ""
+                if getattr(cfg, "producer_debt_attention_reference_usd", None) is None
+                else safe_float(getattr(cfg, "producer_debt_attention_reference_usd", 0.0))
+            ),
+            "configured_producer_debt_attention_min_pressure_usd": safe_float(
+                getattr(cfg, "producer_debt_attention_min_pressure_usd", 0.0)
+            ),
+            "configured_producer_bond_assessment_pressure_enabled": int(
+                bool(getattr(cfg, "producer_bond_assessment_pressure_enabled", False))
+            ),
+            "configured_producer_bond_assessment_pressure_scale": safe_float(
+                getattr(cfg, "producer_bond_assessment_pressure_scale", 1.0)
             ),
             "configured_ordinary_own_voucher_stable_borrowing_enabled": int(
                 bool(getattr(cfg, "ordinary_own_voucher_stable_borrowing_enabled", False))
@@ -5401,6 +5554,44 @@ def run_one(
             "producer_debt_pressure_min_swap_usd": latest.get(
                 "producer_debt_pressure_min_swap_usd",
                 getattr(cfg, "producer_debt_pressure_min_swap_usd", 0.0),
+            ),
+            "producer_debt_attention_pressure_usd": latest.get(
+                "producer_debt_attention_pressure_usd_tick", 0.0
+            ),
+            "producer_debt_attention_pressure_usd_total": latest.get(
+                "producer_debt_attention_pressure_usd_total",
+                cumulative_float["producer_debt_attention_pressure_usd_tick"],
+            ),
+            "producer_debt_attention_suppressed_attempts": latest.get(
+                "producer_debt_attention_suppressed_attempts_tick", 0
+            ),
+            "producer_debt_attention_suppressed_attempts_total": latest.get(
+                "producer_debt_attention_suppressed_attempts_total",
+                cumulative_float["producer_debt_attention_suppressed_attempts_tick"],
+            ),
+            "producer_debt_attention_suppressed_v2v_attempts": latest.get(
+                "producer_debt_attention_suppressed_v2v_attempts_tick", 0
+            ),
+            "producer_debt_attention_suppressed_v2v_attempts_total": latest.get(
+                "producer_debt_attention_suppressed_v2v_attempts_total",
+                cumulative_float["producer_debt_attention_suppressed_v2v_attempts_tick"],
+            ),
+            "producer_debt_attention_share_avg_tick": latest.get(
+                "producer_debt_attention_share_avg_tick", 0.0
+            ),
+            "producer_debt_attention_share_max_tick": latest.get(
+                "producer_debt_attention_share_max_tick", 0.0
+            ),
+            "producer_debt_attention_reference_usd": latest.get(
+                "producer_debt_attention_reference_usd",
+                getattr(cfg, "producer_debt_attention_reference_usd", 0.0) or 0.0,
+            ),
+            "producer_bond_assessment_pressure_usd": latest.get(
+                "producer_bond_assessment_pressure_usd_tick", 0.0
+            ),
+            "producer_bond_assessment_pressure_usd_total": latest.get(
+                "producer_bond_assessment_pressure_usd_total",
+                cumulative_float["producer_bond_assessment_pressure_usd_tick"],
             ),
             "ordinary_own_voucher_stable_borrowing_enabled": latest.get(
                 "ordinary_own_voucher_stable_borrowing_enabled",
@@ -7699,6 +7890,24 @@ def summarize_frontier_cell(
     producer_debt_pressure_batched_swap_volume_values = [
         safe_float(row.get("producer_debt_pressure_batched_swap_volume_usd_total")) for row in rows
     ]
+    producer_debt_attention_pressure_values = [
+        safe_float(row.get("producer_debt_attention_pressure_usd_total")) for row in rows
+    ]
+    producer_debt_attention_suppressed_attempt_values = [
+        safe_float(row.get("producer_debt_attention_suppressed_attempts_total")) for row in rows
+    ]
+    producer_debt_attention_suppressed_v2v_attempt_values = [
+        safe_float(row.get("producer_debt_attention_suppressed_v2v_attempts_total")) for row in rows
+    ]
+    producer_debt_attention_share_avg_values = [
+        safe_float(row.get("producer_debt_attention_share_avg_tick")) for row in rows
+    ]
+    producer_debt_attention_share_max_values = [
+        safe_float(row.get("producer_debt_attention_share_max_tick")) for row in rows
+    ]
+    producer_bond_assessment_pressure_values = [
+        safe_float(row.get("producer_bond_assessment_pressure_usd_total")) for row in rows
+    ]
     producer_debt_penalty_accrued_values = [
         safe_float(row.get("producer_debt_penalty_accrued_usd_total")) for row in rows
     ]
@@ -8564,6 +8773,24 @@ def summarize_frontier_cell(
         ),
         "producer_debt_pressure_batched_swap_volume_usd_total_p50": percentile(
             producer_debt_pressure_batched_swap_volume_values, 0.50
+        ),
+        "producer_debt_attention_pressure_usd_total_p50": percentile(
+            producer_debt_attention_pressure_values, 0.50
+        ),
+        "producer_debt_attention_suppressed_attempts_total_p50": percentile(
+            producer_debt_attention_suppressed_attempt_values, 0.50
+        ),
+        "producer_debt_attention_suppressed_v2v_attempts_total_p50": percentile(
+            producer_debt_attention_suppressed_v2v_attempt_values, 0.50
+        ),
+        "producer_debt_attention_share_avg_p50": percentile(
+            producer_debt_attention_share_avg_values, 0.50
+        ),
+        "producer_debt_attention_share_max_p50": percentile(
+            producer_debt_attention_share_max_values, 0.50
+        ),
+        "producer_bond_assessment_pressure_usd_total_p50": percentile(
+            producer_bond_assessment_pressure_values, 0.50
         ),
         "producer_debt_penalty_accrued_usd_total_p50": percentile(
             producer_debt_penalty_accrued_values, 0.50

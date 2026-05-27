@@ -981,6 +981,247 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(engine._producer_debt_service_capacity_balance_usd(), 10.0)
         self.assertAlmostEqual(engine._producer_debt_service_capacity_credited_usd_total, 10.0)
 
+    def test_debt_attention_crowdout_disabled_suppresses_nothing(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                producer_debt_pressure_enabled=True,
+                producer_debt_attention_crowdout_enabled=False,
+                producer_debt_maturity_enabled=True,
+                producer_debt_maturity_ticks=13,
+            ),
+            seed=44,
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+            contract_cash_service=False,
+        )
+
+        suppressed = engine._apply_producer_debt_attention_crowdout(producer_pool, 4)
+
+        self.assertEqual(suppressed, 0)
+        self.assertEqual(engine._producer_debt_attention_suppressed_attempts_total, 0)
+
+    def test_debt_attention_pressure_increases_with_arrears_and_deferred_due(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                producer_debt_pressure_enabled=True,
+                producer_debt_attention_crowdout_enabled=True,
+                producer_debt_attention_reference_usd=100.0,
+                producer_debt_maturity_enabled=True,
+                producer_debt_maturity_ticks=12,
+                producer_debt_pressure_period_ticks=4,
+            ),
+            seed=45,
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            120.0,
+            120.0,
+            contract_cash_service=False,
+        )
+        base_share, base_pressure, _reference = engine._producer_debt_attention_share(producer_pool)
+        obligation = engine._producer_debt_obligations[0]
+        obligation.cash_service_arrears_usd = 20.0
+        obligation.pressure_deferred_usd = 10.0
+
+        stressed_share, stressed_pressure, _reference = engine._producer_debt_attention_share(producer_pool)
+
+        self.assertGreater(stressed_pressure, base_pressure)
+        self.assertGreater(stressed_share, base_share)
+
+    def test_debt_attention_crowdout_caps_and_does_not_record_route_failure(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                producer_debt_pressure_enabled=True,
+                producer_debt_attention_crowdout_enabled=True,
+                producer_debt_attention_crowdout_max_share=0.50,
+                producer_debt_attention_reference_usd=1.0,
+                producer_debt_maturity_enabled=True,
+                producer_debt_maturity_ticks=4,
+                producer_debt_pressure_period_ticks=4,
+            ),
+            seed=46,
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+            contract_cash_service=False,
+        )
+        before_failures = sum(1 for event in engine.log.events if event.event_type == "ROUTE_FAILED")
+
+        suppressed = engine._apply_producer_debt_attention_crowdout(producer_pool, 4)
+        share, _pressure, _reference = engine._producer_debt_attention_share(producer_pool)
+        after_failures = sum(1 for event in engine.log.events if event.event_type == "ROUTE_FAILED")
+
+        self.assertAlmostEqual(share, 0.50)
+        self.assertEqual(suppressed, 2)
+        self.assertEqual(engine._producer_debt_attention_suppressed_attempts_total, 2)
+        self.assertEqual(engine._producer_debt_attention_suppressed_v2v_attempts_total, 2)
+        self.assertEqual(before_failures, after_failures)
+
+    def test_bond_assessment_pressure_is_zero_without_bond_principal(self):
+        engine = SimulationEngine(
+            small_config(
+                initial_lenders=1,
+                initial_producers=1,
+                initial_consumers=0,
+                initial_liquidity_providers=0,
+                max_pools=2,
+                producer_debt_pressure_enabled=True,
+                producer_debt_attention_crowdout_enabled=True,
+                producer_bond_assessment_pressure_enabled=True,
+                producer_debt_maturity_enabled=True,
+                producer_debt_maturity_ticks=13,
+                bond_gross_principal_usd=0.0,
+            ),
+            seed=52,
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            100.0,
+            100.0,
+            contract_cash_service=False,
+        )
+        engine.tick = 1
+
+        self.assertAlmostEqual(engine._producer_bond_assessment_pressure_usd(producer_pool), 0.0)
+
+    def test_bond_assessment_pressure_scales_with_coupon_and_principal(self):
+        def pressure_for(*, principal: float, coupon: float) -> float:
+            engine = SimulationEngine(
+                small_config(
+                    initial_lenders=1,
+                    initial_producers=1,
+                    initial_consumers=0,
+                    initial_liquidity_providers=0,
+                    max_pools=2,
+                    producer_debt_pressure_enabled=True,
+                    producer_debt_attention_crowdout_enabled=True,
+                    producer_bond_assessment_pressure_enabled=True,
+                    producer_debt_maturity_enabled=True,
+                    producer_debt_maturity_ticks=13,
+                    bond_gross_principal_usd=principal,
+                    bond_term_ticks=260,
+                    issuer_payment_stride_ticks=13,
+                    bond_coupon_target_annual=coupon,
+                ),
+                seed=53,
+            )
+            producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+            producer_pool = engine.pools[producer.pool_id]
+            lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+            voucher_id = producer.voucher_spec.voucher_id
+            engine._register_producer_debt_obligation(
+                producer_pool.pool_id,
+                lender_pool.pool_id,
+                voucher_id,
+                100.0,
+                100.0,
+                contract_cash_service=False,
+            )
+            engine.tick = 1
+            return engine._producer_bond_assessment_pressure_usd(producer_pool)
+
+        low = pressure_for(principal=100.0, coupon=0.0)
+        high_coupon = pressure_for(principal=100.0, coupon=0.20)
+        high_principal = pressure_for(principal=200.0, coupon=0.0)
+
+        self.assertGreater(low, 0.0)
+        self.assertGreater(high_coupon, low)
+        self.assertGreater(high_principal, low)
+
+    def test_bond_assessment_pressure_adds_to_attention_share(self):
+        common = dict(
+            initial_lenders=1,
+            initial_producers=1,
+            initial_consumers=0,
+            initial_liquidity_providers=0,
+            max_pools=2,
+            producer_debt_pressure_enabled=True,
+            producer_debt_attention_crowdout_enabled=True,
+            producer_debt_attention_reference_usd=100.0,
+            producer_debt_maturity_enabled=True,
+            producer_debt_maturity_ticks=13,
+            bond_gross_principal_usd=1000.0,
+            bond_term_ticks=260,
+            issuer_payment_stride_ticks=13,
+            bond_coupon_target_annual=0.20,
+        )
+        engine_without = SimulationEngine(
+            small_config(**common, producer_bond_assessment_pressure_enabled=False),
+            seed=54,
+        )
+        engine_with = SimulationEngine(
+            small_config(**common, producer_bond_assessment_pressure_enabled=True),
+            seed=54,
+        )
+
+        def setup(engine: SimulationEngine):
+            producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+            producer_pool = engine.pools[producer.pool_id]
+            lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+            voucher_id = producer.voucher_spec.voucher_id
+            engine._register_producer_debt_obligation(
+                producer_pool.pool_id,
+                lender_pool.pool_id,
+                voucher_id,
+                100.0,
+                100.0,
+                contract_cash_service=False,
+            )
+            engine.tick = 1
+            return producer_pool
+
+        pool_without = setup(engine_without)
+        pool_with = setup(engine_with)
+        share_without, pressure_without, _reference = engine_without._producer_debt_attention_share(pool_without)
+        share_with, pressure_with, _reference = engine_with._producer_debt_attention_share(pool_with)
+
+        self.assertGreater(pressure_with, pressure_without)
+        self.assertGreater(share_with, share_without)
+
     def test_debt_pressure_repayment_draws_capacity_for_own_voucher_swap(self):
         engine = SimulationEngine(
             small_config(
@@ -2123,7 +2364,9 @@ class RegenBondRevisionTests(unittest.TestCase):
             _current_initial_producers=2,
             _current_initial_consumers=3,
             issuer_reserve_share=0.10,
-            issuer_payment_stride=13,
+            issuer_payment_stride=26,
+            pool_clearing_stride=13,
+            producer_debt_maturity_ticks=13,
             _frontier_producer_stable_deposit_rate_per_month=0.0,
             _frontier_producer_voucher_deposit_rate_per_month=0.0,
             _frontier_productive_credit_return_rate=0.0,
@@ -2146,6 +2389,9 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.bond_gross_principal_usd, 1000.0)
         self.assertAlmostEqual(cfg.bond_deployed_principal_usd, 1000.0)
         self.assertAlmostEqual(cfg.issuer_reserve_share, 0.0)
+        self.assertEqual(cfg.issuer_payment_stride_ticks, 26)
+        self.assertEqual(cfg.quarterly_clearing_stride_ticks, 13)
+        self.assertEqual(cfg.producer_debt_maturity_ticks, 13)
         self.assertAlmostEqual(cfg.producer_debt_maturity_recovery_rate, 0.673)
         self.assertTrue(cfg.bond_service_reserve_enabled)
         self.assertEqual(cfg.bond_service_lockbox_mode, "remaining_schedule")
@@ -2161,6 +2407,13 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.producer_debt_pressure_prepay_share, 0.10)
         self.assertTrue(cfg.producer_debt_pressure_batching_enabled)
         self.assertAlmostEqual(cfg.producer_debt_pressure_min_swap_usd, 1.0)
+        self.assertTrue(cfg.producer_debt_attention_crowdout_enabled)
+        self.assertAlmostEqual(cfg.producer_debt_attention_crowdout_scale, 1.0)
+        self.assertAlmostEqual(cfg.producer_debt_attention_crowdout_max_share, 0.90)
+        self.assertIsNone(cfg.producer_debt_attention_reference_usd)
+        self.assertAlmostEqual(cfg.producer_debt_attention_min_pressure_usd, 0.0)
+        self.assertTrue(cfg.producer_bond_assessment_pressure_enabled)
+        self.assertAlmostEqual(cfg.producer_bond_assessment_pressure_scale, 1.0)
         self.assertTrue(cfg.ordinary_own_voucher_stable_borrowing_enabled)
         self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.70)
         self.assertTrue(cfg.producer_debt_penalty_enabled)
@@ -2221,6 +2474,13 @@ class RegenBondRevisionTests(unittest.TestCase):
             "producer_debt_pressure_prepay_share",
             "producer_debt_pressure_batching_enabled",
             "producer_debt_pressure_min_swap_usd",
+            "producer_debt_attention_crowdout_enabled",
+            "producer_debt_attention_crowdout_scale",
+            "producer_debt_attention_crowdout_max_share",
+            "producer_debt_attention_reference_usd",
+            "producer_debt_attention_min_pressure_usd",
+            "producer_bond_assessment_pressure_enabled",
+            "producer_bond_assessment_pressure_scale",
             "ordinary_own_voucher_stable_borrowing_enabled",
             "ordinary_own_voucher_stable_borrowing_probability",
             "producer_debt_penalty_enabled",
@@ -2280,11 +2540,21 @@ class RegenBondRevisionTests(unittest.TestCase):
             "voucher_fee_conversion_max_swaps_per_epoch",
             "voucher_fee_conversion_max_usd_per_epoch",
             "voucher_settlement_mode",
+            "issuer_payment_stride",
+            "pool_clearing_stride",
+            "producer_debt_maturity_ticks",
             "disable_producer_debt_pressure",
             "producer_debt_pressure_period_ticks",
             "producer_debt_pressure_capacity_share",
             "producer_debt_pressure_prepay_share",
             "producer_debt_pressure_min_swap_usd",
+            "enable_producer_debt_attention_crowdout",
+            "producer_debt_attention_crowdout_scale",
+            "producer_debt_attention_crowdout_max_share",
+            "producer_debt_attention_reference_usd",
+            "producer_debt_attention_min_pressure_usd",
+            "enable_producer_bond_assessment_pressure",
+            "producer_bond_assessment_pressure_scale",
             "disable_producer_debt_pressure_batching",
             "disable_producer_debt_penalty",
             "producer_debt_penalty_rate_per_period",
@@ -2341,6 +2611,13 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertAlmostEqual(cfg.producer_debt_pressure_prepay_share, 0.10)
         self.assertTrue(cfg.producer_debt_pressure_batching_enabled)
         self.assertAlmostEqual(cfg.producer_debt_pressure_min_swap_usd, 1.0)
+        self.assertTrue(cfg.producer_debt_attention_crowdout_enabled)
+        self.assertAlmostEqual(cfg.producer_debt_attention_crowdout_scale, 1.0)
+        self.assertAlmostEqual(cfg.producer_debt_attention_crowdout_max_share, 0.90)
+        self.assertIsNone(cfg.producer_debt_attention_reference_usd)
+        self.assertAlmostEqual(cfg.producer_debt_attention_min_pressure_usd, 0.0)
+        self.assertTrue(cfg.producer_bond_assessment_pressure_enabled)
+        self.assertAlmostEqual(cfg.producer_bond_assessment_pressure_scale, 1.0)
         self.assertTrue(cfg.ordinary_own_voucher_stable_borrowing_enabled)
         self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.70)
         self.assertTrue(cfg.producer_debt_penalty_enabled)

@@ -262,6 +262,20 @@ class SimulationEngine:
         self._producer_debt_pressure_batched_swap_count_total: int = 0
         self._producer_debt_pressure_batched_swap_volume_usd_tick: float = 0.0
         self._producer_debt_pressure_batched_swap_volume_usd_total: float = 0.0
+        self._producer_debt_attention_pressure_usd_tick: float = 0.0
+        self._producer_debt_attention_pressure_usd_total: float = 0.0
+        self._producer_debt_attention_suppressed_attempts_tick: int = 0
+        self._producer_debt_attention_suppressed_attempts_total: int = 0
+        self._producer_debt_attention_suppressed_v2v_attempts_tick: int = 0
+        self._producer_debt_attention_suppressed_v2v_attempts_total: int = 0
+        self._producer_debt_attention_share_sum_tick: float = 0.0
+        self._producer_debt_attention_share_count_tick: int = 0
+        self._producer_debt_attention_share_max_tick: float = 0.0
+        self._producer_debt_attention_reference_usd_sum_tick: float = 0.0
+        self._producer_debt_attention_reference_count_tick: int = 0
+        self._producer_bond_assessment_pressure_usd_tick: float = 0.0
+        self._producer_bond_assessment_pressure_usd_total: float = 0.0
+        self._producer_ordinary_v2v_volume_history: Dict[str, deque[Tuple[int, float]]] = {}
         self._producer_debt_penalty_accrued_usd_tick: float = 0.0
         self._producer_debt_penalty_accrued_usd_total: float = 0.0
         self._producer_debt_penalty_paid_usd_tick: float = 0.0
@@ -2458,6 +2472,201 @@ class SimulationEngine:
             attempts = min(attempts, max_attempts)
         return max(0, attempts)
 
+    def _record_producer_ordinary_v2v_volume(self, pool_id: str, volume_usd: float) -> None:
+        value = max(0.0, float(volume_usd))
+        if value <= 1e-9:
+            return
+        history = self._producer_ordinary_v2v_volume_history.setdefault(pool_id, deque())
+        history.append((self.tick, value))
+        period = max(1, int(getattr(self.cfg, "producer_debt_pressure_period_ticks", MONTH_TICKS) or MONTH_TICKS))
+        cutoff = self.tick - period
+        while history and history[0][0] <= cutoff:
+            history.popleft()
+
+    def _producer_recent_ordinary_v2v_volume_usd(self, pool_id: str) -> float:
+        history = self._producer_ordinary_v2v_volume_history.get(pool_id)
+        if not history:
+            return 0.0
+        period = max(1, int(getattr(self.cfg, "producer_debt_pressure_period_ticks", MONTH_TICKS) or MONTH_TICKS))
+        cutoff = self.tick - period
+        while history and history[0][0] <= cutoff:
+            history.popleft()
+        return sum(value for _tick, value in history)
+
+    def _producer_debt_attention_fallback_reference_usd(self, pool: "Pool") -> float:
+        total_value = self._pool_total_value(pool)
+        multiplier = max(0.0, float(getattr(self.cfg, "voucher_source_swap_size_multiplier", 1.0) or 0.0))
+        reference = total_value * float(getattr(self.cfg, "swap_size_mean_frac", 0.0) or 0.0) * multiplier
+        if reference <= 1e-9:
+            reference = float(getattr(self.cfg, "random_request_amount_mean", 1.0) or 1.0)
+        return max(float(getattr(self.cfg, "swap_size_min_usd", 1.0) or 1.0), reference)
+
+    def _producer_debt_attention_reference_usd(self, pool: "Pool") -> float:
+        configured = getattr(self.cfg, "producer_debt_attention_reference_usd", None)
+        if configured is not None:
+            return max(1e-9, float(configured))
+        recent_v2v = self._producer_recent_ordinary_v2v_volume_usd(pool.pool_id)
+        if recent_v2v > 1e-9:
+            return recent_v2v
+        return self._producer_debt_attention_fallback_reference_usd(pool)
+
+    def _bond_assessment_service_need_usd(self) -> float:
+        if not bool(getattr(self.cfg, "producer_bond_assessment_pressure_enabled", False)):
+            return 0.0
+        principal = max(0.0, float(getattr(self.cfg, "bond_gross_principal_usd", 0.0) or 0.0))
+        if principal <= 1e-9:
+            return 0.0
+        scheduled_due = self._next_issuer_service_due_target()
+        if scheduled_due <= 1e-9:
+            return 0.0
+        paid_or_reserved = (
+            float(self._lp_returned_usd_total or 0.0)
+            + float(self._bond_service_reserve_usd_balance or 0.0)
+        )
+        remaining_need = max(0.0, scheduled_due - paid_or_reserved)
+        scale = max(
+            0.0,
+            float(getattr(self.cfg, "producer_bond_assessment_pressure_scale", 1.0) or 0.0),
+        )
+        return remaining_need * scale
+
+    def _producer_bond_assessment_pressure_usd(self, pool: "Pool") -> float:
+        if pool.policy.role != "producer":
+            return 0.0
+        service_need = self._bond_assessment_service_need_usd()
+        if service_need <= 1e-9:
+            return 0.0
+        voucher_id = self._producer_own_voucher_id(pool)
+        if not voucher_id:
+            return 0.0
+        active_lenders = {
+            obligation.lender_pool_id
+            for obligation in self._producer_debt_obligations
+            if obligation.producer_pool_id == pool.pool_id
+            and obligation.voucher_id == voucher_id
+            and (
+                obligation.remaining_voucher_units > 1e-9
+                or obligation.cash_service_remaining_usd > 1e-9
+                or max(0.0, float(getattr(obligation, "pressure_deferred_usd", 0.0) or 0.0)) > 1e-9
+            )
+        }
+        if not active_lenders:
+            return 0.0
+        producer_exposure = 0.0
+        total_exposure = 0.0
+        for (lender_pool_id, exposure_voucher_id), exposure_usd in (
+            self._lender_producer_voucher_exposure_usd_by_pool_voucher.items()
+        ):
+            exposure = max(0.0, float(exposure_usd))
+            if exposure <= 1e-9:
+                continue
+            total_exposure += exposure
+            if exposure_voucher_id == voucher_id and lender_pool_id in active_lenders:
+                producer_exposure += exposure
+        if total_exposure <= 1e-9 or producer_exposure <= 1e-9:
+            return 0.0
+        return service_need * min(1.0, producer_exposure / total_exposure)
+
+    def _producer_debt_attention_pressure_usd(self, pool: "Pool") -> float:
+        if pool.policy.role != "producer":
+            return 0.0
+        voucher_id = self._producer_own_voucher_id(pool)
+        if not voucher_id:
+            return 0.0
+        period = max(1, int(getattr(self.cfg, "producer_debt_pressure_period_ticks", MONTH_TICKS) or MONTH_TICKS))
+        pressure = 0.0
+        for obligation in self._producer_debt_obligations:
+            if obligation.producer_pool_id != pool.pool_id or obligation.voucher_id != voucher_id:
+                continue
+            remaining_cash = max(0.0, float(obligation.cash_service_remaining_usd))
+            remaining_voucher_usd = max(
+                0.0,
+                float(obligation.remaining_voucher_units) * self._producer_debt_unit_value(obligation),
+            )
+            remaining_usd = max(remaining_cash, remaining_voucher_usd)
+            deferred = max(0.0, float(getattr(obligation, "pressure_deferred_usd", 0.0) or 0.0))
+            arrears = max(0.0, float(getattr(obligation, "cash_service_arrears_usd", 0.0) or 0.0))
+            if remaining_usd <= 1e-9 and deferred <= 1e-9 and arrears <= 1e-9:
+                continue
+            arrears = min(arrears, max(remaining_usd, arrears))
+            scheduled_base = max(0.0, remaining_usd - arrears - deferred)
+            remaining_ticks = max(1, obligation.due_tick - self.tick + 1)
+            remaining_periods = max(1, int(math.ceil(remaining_ticks / period)))
+            scheduled_due = scheduled_base / remaining_periods
+            pressure += deferred + arrears + scheduled_due
+        pressure += self._producer_bond_assessment_pressure_usd(pool)
+        return max(0.0, pressure)
+
+    def _producer_debt_attention_share(self, pool: "Pool") -> tuple[float, float, float]:
+        if not bool(getattr(self.cfg, "producer_debt_attention_crowdout_enabled", False)):
+            return 0.0, 0.0, 0.0
+        if pool.policy.role != "producer":
+            return 0.0, 0.0, 0.0
+        pressure = self._producer_debt_attention_pressure_usd(pool)
+        min_pressure = max(
+            0.0,
+            float(getattr(self.cfg, "producer_debt_attention_min_pressure_usd", 0.0) or 0.0),
+        )
+        reference = self._producer_debt_attention_reference_usd(pool)
+        if pressure <= 1e-9 or pressure < min_pressure:
+            return 0.0, pressure, reference
+        scale = max(
+            0.0,
+            float(getattr(self.cfg, "producer_debt_attention_crowdout_scale", 1.0) or 0.0),
+        )
+        max_share = max(
+            0.0,
+            min(1.0, float(getattr(self.cfg, "producer_debt_attention_crowdout_max_share", 0.90) or 0.0)),
+        )
+        share = scale * pressure / max(1e-9, pressure + reference)
+        return min(max_share, max(0.0, share)), pressure, reference
+
+    def _apply_producer_debt_attention_crowdout(self, pool: "Pool", remaining_attempts: int) -> int:
+        if remaining_attempts <= 0:
+            return 0
+        share, pressure, reference = self._producer_debt_attention_share(pool)
+        self._producer_debt_attention_reference_usd_sum_tick += reference
+        self._producer_debt_attention_reference_count_tick += 1
+        if pressure > 1e-9:
+            self._producer_debt_attention_pressure_usd_tick += pressure
+            self._producer_debt_attention_pressure_usd_total += pressure
+            bond_pressure = self._producer_bond_assessment_pressure_usd(pool)
+            if bond_pressure > 1e-9:
+                self._producer_bond_assessment_pressure_usd_tick += bond_pressure
+                self._producer_bond_assessment_pressure_usd_total += bond_pressure
+        if share <= 1e-12:
+            return 0
+        self._producer_debt_attention_share_sum_tick += share
+        self._producer_debt_attention_share_count_tick += 1
+        self._producer_debt_attention_share_max_tick = max(
+            self._producer_debt_attention_share_max_tick,
+            share,
+        )
+        suppressed = min(remaining_attempts, int(math.ceil(remaining_attempts * share)))
+        if suppressed <= 0:
+            return 0
+        self._producer_debt_attention_suppressed_attempts_tick += suppressed
+        self._producer_debt_attention_suppressed_attempts_total += suppressed
+        candidates = self._route_source_asset_candidates(pool)
+        has_voucher_source = any(self._settlement_asset_class(asset) == "voucher" for asset in candidates)
+        if has_voucher_source:
+            self._producer_debt_attention_suppressed_v2v_attempts_tick += suppressed
+            self._producer_debt_attention_suppressed_v2v_attempts_total += suppressed
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_DEBT_ATTENTION_CROWDOUT",
+            pool_id=pool.pool_id,
+            amount=float(suppressed),
+            meta={
+                "pressure_usd": pressure,
+                "reference_usd": reference,
+                "attention_share": share,
+                "suppressed_attempts": suppressed,
+                "voucher_source_available": has_voucher_source,
+            },
+        ))
+        return suppressed
+
     def _apply_producer_credit_request_budget(
         self,
         pools: list["Pool"],
@@ -2577,6 +2786,8 @@ class SimulationEngine:
                 volume_tick=self._ordinary_route_motif_volume_usd_tick,
                 volume_total=self._ordinary_route_motif_volume_usd_total,
             )
+            if motif == "voucher_to_voucher" and source_pool.policy.role == "producer":
+                self._record_producer_ordinary_v2v_volume(source_pool.pool_id, volume_usd)
         if self._is_market_route_context(route_context):
             self._record_route_motif_bucket(
                 motif=motif,
@@ -7332,6 +7543,15 @@ class SimulationEngine:
             self._producer_debt_pressure_deferred_usd_tick = 0.0
             self._producer_debt_pressure_batched_swap_count_tick = 0
             self._producer_debt_pressure_batched_swap_volume_usd_tick = 0.0
+            self._producer_debt_attention_pressure_usd_tick = 0.0
+            self._producer_debt_attention_suppressed_attempts_tick = 0
+            self._producer_debt_attention_suppressed_v2v_attempts_tick = 0
+            self._producer_debt_attention_share_sum_tick = 0.0
+            self._producer_debt_attention_share_count_tick = 0
+            self._producer_debt_attention_share_max_tick = 0.0
+            self._producer_debt_attention_reference_usd_sum_tick = 0.0
+            self._producer_debt_attention_reference_count_tick = 0
+            self._producer_bond_assessment_pressure_usd_tick = 0.0
             self._producer_debt_penalty_accrued_usd_tick = 0.0
             self._producer_debt_penalty_paid_usd_tick = 0.0
             self._producer_loan_attempts_tick = 0
@@ -7538,9 +7758,17 @@ class SimulationEngine:
                         remaining -= 1
                         if remaining_requests is not None:
                             remaining_requests -= 1
+                if p.policy.role == "producer" and remaining > 0:
+                    suppressed = self._apply_producer_debt_attention_crowdout(p, remaining)
+                    if suppressed > 0:
+                        remaining -= suppressed
+                        if remaining_requests is not None:
+                            remaining_requests = max(0, remaining_requests - suppressed)
                 if remaining > 0:
                     if remaining_requests is not None:
                         remaining = min(remaining, remaining_requests)
+                    if remaining <= 0:
+                        continue
                     attempted = self._random_route_request(source_pool=p, max_assets=remaining)
                     if remaining_requests is not None:
                         remaining_requests = max(0, remaining_requests - attempted)
@@ -10669,6 +10897,41 @@ class SimulationEngine:
                 ),
                 "producer_debt_pressure_min_swap_usd": float(
                     self._producer_debt_pressure_min_swap_usd()
+                ),
+                "producer_debt_attention_pressure_usd_tick": float(
+                    self._producer_debt_attention_pressure_usd_tick
+                ),
+                "producer_debt_attention_pressure_usd_total": float(
+                    self._producer_debt_attention_pressure_usd_total
+                ),
+                "producer_debt_attention_suppressed_attempts_tick": int(
+                    self._producer_debt_attention_suppressed_attempts_tick
+                ),
+                "producer_debt_attention_suppressed_attempts_total": int(
+                    self._producer_debt_attention_suppressed_attempts_total
+                ),
+                "producer_debt_attention_suppressed_v2v_attempts_tick": int(
+                    self._producer_debt_attention_suppressed_v2v_attempts_tick
+                ),
+                "producer_debt_attention_suppressed_v2v_attempts_total": int(
+                    self._producer_debt_attention_suppressed_v2v_attempts_total
+                ),
+                "producer_debt_attention_share_avg_tick": (
+                    self._producer_debt_attention_share_sum_tick
+                    / max(1, self._producer_debt_attention_share_count_tick)
+                ),
+                "producer_debt_attention_share_max_tick": float(
+                    self._producer_debt_attention_share_max_tick
+                ),
+                "producer_debt_attention_reference_usd": (
+                    self._producer_debt_attention_reference_usd_sum_tick
+                    / max(1, self._producer_debt_attention_reference_count_tick)
+                ),
+                "producer_bond_assessment_pressure_usd_tick": float(
+                    self._producer_bond_assessment_pressure_usd_tick
+                ),
+                "producer_bond_assessment_pressure_usd_total": float(
+                    self._producer_bond_assessment_pressure_usd_total
                 ),
                 "ordinary_own_voucher_stable_borrowing_enabled": int(
                     bool(getattr(self.cfg, "ordinary_own_voucher_stable_borrowing_enabled", False))

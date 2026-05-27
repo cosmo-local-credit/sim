@@ -331,6 +331,13 @@ class ScenarioConfig:
     producer_debt_pressure_min_swap_usd: float = 0.0
     producer_debt_penalty_enabled: bool = True
     producer_debt_penalty_rate_per_period: float | None = None
+    producer_debt_attention_crowdout_enabled: bool = False
+    producer_debt_attention_crowdout_scale: float = 1.0
+    producer_debt_attention_crowdout_max_share: float = 0.90
+    producer_debt_attention_reference_usd: float | None = None
+    producer_debt_attention_min_pressure_usd: float = 0.0
+    producer_bond_assessment_pressure_enabled: bool = False
+    producer_bond_assessment_pressure_scale: float = 1.0
 
     # Swap sizing (share of pool value, per attempt)
     swap_size_mean_frac: float = 0.02

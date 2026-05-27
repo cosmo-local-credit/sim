@@ -59,15 +59,33 @@ append_optional_arg SWAP_SUSTAIN_ATTEMPTS_PER_MISSING_SWAP --swap-sustain-attemp
 append_optional_arg VOUCHER_FEE_CONVERSION_MAX_SWAPS_PER_EPOCH --voucher-fee-conversion-max-swaps-per-epoch
 append_optional_arg VOUCHER_FEE_CONVERSION_MAX_USD_PER_EPOCH --voucher-fee-conversion-max-usd-per-epoch
 append_optional_arg VOUCHER_SETTLEMENT_MODE --voucher-settlement-mode
+append_optional_arg ISSUER_PAYMENT_STRIDE --issuer-payment-stride
+append_optional_arg POOL_CLEARING_STRIDE --pool-clearing-stride
+append_optional_arg PRODUCER_DEBT_MATURITY_TICKS --producer-debt-maturity-ticks
 append_optional_arg PRODUCER_DEBT_PRESSURE_PERIOD_TICKS --producer-debt-pressure-period-ticks
 append_optional_arg PRODUCER_DEBT_PRESSURE_CAPACITY_SHARE --producer-debt-pressure-capacity-share
 append_optional_arg PRODUCER_DEBT_PRESSURE_PREPAY_SHARE --producer-debt-pressure-prepay-share
 append_optional_arg PRODUCER_DEBT_PRESSURE_MIN_SWAP_USD --producer-debt-pressure-min-swap-usd
+append_optional_arg PRODUCER_DEBT_ATTENTION_CROWDOUT_SCALE --producer-debt-attention-crowdout-scale
+append_optional_arg PRODUCER_DEBT_ATTENTION_CROWDOUT_MAX_SHARE --producer-debt-attention-crowdout-max-share
+append_optional_arg PRODUCER_DEBT_ATTENTION_REFERENCE_USD --producer-debt-attention-reference-usd
+append_optional_arg PRODUCER_DEBT_ATTENTION_MIN_PRESSURE_USD --producer-debt-attention-min-pressure-usd
+append_optional_arg PRODUCER_BOND_ASSESSMENT_PRESSURE_SCALE --producer-bond-assessment-pressure-scale
 append_optional_arg PRODUCER_DEBT_PENALTY_RATE_PER_PERIOD --producer-debt-penalty-rate-per-period
 append_optional_arg ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY --ordinary-own-voucher-stable-borrowing-probability
 case "${DISABLE_PRODUCER_DEBT_PRESSURE:-0}" in
   1|true|TRUE|yes|YES)
     MONTE_CARLO_EXTRA_ARGS+=(--disable-producer-debt-pressure)
+    ;;
+esac
+case "${ENABLE_PRODUCER_DEBT_ATTENTION_CROWDOUT:-0}" in
+  1|true|TRUE|yes|YES)
+    MONTE_CARLO_EXTRA_ARGS+=(--enable-producer-debt-attention-crowdout)
+    ;;
+esac
+case "${ENABLE_PRODUCER_BOND_ASSESSMENT_PRESSURE:-0}" in
+  1|true|TRUE|yes|YES)
+    MONTE_CARLO_EXTRA_ARGS+=(--enable-producer-bond-assessment-pressure)
     ;;
 esac
 case "${DISABLE_PRODUCER_DEBT_PRESSURE_BATCHING:-0}" in
@@ -128,7 +146,10 @@ echo "[batch] route_success_mode=${ROUTE_SUCCESS_MODE:-diagnostic}"
 echo "[batch] routing_profile=max_hops:${MAX_HOPS:-3} noam_max_hops:${NOAM_MAX_HOPS:-3} overlay:${NOAM_OVERLAY_ENABLED:-1} clearing:${NOAM_CLEARING_ENABLED:-1} clearing_stride:${NOAM_CLEARING_STRIDE_TICKS:-13}"
 echo "[batch] activity_profile=decision_based:${DECISION_BASED_ACTIVITY_ENABLED:-1} repeat_partner_share:${REPEAT_PARTNER_ROUTE_SHARE:-0.70} buddy_min:${AFFINITY_BUDDY_MIN_COUNT:-1}"
 echo "[batch] voucher_settlement_mode=${VOUCHER_SETTLEMENT_MODE:-redeem_outputs}"
+echo "[batch] cadence=producer_period:${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4} producer_maturity:${PRODUCER_DEBT_MATURITY_TICKS:-13} pool_clearing:${POOL_CLEARING_STRIDE:-13} issuer_payment:${ISSUER_PAYMENT_STRIDE:-13}"
 echo "[batch] producer_debt_pressure=enabled:$([[ ${DISABLE_PRODUCER_DEBT_PRESSURE:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) period:${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4} capacity_share:${PRODUCER_DEBT_PRESSURE_CAPACITY_SHARE:-1.0} prepay_share:${PRODUCER_DEBT_PRESSURE_PREPAY_SHARE:-0.10} batching_enabled:$([[ ${DISABLE_PRODUCER_DEBT_PRESSURE_BATCHING:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) min_swap:${PRODUCER_DEBT_PRESSURE_MIN_SWAP_USD:-empirical_default} penalty_enabled:$([[ ${DISABLE_PRODUCER_DEBT_PENALTY:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) penalty_rate:${PRODUCER_DEBT_PENALTY_RATE_PER_PERIOD:-pool_fee_rate} own_voucher_stable_borrowing:${ENABLE_ORDINARY_OWN_VOUCHER_STABLE_BORROWING:-scenario_default} own_voucher_stable_probability:${ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY:-scenario_default}"
+echo "[batch] producer_debt_attention=scenario_default_or:${ENABLE_PRODUCER_DEBT_ATTENTION_CROWDOUT:-0} scale:${PRODUCER_DEBT_ATTENTION_CROWDOUT_SCALE:-1.0} max_share:${PRODUCER_DEBT_ATTENTION_CROWDOUT_MAX_SHARE:-0.90} reference_usd:${PRODUCER_DEBT_ATTENTION_REFERENCE_USD:-dynamic} min_pressure:${PRODUCER_DEBT_ATTENTION_MIN_PRESSURE_USD:-0.0}"
+echo "[batch] producer_bond_assessment=scenario_default_or:${ENABLE_PRODUCER_BOND_ASSESSMENT_PRESSURE:-0} scale:${PRODUCER_BOND_ASSESSMENT_PRESSURE_SCALE:-1.0}"
 echo "[batch] kes_per_usd=${KES_PER_USD:-missing}"
 echo "[batch] voucher_kes_value=${VOUCHER_KES_VALUE:-missing}"
 
