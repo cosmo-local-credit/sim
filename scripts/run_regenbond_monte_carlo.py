@@ -10501,7 +10501,7 @@ def write_frontier_notes(output_dir: Path, args: argparse.Namespace, summary_row
         "- Gross bond principal is the bond amount; it is divided evenly across lender pools as lendable stable at initialization, bypassing the startup waterfall.",
         "- Strong pools are eligible at full weight; moderate pools are capped; weak pools are excluded from base runs unless another policy is explicitly selected.",
         "- Producer own-voucher V2S and V2V borrowing are productive-credit events in paper-facing frontier runs; delayed stable returns can fund monthly stable-to-own-voucher self-repayment.",
-        "- Cap-bound producers suppress new own-voucher borrowing without recording artificial route failures. See `settlement_capacity_frontier_summary.csv` for borrowing-capacity utilization, blocked own-voucher routes, and stable receipts waiting for repayment.",
+        "- Producer borrowing caps remain active as internal guardrails. The paper-facing frontier uses the static calibrated cap and does not report borrowing-cap edges unless an explicit cap-sensitivity study is being run.",
         "",
         "## Non-Extraction Gate",
         "",
@@ -10627,43 +10627,40 @@ def write_settlement_capacity_frontier_notes(
         ),
     )
     lines = [
-        "# Settlement-Capacity Frontier Diagnostics",
+        "# Settlement and Productive-Credit Diagnostics",
         "",
-        "These diagnostics treat settlement-capacity capture as a testable frontier mechanism, not as a settled result.",
-        "The intended causal chain is: catalytic or bond liquidity expands lender liquidity; producers borrow only when own-voucher caps allow; borrowing creates delayed productive stable receipts; repayment pressure and cap utilization then change producer attention, target choice, and capacity to continue ROLA-like voucher-to-voucher exchange.",
+        "These diagnostics support frontier interpretation but are not a borrowing-cap edge result.",
+        "The paper-facing causal chain is: catalytic or bond liquidity expands lender liquidity; producers borrow through own-voucher V2S or V2V routes; borrowing creates delayed productive stable receipts; repayment pressure and stable availability then change producer attention, target choice, and capacity to continue ROLA-like voucher-to-voucher exchange.",
+        "Borrowing-cap utilization is retained as an internal guardrail diagnostic under the static calibrated cap. It should not be reported as a headline frontier unless a separate cap-sensitivity study shows an empirically grounded binding edge.",
         "",
         "## Directional Smoke Checks",
         "",
-        "- Capacity pressure is present when p95 borrowing-capacity utilization reaches the soft threshold, producers become cap-bound, or own-voucher borrowing is suppressed by debt limits.",
         "- V2V decline is present when voucher-to-voucher volume falls below 98% of the matched no-bond baseline.",
         "- Repayment waiting is present when stable receipts or off-network debt-service capacity are reserved for borrower self-repayment.",
+        "- Cap utilization remains an audit field only; under the current static multiplier it is not a pass/fail frontier criterion.",
         "",
         "## Low-Stress Reference",
         "",
         (
             "- coupon={coupon:.2%}, principal_ratio={principal:.2f}, V2V ratio={v2v:.3f}, "
-            "capacity used p95={used:.3f}, cap-bound producers={bound:.1f}."
+            "capacity used p95={used:.3f}."
         ).format(
             coupon=safe_float(low.get("coupon_target_annual")),
             principal=safe_float(low.get("principal_ratio")),
             v2v=safe_float(low.get("voucher_to_voucher_volume_ratio_vs_baseline")),
             used=safe_float(low.get("producer_borrowing_capacity_used_share_p95")),
-            bound=safe_float(low.get("cap_bound_producer_count_p50")),
         ),
         "",
         "## High-Stress Reference",
         "",
         (
             "- coupon={coupon:.2%}, principal_ratio={principal:.2f}, V2V ratio={v2v:.3f}, "
-            "capacity used p95={used:.3f}, cap-bound producers={bound:.1f}, "
-            "own-voucher blocks={blocked:.1f}, stable waiting={waiting:,.2f}."
+            "capacity used p95={used:.3f}, stable waiting={waiting:,.2f}."
         ).format(
             coupon=safe_float(high.get("coupon_target_annual")),
             principal=safe_float(high.get("principal_ratio")),
             v2v=safe_float(high.get("voucher_to_voucher_volume_ratio_vs_baseline")),
             used=safe_float(high.get("producer_borrowing_capacity_used_share_p95")),
-            bound=safe_float(high.get("cap_bound_producer_count_p50")),
-            blocked=safe_float(high.get("cap_bound_own_voucher_route_suppressed_count_total_p50")),
             waiting=safe_float(high.get("stable_receipts_waiting_for_repayment_usd_p50")),
         ),
         "",
