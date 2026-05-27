@@ -71,6 +71,28 @@ class ProducerDebtObligation:
     pressure_deferred_usd: float = 0.0
     last_pressure_due_tick: int = -1
 
+@dataclass(slots=True)
+class ProducerBorrowingCapacity:
+    voucher_id: str
+    total_cap_usd: float
+    current_exposure_usd: float
+    remaining_limit_usd: float
+    lender_stable_available_usd: float
+    stable_borrowable_usd: float
+    voucher_borrowable_usd: float
+    stable_lender_ids: Set[str]
+    voucher_lender_ids: Set[str]
+
+    @property
+    def remaining_usd(self) -> float:
+        return max(self.stable_borrowable_usd, self.voucher_borrowable_usd)
+
+    @property
+    def utilization(self) -> float:
+        if self.total_cap_usd <= 1e-9:
+            return 0.0
+        return max(0.0, min(1.0, self.current_exposure_usd / self.total_cap_usd))
+
 class SimulationEngine:
     def __init__(self, cfg: ScenarioConfig, seed: int = 1) -> None:
         self.cfg = cfg
@@ -209,7 +231,19 @@ class SimulationEngine:
         self._productive_credit_voucher_deposit_usd_by_pool_tick: Dict[str, float] = {}
         self._productive_credit_voucher_activity_until: Dict[Tuple[str, str], int] = {}
         self._producer_voucher_loan_activity_until: Dict[Tuple[str, str], int] = {}
-        self._productive_credit_queue: Dict[int, list[Tuple[str, float, str]]] = {}
+        self._productive_credit_queue: Dict[int, list[tuple]] = {}
+        self._productive_credit_debt_return_scheduled_usd_tick: float = 0.0
+        self._productive_credit_debt_return_scheduled_usd_total: float = 0.0
+        self._productive_credit_debt_return_received_usd_tick: float = 0.0
+        self._productive_credit_debt_return_received_usd_total: float = 0.0
+        self._productive_credit_debt_return_scheduled_stable_usd_tick: float = 0.0
+        self._productive_credit_debt_return_scheduled_stable_usd_total: float = 0.0
+        self._productive_credit_debt_return_scheduled_voucher_usd_tick: float = 0.0
+        self._productive_credit_debt_return_scheduled_voucher_usd_total: float = 0.0
+        self._productive_credit_debt_return_received_stable_usd_tick: float = 0.0
+        self._productive_credit_debt_return_received_stable_usd_total: float = 0.0
+        self._productive_credit_debt_return_received_voucher_usd_tick: float = 0.0
+        self._productive_credit_debt_return_received_voucher_usd_total: float = 0.0
         self._producer_debt_obligations: list[ProducerDebtObligation] = []
         self._producer_debt_obligations_by_lender_voucher: Dict[
             Tuple[str, str],
@@ -326,6 +360,18 @@ class SimulationEngine:
         self._producer_loan_lender_collateral_cap_usd_tick: float = 0.0
         self._producer_loan_lender_remaining_cap_usd_tick: float = 0.0
         self._producer_loan_lender_stable_available_usd_tick: float = 0.0
+        self._producer_own_voucher_borrowing_suppressed_by_capacity_count_tick: int = 0
+        self._producer_own_voucher_borrowing_suppressed_by_capacity_count_total: int = 0
+        self._producer_own_voucher_borrowing_suppressed_by_capacity_usd_tick: float = 0.0
+        self._producer_own_voucher_borrowing_suppressed_by_capacity_usd_total: float = 0.0
+        self._own_voucher_v2v_blocked_by_debt_limit_count_tick: int = 0
+        self._own_voucher_v2v_blocked_by_debt_limit_count_total: int = 0
+        self._own_voucher_v2v_blocked_by_debt_limit_usd_tick: float = 0.0
+        self._own_voucher_v2v_blocked_by_debt_limit_usd_total: float = 0.0
+        self._own_voucher_v2s_blocked_by_debt_limit_count_tick: int = 0
+        self._own_voucher_v2s_blocked_by_debt_limit_count_total: int = 0
+        self._own_voucher_v2s_blocked_by_debt_limit_usd_tick: float = 0.0
+        self._own_voucher_v2s_blocked_by_debt_limit_usd_total: float = 0.0
         self._producer_voucher_loan_attempts_tick: int = 0
         self._producer_voucher_loan_no_target_tick: int = 0
         self._producer_voucher_loan_no_inventory_tick: int = 0
@@ -2337,17 +2383,25 @@ class SimulationEngine:
 
     def _ordinary_source_stable_preserve_units(self, pool: "Pool") -> float:
         cfg = self.cfg
-        if not bool(cfg.ordinary_stable_spend_protection_enabled):
+        stable_repayment_reserve = bool(
+            getattr(cfg, "producer_debt_stable_repayment_reserve_enabled", False)
+        )
+        if not bool(cfg.ordinary_stable_spend_protection_enabled) and not stable_repayment_reserve:
             return 0.0
         if pool.policy.role not in ("producer", "consumer"):
             return 0.0
-        reserve = max(0.0, float(pool.policy.min_stable_reserve or 0.0))
-        buffer_share = max(0.0, float(cfg.ordinary_stable_spend_buffer_voucher_share or 0.0))
-        voucher_buffer_usd = self._pool_voucher_value_usd(pool) * buffer_share
         stable_value = self._asset_value(pool, cfg.stable_symbol)
         if stable_value <= 1e-12:
             stable_value = 1.0
-        return reserve + voucher_buffer_usd / stable_value
+        preserve_units = 0.0
+        if bool(cfg.ordinary_stable_spend_protection_enabled):
+            preserve_units += max(0.0, float(pool.policy.min_stable_reserve or 0.0))
+            buffer_share = max(0.0, float(cfg.ordinary_stable_spend_buffer_voucher_share or 0.0))
+            voucher_buffer_usd = self._pool_voucher_value_usd(pool) * buffer_share
+            preserve_units += voucher_buffer_usd / stable_value
+        if stable_repayment_reserve and pool.policy.role == "producer":
+            preserve_units += self._producer_debt_repayment_reserve_usd(pool) / stable_value
+        return preserve_units
 
     def _ordinary_source_spendable_amount(self, pool: "Pool", asset_in: str) -> float:
         available = max(0.0, pool.vault.get(asset_in))
@@ -2621,6 +2675,33 @@ class SimulationEngine:
             pressure += deferred + arrears + scheduled_due
         pressure += self._producer_bond_assessment_pressure_usd(pool)
         return max(0.0, pressure)
+
+    def _producer_debt_repayment_reserve_usd(self, pool: "Pool") -> float:
+        if pool.policy.role != "producer":
+            return 0.0
+        voucher_id = self._producer_own_voucher_id(pool)
+        if not voucher_id:
+            return 0.0
+        period = max(1, int(getattr(self.cfg, "producer_debt_pressure_period_ticks", MONTH_TICKS) or MONTH_TICKS))
+        reserve = 0.0
+        for obligation in self._producer_debt_obligations:
+            if obligation.producer_pool_id != pool.pool_id or obligation.voucher_id != voucher_id:
+                continue
+            remaining_cash = max(0.0, float(obligation.cash_service_remaining_usd))
+            remaining_voucher_usd = max(
+                0.0,
+                float(obligation.remaining_voucher_units) * self._producer_debt_unit_value(obligation),
+            )
+            remaining_usd = max(remaining_cash, remaining_voucher_usd)
+            deferred = max(0.0, float(getattr(obligation, "pressure_deferred_usd", 0.0) or 0.0))
+            arrears = max(0.0, float(getattr(obligation, "cash_service_arrears_usd", 0.0) or 0.0))
+            if remaining_usd <= 1e-9 and deferred <= 1e-9 and arrears <= 1e-9:
+                continue
+            scheduled_base = max(0.0, remaining_usd - arrears - deferred)
+            remaining_ticks = max(1, obligation.due_tick - self.tick + 1)
+            remaining_periods = max(1, int(math.ceil(remaining_ticks / period)))
+            reserve += deferred + arrears + scheduled_base / remaining_periods
+        return max(0.0, reserve)
 
     def _producer_debt_attention_share(self, pool: "Pool") -> tuple[float, float, float]:
         if not bool(getattr(self.cfg, "producer_debt_attention_crowdout_enabled", False)):
@@ -4723,6 +4804,272 @@ class SimulationEngine:
         multiple = max(0.0, float(self.cfg.lender_voucher_cap_deposit_multiple or 0.0))
         return sum(self._producer_deposit_value_by_voucher.values()) * multiple
 
+    def _producer_borrowing_capacity_for_voucher(
+        self,
+        voucher_id: str,
+        *,
+        target_asset: Optional[str] = None,
+    ) -> ProducerBorrowingCapacity:
+        total_cap_usd = 0.0
+        exposure_usd = 0.0
+        remaining_limit_usd = 0.0
+        lender_stable_available_usd = 0.0
+        stable_borrowable_usd = 0.0
+        voucher_borrowable_usd = 0.0
+        stable_lender_ids: Set[str] = set()
+        voucher_lender_ids: Set[str] = set()
+        stable_id = self.cfg.stable_symbol
+
+        for pool in self.pools.values():
+            if pool.policy.system_pool or pool.policy.role != "lender":
+                continue
+            if not pool.registry.is_listed(voucher_id):
+                continue
+            value = self._asset_value(pool, voucher_id)
+            if value <= 1e-12:
+                value = self._default_asset_value(voucher_id)
+            cap_units = max(0.0, self._lender_voucher_cap(voucher_id, lender_pool=pool))
+            cap_usd = cap_units * value
+            total_cap_usd += cap_usd
+
+            key = (pool.pool_id, voucher_id)
+            pool_exposure_usd = max(
+                0.0,
+                float(self._lender_producer_voucher_exposure_usd_by_pool_voucher.get(key, 0.0)),
+            )
+            exposure_usd += pool_exposure_usd
+            exposure_units = pool_exposure_usd / max(1e-12, value)
+            cap_remaining_units = max(0.0, cap_units - exposure_units)
+
+            if pool.policy.limits_enabled:
+                limiter_remaining = pool.limiter.remaining(self.tick, voucher_id)
+            else:
+                limiter_remaining = math.inf
+            finite_limit_units = (
+                limiter_remaining if math.isfinite(limiter_remaining) else cap_remaining_units
+            )
+            remaining_units = min(cap_remaining_units, max(0.0, finite_limit_units))
+            remaining_usd = remaining_units * value
+            remaining_limit_usd += remaining_usd
+            if remaining_units <= 1e-9:
+                continue
+
+            stable_available_units = max(
+                0.0,
+                pool.vault.get(stable_id) - max(0.0, float(pool.policy.min_stable_reserve or 0.0)),
+            )
+            stable_available_usd = stable_available_units * self._asset_value(pool, stable_id)
+            lender_stable_available_usd += stable_available_usd
+            stable_capacity_usd = min(remaining_usd, stable_available_usd)
+            if stable_capacity_usd > 1e-9:
+                stable_borrowable_usd += stable_capacity_usd
+                stable_lender_ids.add(pool.pool_id)
+
+            has_voucher_target = False
+            for asset_id, amount in pool.vault.inventory.items():
+                if amount <= 1e-9 or asset_id == voucher_id or not asset_id.startswith("VCHR:"):
+                    continue
+                if target_asset is not None and asset_id != target_asset:
+                    continue
+                if pool.registry.is_listed(asset_id):
+                    has_voucher_target = True
+                    break
+            if has_voucher_target:
+                voucher_borrowable_usd += remaining_usd
+                voucher_lender_ids.add(pool.pool_id)
+
+        return ProducerBorrowingCapacity(
+            voucher_id=voucher_id,
+            total_cap_usd=total_cap_usd,
+            current_exposure_usd=exposure_usd,
+            remaining_limit_usd=remaining_limit_usd,
+            lender_stable_available_usd=lender_stable_available_usd,
+            stable_borrowable_usd=stable_borrowable_usd,
+            voucher_borrowable_usd=voucher_borrowable_usd,
+            stable_lender_ids=stable_lender_ids,
+            voucher_lender_ids=voucher_lender_ids,
+        )
+
+    def _producer_borrowing_capacity_network_diagnostics(self) -> dict[str, float]:
+        capacities: list[ProducerBorrowingCapacity] = []
+        for pool in self.pools.values():
+            if pool.policy.system_pool or pool.policy.role != "producer":
+                continue
+            voucher_id = self._producer_own_voucher_id(pool)
+            if not voucher_id:
+                continue
+            capacities.append(self._producer_borrowing_capacity_for_voucher(voucher_id))
+        if not capacities:
+            return {
+                "producer_borrowing_capacity_usd": 0.0,
+                "producer_borrowing_capacity_remaining_usd": 0.0,
+                "producer_borrowing_capacity_utilization_p50": 0.0,
+                "producer_borrowing_capacity_utilization_p95": 0.0,
+                "producer_cap_bound_pool_count": 0,
+            }
+        utilizations = sorted(cap.utilization for cap in capacities)
+
+        def percentile(prob: float) -> float:
+            if len(utilizations) == 1:
+                return utilizations[0]
+            pos = (len(utilizations) - 1) * max(0.0, min(1.0, prob))
+            low = math.floor(pos)
+            high = math.ceil(pos)
+            if low == high:
+                return utilizations[int(pos)]
+            return utilizations[low] + (utilizations[high] - utilizations[low]) * (pos - low)
+
+        hard = max(
+            0.0,
+            min(1.0, float(getattr(self.cfg, "producer_debt_capacity_hard_threshold", 0.98) or 0.0)),
+        )
+        return {
+            "producer_borrowing_capacity_usd": sum(cap.total_cap_usd for cap in capacities),
+            "producer_borrowing_capacity_remaining_usd": sum(cap.remaining_usd for cap in capacities),
+            "producer_borrowing_capacity_utilization_p50": percentile(0.50),
+            "producer_borrowing_capacity_utilization_p95": percentile(0.95),
+            "producer_cap_bound_pool_count": sum(1 for cap in capacities if cap.utilization >= hard),
+        }
+
+    def _producer_debt_capacity_feedback_enabled(self) -> bool:
+        return bool(getattr(self.cfg, "producer_debt_capacity_feedback_enabled", False))
+
+    def _producer_capacity_suppression_share(self, capacity: ProducerBorrowingCapacity) -> float:
+        if not self._producer_debt_capacity_feedback_enabled():
+            return 0.0
+        soft = max(
+            0.0,
+            min(1.0, float(getattr(self.cfg, "producer_debt_capacity_soft_threshold", 0.80) or 0.0)),
+        )
+        hard = max(
+            soft,
+            min(1.0, float(getattr(self.cfg, "producer_debt_capacity_hard_threshold", 0.98) or 0.0)),
+        )
+        utilization = capacity.utilization
+        if utilization < soft:
+            return 0.0
+        max_share = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    getattr(
+                        self.cfg,
+                        "producer_debt_capacity_borrowing_suppression_max_share",
+                        1.0,
+                    )
+                    or 0.0
+                ),
+            ),
+        )
+        if utilization >= hard or hard <= soft + 1e-12:
+            return max_share
+        progress = (utilization - soft) / max(1e-12, hard - soft)
+        return max_share * max(0.0, min(1.0, progress))
+
+    def _record_capacity_suppressed_own_voucher_borrowing(
+        self,
+        pool: "Pool",
+        voucher_id: str,
+        amount_usd: float,
+        reason: str,
+        *,
+        target_class: Optional[str] = None,
+    ) -> None:
+        amount = max(0.0, float(amount_usd))
+        self._producer_own_voucher_borrowing_suppressed_by_capacity_count_tick += 1
+        self._producer_own_voucher_borrowing_suppressed_by_capacity_count_total += 1
+        self._producer_own_voucher_borrowing_suppressed_by_capacity_usd_tick += amount
+        self._producer_own_voucher_borrowing_suppressed_by_capacity_usd_total += amount
+        normalized_target = str(target_class or "").lower()
+        if normalized_target not in {"stable", "voucher"}:
+            reason_lower = str(reason or "").lower()
+            if "stable" in reason_lower:
+                normalized_target = "stable"
+            elif "voucher" in reason_lower:
+                normalized_target = "voucher"
+        if normalized_target == "stable":
+            self._own_voucher_v2s_blocked_by_debt_limit_count_tick += 1
+            self._own_voucher_v2s_blocked_by_debt_limit_count_total += 1
+            self._own_voucher_v2s_blocked_by_debt_limit_usd_tick += amount
+            self._own_voucher_v2s_blocked_by_debt_limit_usd_total += amount
+        elif normalized_target == "voucher":
+            self._own_voucher_v2v_blocked_by_debt_limit_count_tick += 1
+            self._own_voucher_v2v_blocked_by_debt_limit_count_total += 1
+            self._own_voucher_v2v_blocked_by_debt_limit_usd_tick += amount
+            self._own_voucher_v2v_blocked_by_debt_limit_usd_total += amount
+        self.log.add(Event(
+            self.tick,
+            "PRODUCER_OWN_VOUCHER_BORROWING_SUPPRESSED_BY_CAPACITY",
+            pool_id=pool.pool_id,
+            asset_id=voucher_id,
+            amount=amount,
+            meta={"reason": reason, "target_class": normalized_target},
+        ))
+
+    def _clip_own_voucher_borrow_amount_for_capacity(
+        self,
+        source_pool: "Pool",
+        asset_in: str,
+        asset_out: str,
+        amount_in: float,
+        route_context: str,
+    ) -> tuple[float, bool]:
+        if not self._producer_debt_capacity_feedback_enabled():
+            return amount_in, False
+        if route_context not in {"ordinary", "loan", "voucher_loan"}:
+            return amount_in, False
+        if source_pool.policy.role != "producer" or not self._is_producer_own_voucher(source_pool, asset_in):
+            return amount_in, False
+        value = self._asset_value(source_pool, asset_in)
+        if value <= 1e-12:
+            value = self._default_asset_value(asset_in)
+        if value <= 1e-12 or amount_in <= 1e-9:
+            return amount_in, False
+        target_class = self._settlement_asset_class(asset_out)
+        capacity = self._producer_borrowing_capacity_for_voucher(
+            asset_in,
+            target_asset=asset_out if target_class == "voucher" else None,
+        )
+        available_usd = (
+            capacity.stable_borrowable_usd
+            if target_class == "stable"
+            else capacity.voucher_borrowable_usd
+            if target_class == "voucher"
+            else capacity.remaining_usd
+        )
+        requested_usd = amount_in * value
+        if available_usd <= 1e-9:
+            self._record_capacity_suppressed_own_voucher_borrowing(
+                source_pool,
+                asset_in,
+                requested_usd,
+                "capacity_exhausted",
+                target_class=target_class,
+            )
+            return 0.0, True
+        suppression_share = self._producer_capacity_suppression_share(capacity)
+        if suppression_share > 0.0 and self.rng.random() < suppression_share:
+            self._record_capacity_suppressed_own_voucher_borrowing(
+                source_pool,
+                asset_in,
+                requested_usd,
+                "capacity_soft_suppression",
+                target_class=target_class,
+            )
+            return 0.0, True
+        clipped_usd = min(requested_usd, available_usd)
+        if clipped_usd <= 1e-9:
+            self._record_capacity_suppressed_own_voucher_borrowing(
+                source_pool,
+                asset_in,
+                requested_usd,
+                "capacity_clipped_to_zero",
+                target_class=target_class,
+            )
+            return 0.0, True
+        return clipped_usd / value, False
+
     def _producer_debt_contract_repayment_enabled(self) -> bool:
         return bool(getattr(self.cfg, "producer_debt_contract_repayment_enabled", False))
 
@@ -4866,6 +5213,28 @@ class SimulationEngine:
 
     def _producer_debt_service_capacity_balance_usd(self) -> float:
         return sum(max(0.0, amount) for amount in self._producer_debt_service_capacity_by_pool.values())
+
+    def _stable_receipts_waiting_for_repayment_usd(self) -> float:
+        stable_id = self.cfg.stable_symbol
+        total = 0.0
+        for pool in self.pools.values():
+            if pool.policy.system_pool or pool.policy.role != "producer":
+                continue
+            if not self._producer_has_active_own_voucher_debt(pool):
+                continue
+            reserve_usd = self._producer_debt_repayment_reserve_usd(pool)
+            if reserve_usd <= 1e-9:
+                continue
+            stable_value = self._asset_value(pool, stable_id)
+            if stable_value <= 1e-12:
+                stable_value = 1.0
+            on_pool_stable_usd = max(0.0, pool.vault.get(stable_id)) * stable_value
+            off_pool_capacity_usd = max(
+                0.0,
+                float(self._producer_debt_service_capacity_by_pool.get(pool.pool_id, 0.0)),
+            )
+            total += min(reserve_usd, on_pool_stable_usd + off_pool_capacity_usd)
+        return max(0.0, total)
 
     def _producer_has_active_own_voucher_debt(self, producer_pool: "Pool") -> bool:
         agent = self.agents.get(producer_pool.steward_id)
@@ -5163,6 +5532,15 @@ class SimulationEngine:
             float(borrowed_usd),
             f"producer_debt_{normalized_debt_kind}",
         )
+        if bool(getattr(self.cfg, "productive_credit_schedule_on_debt_origination", False)):
+            self._schedule_productive_credit_inflow(
+                producer_pool_id,
+                float(borrowed_usd),
+                voucher_id,
+                debt_kind=normalized_debt_kind,
+                source="debt_origination",
+                maturity_tick=obligation.due_tick,
+            )
         self.log.add(Event(
             self.tick,
             "PRODUCER_DEBT_OBLIGATION_CREATED",
@@ -5289,23 +5667,74 @@ class SimulationEngine:
             return 0.0
         return reduced_units
 
-    def _schedule_productive_credit_inflow(self, pool_id: str, borrowed_usd: float, voucher_id: str) -> None:
+    def _schedule_productive_credit_inflow(
+        self,
+        pool_id: str,
+        borrowed_usd: float,
+        voucher_id: str,
+        *,
+        debt_kind: str = "stable",
+        source: str = "legacy",
+        maturity_tick: Optional[int] = None,
+        schedule: Optional[str] = None,
+    ) -> None:
         if not bool(self.cfg.productive_credit_enabled):
             return
         rate = self._producer_debt_contract_revenue_rate()
         if borrowed_usd <= 1e-9 or rate <= 0.0:
             return
         lag = max(0, int(self.cfg.productive_credit_lag_ticks or 0))
-        due_tick = self.tick + lag
         amount = borrowed_usd * rate
-        self._productive_credit_queue.setdefault(due_tick, []).append((pool_id, amount, voucher_id))
+        normalized_debt_kind = "voucher" if str(debt_kind or "").lower() == "voucher" else "stable"
+        schedule_mode = str(
+            schedule
+            or getattr(self.cfg, "productive_credit_debt_return_schedule", "single_lag")
+            or "single_lag"
+        ).lower()
+        first_tick = self.tick + lag
+        if schedule_mode == "amortized_monthly":
+            period = max(
+                1,
+                int(getattr(self.cfg, "producer_debt_pressure_period_ticks", MONTH_TICKS) or MONTH_TICKS),
+            )
+            final_tick = max(first_tick, int(maturity_tick if maturity_tick is not None else first_tick))
+            due_ticks = list(range(first_tick, final_tick + 1, period))
+            if not due_ticks or due_ticks[-1] < final_tick:
+                due_ticks.append(final_tick)
+            amount_each = amount / max(1, len(due_ticks))
+            for due_tick in due_ticks:
+                self._productive_credit_queue.setdefault(due_tick, []).append(
+                    (pool_id, amount_each, voucher_id, normalized_debt_kind, source)
+                )
+        else:
+            schedule_mode = "single_lag"
+            due_ticks = [first_tick]
+            self._productive_credit_queue.setdefault(first_tick, []).append(
+                (pool_id, amount, voucher_id, normalized_debt_kind, source)
+            )
+        self._productive_credit_debt_return_scheduled_usd_tick += amount
+        self._productive_credit_debt_return_scheduled_usd_total += amount
+        if normalized_debt_kind == "voucher":
+            self._productive_credit_debt_return_scheduled_voucher_usd_tick += amount
+            self._productive_credit_debt_return_scheduled_voucher_usd_total += amount
+        else:
+            self._productive_credit_debt_return_scheduled_stable_usd_tick += amount
+            self._productive_credit_debt_return_scheduled_stable_usd_total += amount
         self.log.add(Event(
             self.tick,
             "PRODUCTIVE_CREDIT_SCHEDULED",
             pool_id=pool_id,
             asset_id=self.cfg.stable_symbol,
             amount=amount,
-            meta={"borrowed_usd": borrowed_usd, "lag_ticks": lag, "voucher_id": voucher_id},
+            meta={
+                "borrowed_usd": borrowed_usd,
+                "lag_ticks": lag,
+                "voucher_id": voucher_id,
+                "debt_kind": normalized_debt_kind,
+                "source": source,
+                "schedule": schedule_mode,
+                "scheduled_ticks": due_ticks,
+            },
         ))
 
     def _productive_credit_voucher_deposit_cap_remaining(self, pool: "Pool") -> float | None:
@@ -5375,13 +5804,20 @@ class SimulationEngine:
         if not due:
             return
         stable_id = self.cfg.stable_symbol
-        for pool_id, amount, voucher_id in due:
+        for entry in due:
+            if len(entry) >= 5:
+                pool_id, amount, voucher_id, debt_kind, source = entry[:5]
+            else:
+                pool_id, amount, voucher_id = entry[:3]
+                debt_kind = "stable"
+                source = "legacy"
             pool = self.pools.get(pool_id)
             if pool is None or pool.policy.system_pool:
                 continue
             amount = max(0.0, float(amount))
             if amount <= 1e-9:
                 continue
+            normalized_debt_kind = "voucher" if str(debt_kind or "").lower() == "voucher" else "stable"
             stable_amount, voucher_value, clipped_value = self._productive_credit_allocation(
                 pool, amount, voucher_id
             )
@@ -5421,6 +5857,14 @@ class SimulationEngine:
                 self._productive_credit_voucher_deposit_cap_clipped_usd_total += clipped_value
             self._productive_credit_inflow_usd_tick += amount
             self._productive_credit_inflow_usd_total += amount
+            self._productive_credit_debt_return_received_usd_tick += amount
+            self._productive_credit_debt_return_received_usd_total += amount
+            if normalized_debt_kind == "voucher":
+                self._productive_credit_debt_return_received_voucher_usd_tick += amount
+                self._productive_credit_debt_return_received_voucher_usd_total += amount
+            else:
+                self._productive_credit_debt_return_received_stable_usd_tick += amount
+                self._productive_credit_debt_return_received_stable_usd_total += amount
             self._productive_credit_inflow_usd_by_pool[pool_id] = (
                 self._productive_credit_inflow_usd_by_pool.get(pool_id, 0.0) + amount
             )
@@ -5432,6 +5876,8 @@ class SimulationEngine:
                 amount=amount,
                 meta={
                     "voucher_id": voucher_id,
+                    "debt_kind": normalized_debt_kind,
+                    "source": source,
                     "stable_retained_usd": stable_amount,
                     "voucher_deposit_usd": voucher_value,
                     "voucher_deposit_cap_clipped_usd": clipped_value,
@@ -7770,6 +8216,12 @@ class SimulationEngine:
             self._productive_credit_voucher_deposit_usd_tick = 0.0
             self._productive_credit_voucher_deposit_cap_clipped_usd_tick = 0.0
             self._productive_credit_voucher_deposit_usd_by_pool_tick = {}
+            self._productive_credit_debt_return_scheduled_usd_tick = 0.0
+            self._productive_credit_debt_return_received_usd_tick = 0.0
+            self._productive_credit_debt_return_scheduled_stable_usd_tick = 0.0
+            self._productive_credit_debt_return_scheduled_voucher_usd_tick = 0.0
+            self._productive_credit_debt_return_received_stable_usd_tick = 0.0
+            self._productive_credit_debt_return_received_voucher_usd_tick = 0.0
             self._producer_debt_originated_usd_tick = 0.0
             self._producer_debt_cash_service_due_usd_tick = 0.0
             self._producer_debt_cash_service_paid_usd_tick = 0.0
@@ -7841,6 +8293,12 @@ class SimulationEngine:
             self._producer_loan_lender_collateral_cap_usd_tick = 0.0
             self._producer_loan_lender_remaining_cap_usd_tick = 0.0
             self._producer_loan_lender_stable_available_usd_tick = 0.0
+            self._producer_own_voucher_borrowing_suppressed_by_capacity_count_tick = 0
+            self._producer_own_voucher_borrowing_suppressed_by_capacity_usd_tick = 0.0
+            self._own_voucher_v2v_blocked_by_debt_limit_count_tick = 0
+            self._own_voucher_v2v_blocked_by_debt_limit_usd_tick = 0.0
+            self._own_voucher_v2s_blocked_by_debt_limit_count_tick = 0
+            self._own_voucher_v2s_blocked_by_debt_limit_usd_tick = 0.0
             self._producer_voucher_loan_attempts_tick = 0
             self._producer_voucher_loan_no_target_tick = 0
             self._producer_voucher_loan_no_inventory_tick = 0
@@ -8295,6 +8753,17 @@ class SimulationEngine:
                         buddy_pools=buddy_pools or set(),
                         target_class=target_class,
                     )
+                    if plan.ok and asset_out is not None:
+                        clipped_amount, suppressed = self._clip_own_voucher_borrow_amount_for_capacity(
+                            source_pool,
+                            asset_in,
+                            asset_out,
+                            amount_used,
+                            route_context,
+                        )
+                        if suppressed:
+                            continue
+                        amount_used = min(amount_used, clipped_amount)
                     self._record_route_decision_attempt(
                         selected_activity_mode,
                         buddy_direct=True,
@@ -8397,6 +8866,18 @@ class SimulationEngine:
                 amount_in = self._sample_amount_in(source_pool, asset_in)
                 if amount_in <= 1e-9:
                     break
+                clipped_amount, suppressed = self._clip_own_voucher_borrow_amount_for_capacity(
+                    source_pool,
+                    asset_in,
+                    asset_out,
+                    amount_in,
+                    route_context,
+                )
+                if suppressed:
+                    continue
+                amount_in = clipped_amount
+                if amount_in <= 1e-9:
+                    continue
 
                 attempted += 1
                 self._record_route_decision_attempt(
@@ -9783,7 +10264,23 @@ class SimulationEngine:
             else:
                 remaining = math.inf
             finite_remaining = remaining if math.isfinite(remaining) else cap
-            borrowable = min(max(0.0, cap), max(0.0, finite_remaining))
+            value_in = self._asset_value(pool, voucher_id)
+            if value_in <= 1e-12:
+                value_in = self._default_asset_value(voucher_id)
+            exposure_units = 0.0
+            if self._producer_debt_capacity_feedback_enabled():
+                exposure_usd = max(
+                    0.0,
+                    float(
+                        self._lender_producer_voucher_exposure_usd_by_pool_voucher.get(
+                            (pool.pool_id, voucher_id),
+                            0.0,
+                        )
+                    ),
+                )
+                exposure_units = exposure_usd / max(1e-12, value_in)
+            cap_remaining = max(0.0, cap - exposure_units)
+            borrowable = min(cap_remaining, max(0.0, finite_remaining))
             if borrowable <= 1e-9:
                 continue
             for asset_id, amount in pool.vault.inventory.items():
@@ -9797,7 +10294,7 @@ class SimulationEngine:
                 value = self._asset_value(pool, asset_id)
                 score += max(0.0, amount * value)
                 pools.add(pool.pool_id)
-                max_cap = max(max_cap, cap)
+                max_cap = max(max_cap, cap_remaining)
                 max_remaining = max(max_remaining, finite_remaining)
                 candidates_by_asset[asset_id] = (score, pools, max_cap, max_remaining)
         candidates = [
@@ -9838,6 +10335,43 @@ class SimulationEngine:
             return False
         if amount_in > have:
             amount_in = have
+        if self._producer_debt_capacity_feedback_enabled():
+            capacity = self._producer_borrowing_capacity_for_voucher(voucher_id)
+            requested_usd = amount_in * value
+            if capacity.voucher_borrowable_usd <= 1e-9:
+                self._record_capacity_suppressed_own_voucher_borrowing(
+                    source_pool,
+                    voucher_id,
+                    requested_usd,
+                    "voucher_capacity_exhausted",
+                    target_class="voucher",
+                )
+                return False
+            suppression_share = self._producer_capacity_suppression_share(capacity)
+            if suppression_share > 0.0 and self.rng.random() < suppression_share:
+                self._record_capacity_suppressed_own_voucher_borrowing(
+                    source_pool,
+                    voucher_id,
+                    requested_usd,
+                    "voucher_capacity_soft_suppression",
+                    target_class="voucher",
+                )
+                return False
+            capped_amount = capacity.voucher_borrowable_usd / value
+            if amount_in > capped_amount:
+                self._producer_voucher_loan_clipped_lender_cap_usd_tick += (
+                    amount_in - capped_amount
+                ) * value
+                amount_in = capped_amount
+            if amount_in <= 1e-9:
+                self._record_capacity_suppressed_own_voucher_borrowing(
+                    source_pool,
+                    voucher_id,
+                    requested_usd,
+                    "voucher_capacity_clipped_to_zero",
+                    target_class="voucher",
+                )
+                return False
         candidates = self._voucher_loan_target_candidates(voucher_id)
         if not candidates:
             self._producer_voucher_loan_no_target_tick += 1
@@ -9975,6 +10509,52 @@ class SimulationEngine:
         if amount_in > have:
             self._producer_loan_clipped_inventory_usd_tick += (amount_in - have) * value
             amount_in = have
+        capacity: ProducerBorrowingCapacity | None = None
+        if self._producer_debt_capacity_feedback_enabled():
+            capacity = self._producer_borrowing_capacity_for_voucher(voucher_id)
+            requested_usd = amount_in * value
+            if capacity.stable_borrowable_usd <= 1e-9:
+                if capacity.voucher_borrowable_usd > 1e-9:
+                    return self._attempt_voucher_loan_fallback(
+                        source_pool,
+                        voucher_id,
+                        sampled_amount_in=amount_in,
+                        value=value,
+                    )
+                self._record_capacity_suppressed_own_voucher_borrowing(
+                    source_pool,
+                    voucher_id,
+                    requested_usd,
+                    "stable_capacity_exhausted",
+                    target_class="stable",
+                )
+                return False
+            suppression_share = self._producer_capacity_suppression_share(capacity)
+            if suppression_share > 0.0 and self.rng.random() < suppression_share:
+                self._record_capacity_suppressed_own_voucher_borrowing(
+                    source_pool,
+                    voucher_id,
+                    requested_usd,
+                    "stable_capacity_soft_suppression",
+                    target_class="stable",
+                )
+                return False
+            capped_amount = capacity.stable_borrowable_usd / value
+            if amount_in > capped_amount:
+                self._producer_loan_clipped_combined_lender_usd_tick += (
+                    amount_in - capped_amount
+                ) * value
+                amount_in = capped_amount
+            lenders = lenders & capacity.stable_lender_ids
+            if not lenders or amount_in <= 1e-9:
+                self._record_capacity_suppressed_own_voucher_borrowing(
+                    source_pool,
+                    voucher_id,
+                    requested_usd,
+                    "stable_capacity_clipped_to_zero",
+                    target_class="stable",
+                )
+                return False
 
         max_cap = 0.0
         max_remaining = 0.0
@@ -9986,13 +10566,27 @@ class SimulationEngine:
             if pool is None:
                 continue
             cap = self._lender_voucher_cap(voucher_id, lender_pool=pool)
-            if cap > max_cap:
-                max_cap = cap
+            exposure_units = 0.0
+            if self._producer_debt_capacity_feedback_enabled():
+                exposure_usd = max(
+                    0.0,
+                    float(
+                        self._lender_producer_voucher_exposure_usd_by_pool_voucher.get(
+                            (pool.pool_id, voucher_id),
+                            0.0,
+                        )
+                    ),
+                )
+                exposure_units = exposure_usd / max(1e-12, value)
+            cap_for_borrow = max(0.0, cap - exposure_units)
+            candidate_cap = cap_for_borrow if self._producer_debt_capacity_feedback_enabled() else cap
+            if candidate_cap > max_cap:
+                max_cap = candidate_cap
             if pool.policy.limits_enabled:
                 remaining = pool.limiter.remaining(self.tick, voucher_id)
             else:
                 remaining = math.inf
-            finite_remaining = remaining if math.isfinite(remaining) else cap
+            finite_remaining = remaining if math.isfinite(remaining) else cap_for_borrow
             if finite_remaining > max_remaining:
                 max_remaining = finite_remaining
             available_stable = pool.vault.get(stable_id) - pool.policy.min_stable_reserve
@@ -10004,7 +10598,11 @@ class SimulationEngine:
                 stable_limited_amount = available_stable / lender_value
                 if stable_limited_amount > max_by_stable:
                     max_by_stable = stable_limited_amount
-            lender_borrowable = min(max(0.0, cap), max(0.0, finite_remaining), max(0.0, stable_limited_amount))
+            lender_borrowable = min(
+                max(0.0, cap_for_borrow),
+                max(0.0, finite_remaining),
+                max(0.0, stable_limited_amount),
+            )
             if lender_borrowable > max_borrowable:
                 max_borrowable = lender_borrowable
 
@@ -10066,7 +10664,6 @@ class SimulationEngine:
                     amount_usd = amount_used * self._asset_value(source_pool, voucher_id)
                     self._producer_loan_executed_tick += 1
                     self._producer_loan_executed_usd_tick += amount_usd
-                    self._schedule_productive_credit_inflow(source_pool.pool_id, amount_usd, voucher_id)
                     self.log.add(Event(self.tick, "LOAN_ISSUED", pool_id=source_pool.pool_id,
                                        asset_id=self.cfg.stable_symbol, amount=amount_usd,
                                        meta={"asset_in": voucher_id, "amount_in": amount_used}))
@@ -10112,7 +10709,6 @@ class SimulationEngine:
             amount_usd = amount_used * self._asset_value(source_pool, voucher_id)
             self._producer_loan_executed_tick += 1
             self._producer_loan_executed_usd_tick += amount_usd
-            self._schedule_productive_credit_inflow(source_pool.pool_id, amount_usd, voucher_id)
             self.log.add(Event(self.tick, "LOAN_ISSUED", pool_id=source_pool.pool_id,
                                asset_id=self.cfg.stable_symbol, amount=amount_usd,
                                meta={"asset_in": voucher_id, "amount_in": amount_used}))
@@ -11015,6 +11611,8 @@ class SimulationEngine:
             )
             producer_debt_active_usd = self._producer_debt_active_usd()
             producer_voucher_overlap = self._producer_voucher_overlap_diagnostics()
+            producer_borrowing_capacity = self._producer_borrowing_capacity_network_diagnostics()
+            stable_receipts_waiting_for_repayment = self._stable_receipts_waiting_for_repayment_usd()
             lender_stable_total_usd = 0.0
             lender_stable_reserve_usd = 0.0
             lender_stable_available_above_reserve_usd = 0.0
@@ -11078,8 +11676,68 @@ class SimulationEngine:
                 "producer_deposit_stable_usd_total": float(self._producer_deposit_stable_usd_total),
                 "producer_deposit_voucher_usd_total": float(self._producer_deposit_voucher_usd_total),
                 "producer_deposit_credit_capacity_usd": float(self._producer_deposit_credit_capacity_usd()),
+                "producer_borrowing_capacity_usd": float(
+                    producer_borrowing_capacity["producer_borrowing_capacity_usd"]
+                ),
+                "producer_borrowing_capacity_remaining_usd": float(
+                    producer_borrowing_capacity["producer_borrowing_capacity_remaining_usd"]
+                ),
+                "producer_borrowing_capacity_utilization_p50": float(
+                    producer_borrowing_capacity["producer_borrowing_capacity_utilization_p50"]
+                ),
+                "producer_borrowing_capacity_utilization_p95": float(
+                    producer_borrowing_capacity["producer_borrowing_capacity_utilization_p95"]
+                ),
+                "producer_borrowing_capacity_used_share_p50": float(
+                    producer_borrowing_capacity["producer_borrowing_capacity_utilization_p50"]
+                ),
+                "producer_borrowing_capacity_used_share_p95": float(
+                    producer_borrowing_capacity["producer_borrowing_capacity_utilization_p95"]
+                ),
+                "producer_cap_bound_pool_count": int(
+                    producer_borrowing_capacity["producer_cap_bound_pool_count"]
+                ),
+                "cap_bound_producer_count": int(
+                    producer_borrowing_capacity["producer_cap_bound_pool_count"]
+                ),
                 "productive_credit_inflow_usd_tick": float(self._productive_credit_inflow_usd_tick),
                 "productive_credit_inflow_usd_total": float(self._productive_credit_inflow_usd_total),
+                "productive_credit_debt_return_scheduled_usd_tick": float(
+                    self._productive_credit_debt_return_scheduled_usd_tick
+                ),
+                "productive_credit_debt_return_scheduled_usd_total": float(
+                    self._productive_credit_debt_return_scheduled_usd_total
+                ),
+                "productive_credit_debt_return_received_usd_tick": float(
+                    self._productive_credit_debt_return_received_usd_tick
+                ),
+                "productive_credit_debt_return_received_usd_total": float(
+                    self._productive_credit_debt_return_received_usd_total
+                ),
+                "productive_credit_debt_return_scheduled_stable_usd_tick": float(
+                    self._productive_credit_debt_return_scheduled_stable_usd_tick
+                ),
+                "productive_credit_debt_return_scheduled_stable_usd_total": float(
+                    self._productive_credit_debt_return_scheduled_stable_usd_total
+                ),
+                "productive_credit_debt_return_scheduled_voucher_usd_tick": float(
+                    self._productive_credit_debt_return_scheduled_voucher_usd_tick
+                ),
+                "productive_credit_debt_return_scheduled_voucher_usd_total": float(
+                    self._productive_credit_debt_return_scheduled_voucher_usd_total
+                ),
+                "productive_credit_debt_return_received_stable_usd_tick": float(
+                    self._productive_credit_debt_return_received_stable_usd_tick
+                ),
+                "productive_credit_debt_return_received_stable_usd_total": float(
+                    self._productive_credit_debt_return_received_stable_usd_total
+                ),
+                "productive_credit_debt_return_received_voucher_usd_tick": float(
+                    self._productive_credit_debt_return_received_voucher_usd_tick
+                ),
+                "productive_credit_debt_return_received_voucher_usd_total": float(
+                    self._productive_credit_debt_return_received_voucher_usd_total
+                ),
                 "productive_credit_stable_retained_usd_tick": float(
                     self._productive_credit_stable_retained_usd_tick
                 ),
@@ -11102,6 +11760,54 @@ class SimulationEngine:
                 "producer_debt_active_usd": float(producer_debt_active_usd),
                 "producer_debt_originated_usd_tick": float(self._producer_debt_originated_usd_tick),
                 "producer_debt_originated_usd_total": float(self._producer_debt_originated_usd_total),
+                "producer_own_voucher_borrowing_suppressed_by_capacity_count_tick": int(
+                    self._producer_own_voucher_borrowing_suppressed_by_capacity_count_tick
+                ),
+                "producer_own_voucher_borrowing_suppressed_by_capacity_count_total": int(
+                    self._producer_own_voucher_borrowing_suppressed_by_capacity_count_total
+                ),
+                "producer_own_voucher_borrowing_suppressed_by_capacity_usd_tick": float(
+                    self._producer_own_voucher_borrowing_suppressed_by_capacity_usd_tick
+                ),
+                "producer_own_voucher_borrowing_suppressed_by_capacity_usd_total": float(
+                    self._producer_own_voucher_borrowing_suppressed_by_capacity_usd_total
+                ),
+                "cap_bound_own_voucher_route_suppressed_count_tick": int(
+                    self._producer_own_voucher_borrowing_suppressed_by_capacity_count_tick
+                ),
+                "cap_bound_own_voucher_route_suppressed_count_total": int(
+                    self._producer_own_voucher_borrowing_suppressed_by_capacity_count_total
+                ),
+                "cap_bound_own_voucher_route_suppressed_usd_tick": float(
+                    self._producer_own_voucher_borrowing_suppressed_by_capacity_usd_tick
+                ),
+                "cap_bound_own_voucher_route_suppressed_usd_total": float(
+                    self._producer_own_voucher_borrowing_suppressed_by_capacity_usd_total
+                ),
+                "own_voucher_v2v_blocked_by_debt_limit_count_tick": int(
+                    self._own_voucher_v2v_blocked_by_debt_limit_count_tick
+                ),
+                "own_voucher_v2v_blocked_by_debt_limit_count_total": int(
+                    self._own_voucher_v2v_blocked_by_debt_limit_count_total
+                ),
+                "own_voucher_v2v_blocked_by_debt_limit_usd_tick": float(
+                    self._own_voucher_v2v_blocked_by_debt_limit_usd_tick
+                ),
+                "own_voucher_v2v_blocked_by_debt_limit_usd_total": float(
+                    self._own_voucher_v2v_blocked_by_debt_limit_usd_total
+                ),
+                "own_voucher_v2s_blocked_by_debt_limit_count_tick": int(
+                    self._own_voucher_v2s_blocked_by_debt_limit_count_tick
+                ),
+                "own_voucher_v2s_blocked_by_debt_limit_count_total": int(
+                    self._own_voucher_v2s_blocked_by_debt_limit_count_total
+                ),
+                "own_voucher_v2s_blocked_by_debt_limit_usd_tick": float(
+                    self._own_voucher_v2s_blocked_by_debt_limit_usd_tick
+                ),
+                "own_voucher_v2s_blocked_by_debt_limit_usd_total": float(
+                    self._own_voucher_v2s_blocked_by_debt_limit_usd_total
+                ),
                 "producer_debt_cash_service_due_usd_tick": float(
                     self._producer_debt_cash_service_due_usd_tick
                 ),
@@ -11116,6 +11822,10 @@ class SimulationEngine:
                 ),
                 "producer_debt_service_capacity_balance_usd": float(
                     self._producer_debt_service_capacity_balance_usd()
+                ),
+                "stable_receipts_waiting_for_repayment_usd": float(stable_receipts_waiting_for_repayment),
+                "producer_stable_receipts_waiting_for_repayment_usd": float(
+                    stable_receipts_waiting_for_repayment
                 ),
                 "producer_debt_service_capacity_credited_usd_tick": float(
                     self._producer_debt_service_capacity_credited_usd_tick

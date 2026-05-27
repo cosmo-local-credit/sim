@@ -78,6 +78,11 @@ append_optional_arg PRODUCER_ACTIVITY_COMPOSITION_SHIFT_TO_V2S_SHARE --producer-
 append_optional_arg PRODUCER_ACTIVITY_COMPOSITION_OWN_VOUCHER_STABLE_PROBABILITY_MAX --producer-activity-composition-own-voucher-stable-probability-max
 append_optional_arg PRODUCER_DEBT_PENALTY_RATE_PER_PERIOD --producer-debt-penalty-rate-per-period
 append_optional_arg ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY --ordinary-own-voucher-stable-borrowing-probability
+append_optional_arg PRODUCTIVE_CREDIT_DEBT_RETURN_SCHEDULE --productive-credit-debt-return-schedule
+append_optional_arg PRODUCER_DEBT_CAPACITY_SOFT_THRESHOLD --producer-debt-capacity-soft-threshold
+append_optional_arg PRODUCER_DEBT_CAPACITY_HARD_THRESHOLD --producer-debt-capacity-hard-threshold
+append_optional_arg PRODUCER_DEBT_CAPACITY_BORROWING_SUPPRESSION_MAX_SHARE --producer-debt-capacity-borrowing-suppression-max-share
+append_optional_arg LENDER_VOUCHER_CAP_DEPOSIT_MULTIPLE --lender-voucher-cap-deposit-multiple
 case "${DISABLE_PRODUCER_DEBT_PRESSURE:-0}" in
   1|true|TRUE|yes|YES)
     MONTE_CARLO_EXTRA_ARGS+=(--disable-producer-debt-pressure)
@@ -123,6 +128,36 @@ case "${ENABLE_ORDINARY_OWN_VOUCHER_STABLE_BORROWING:-0}" in
     MONTE_CARLO_EXTRA_ARGS+=(--enable-ordinary-own-voucher-stable-borrowing)
     ;;
 esac
+case "${ENABLE_PRODUCTIVE_CREDIT_ON_DEBT_ORIGINATION:-0}" in
+  1|true|TRUE|yes|YES)
+    MONTE_CARLO_EXTRA_ARGS+=(--enable-productive-credit-on-debt-origination)
+    ;;
+esac
+case "${DISABLE_PRODUCTIVE_CREDIT_ON_DEBT_ORIGINATION:-0}" in
+  1|true|TRUE|yes|YES)
+    MONTE_CARLO_EXTRA_ARGS+=(--disable-productive-credit-on-debt-origination)
+    ;;
+esac
+case "${ENABLE_PRODUCER_DEBT_CAPACITY_FEEDBACK:-0}" in
+  1|true|TRUE|yes|YES)
+    MONTE_CARLO_EXTRA_ARGS+=(--enable-producer-debt-capacity-feedback)
+    ;;
+esac
+case "${DISABLE_PRODUCER_DEBT_CAPACITY_FEEDBACK:-0}" in
+  1|true|TRUE|yes|YES)
+    MONTE_CARLO_EXTRA_ARGS+=(--disable-producer-debt-capacity-feedback)
+    ;;
+esac
+case "${ENABLE_PRODUCER_DEBT_STABLE_REPAYMENT_RESERVE:-0}" in
+  1|true|TRUE|yes|YES)
+    MONTE_CARLO_EXTRA_ARGS+=(--enable-producer-debt-stable-repayment-reserve)
+    ;;
+esac
+case "${DISABLE_PRODUCER_DEBT_STABLE_REPAYMENT_RESERVE:-0}" in
+  1|true|TRUE|yes|YES)
+    MONTE_CARLO_EXTRA_ARGS+=(--disable-producer-debt-stable-repayment-reserve)
+    ;;
+esac
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -166,11 +201,13 @@ echo "[batch] route_success_mode=${ROUTE_SUCCESS_MODE:-diagnostic}"
 echo "[batch] routing_profile=max_hops:${MAX_HOPS:-3} noam_max_hops:${NOAM_MAX_HOPS:-3} overlay:${NOAM_OVERLAY_ENABLED:-1} clearing:${NOAM_CLEARING_ENABLED:-1} clearing_stride:${NOAM_CLEARING_STRIDE_TICKS:-13}"
 echo "[batch] activity_profile=decision_based:${DECISION_BASED_ACTIVITY_ENABLED:-1} repeat_partner_share:${REPEAT_PARTNER_ROUTE_SHARE:-0.70} buddy_min:${AFFINITY_BUDDY_MIN_COUNT:-1}"
 echo "[batch] voucher_settlement_mode=${VOUCHER_SETTLEMENT_MODE:-redeem_outputs}"
-echo "[batch] cadence=producer_period:${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4} producer_maturity:${PRODUCER_DEBT_MATURITY_TICKS:-13} pool_clearing:${POOL_CLEARING_STRIDE:-13} issuer_payment:${ISSUER_PAYMENT_STRIDE:-13}"
+echo "[batch] cadence=producer_period:${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4} producer_maturity:${PRODUCER_DEBT_MATURITY_TICKS:-13} pool_clearing:${POOL_CLEARING_STRIDE:-13} issuer_payment:${ISSUER_PAYMENT_STRIDE:-26}"
 echo "[batch] producer_debt_pressure=enabled:$([[ ${DISABLE_PRODUCER_DEBT_PRESSURE:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) period:${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4} capacity_share:${PRODUCER_DEBT_PRESSURE_CAPACITY_SHARE:-1.0} prepay_share:${PRODUCER_DEBT_PRESSURE_PREPAY_SHARE:-0.10} batching_enabled:$([[ ${DISABLE_PRODUCER_DEBT_PRESSURE_BATCHING:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) min_swap:${PRODUCER_DEBT_PRESSURE_MIN_SWAP_USD:-empirical_default} penalty_enabled:$([[ ${DISABLE_PRODUCER_DEBT_PENALTY:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo 1) penalty_rate:${PRODUCER_DEBT_PENALTY_RATE_PER_PERIOD:-pool_fee_rate} own_voucher_stable_borrowing:${ENABLE_ORDINARY_OWN_VOUCHER_STABLE_BORROWING:-scenario_default} own_voucher_stable_probability:${ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY:-scenario_default}"
 echo "[batch] producer_debt_attention=scenario_default_or:${ENABLE_PRODUCER_DEBT_ATTENTION_CROWDOUT:-0} scale:${PRODUCER_DEBT_ATTENTION_CROWDOUT_SCALE:-1.0} max_share:${PRODUCER_DEBT_ATTENTION_CROWDOUT_MAX_SHARE:-0.90} reference_usd:${PRODUCER_DEBT_ATTENTION_REFERENCE_USD:-dynamic} min_pressure:${PRODUCER_DEBT_ATTENTION_MIN_PRESSURE_USD:-0.0}"
 echo "[batch] producer_bond_assessment=scenario_default_or:${ENABLE_PRODUCER_BOND_ASSESSMENT_PRESSURE:-0} scale:${PRODUCER_BOND_ASSESSMENT_PRESSURE_SCALE:-1.0} sustain_offset_enabled:$([[ ${DISABLE_PRODUCER_BOND_ASSESSMENT_SUSTAIN_OFFSET:-0} =~ ^(1|true|TRUE|yes|YES)$ ]] && echo 0 || echo scenario_default)"
 echo "[batch] producer_activity_composition=scenario_default_or:${ENABLE_PRODUCER_ACTIVITY_COMPOSITION_SHIFT:-0} disabled:${DISABLE_PRODUCER_ACTIVITY_COMPOSITION_SHIFT:-0} scale:${PRODUCER_ACTIVITY_COMPOSITION_SHIFT_SCALE:-1.0} max_share:${PRODUCER_ACTIVITY_COMPOSITION_SHIFT_MAX_SHARE:-0.60} min_pressure:${PRODUCER_ACTIVITY_COMPOSITION_SHIFT_MIN_PRESSURE_USD:-0.0} to_v2s:${PRODUCER_ACTIVITY_COMPOSITION_SHIFT_TO_V2S_SHARE:-1.0} own_voucher_prob_max:${PRODUCER_ACTIVITY_COMPOSITION_OWN_VOUCHER_STABLE_PROBABILITY_MAX:-0.95}"
+echo "[batch] producer_capacity_feedback=scenario_default_or:${ENABLE_PRODUCER_DEBT_CAPACITY_FEEDBACK:-0} disabled:${DISABLE_PRODUCER_DEBT_CAPACITY_FEEDBACK:-0} soft:${PRODUCER_DEBT_CAPACITY_SOFT_THRESHOLD:-0.80} hard:${PRODUCER_DEBT_CAPACITY_HARD_THRESHOLD:-0.98} suppression_max:${PRODUCER_DEBT_CAPACITY_BORROWING_SUPPRESSION_MAX_SHARE:-1.0} stable_repayment_reserve:${ENABLE_PRODUCER_DEBT_STABLE_REPAYMENT_RESERVE:-scenario_default} reserve_disabled:${DISABLE_PRODUCER_DEBT_STABLE_REPAYMENT_RESERVE:-0} lender_cap_multiple:${LENDER_VOUCHER_CAP_DEPOSIT_MULTIPLE:-scenario_default}"
+echo "[batch] productive_credit_debt_returns=scenario_default_or:${ENABLE_PRODUCTIVE_CREDIT_ON_DEBT_ORIGINATION:-0} disabled:${DISABLE_PRODUCTIVE_CREDIT_ON_DEBT_ORIGINATION:-0} schedule:${PRODUCTIVE_CREDIT_DEBT_RETURN_SCHEDULE:-scenario_default}"
 echo "[batch] kes_per_usd=${KES_PER_USD:-missing}"
 echo "[batch] voucher_kes_value=${VOUCHER_KES_VALUE:-missing}"
 
@@ -298,6 +335,53 @@ run_frontier() {
   local frontier_routing_abstraction="${FRONTIER_ROUTING_ABSTRACTION:-steward_shortlist}"
   local frontier_relationship_refresh_ticks="${FRONTIER_RELATIONSHIP_REFRESH_TICKS:-13}"
   local frontier_extra_args=()
+  if [[ -n "${VOUCHER_SETTLEMENT_MODE:-}" ]]; then
+    frontier_extra_args+=(--voucher-settlement-mode "$VOUCHER_SETTLEMENT_MODE")
+  fi
+  case "${ENABLE_PRODUCER_DEBT_ATTENTION_CROWDOUT:-0}" in
+    1|true|TRUE|yes|YES)
+      frontier_extra_args+=(--enable-producer-debt-attention-crowdout)
+      ;;
+  esac
+  case "${ENABLE_PRODUCER_BOND_ASSESSMENT_PRESSURE:-0}" in
+    1|true|TRUE|yes|YES)
+      frontier_extra_args+=(--enable-producer-bond-assessment-pressure)
+      ;;
+  esac
+  case "${ENABLE_PRODUCER_ACTIVITY_COMPOSITION_SHIFT:-0}" in
+    1|true|TRUE|yes|YES)
+      frontier_extra_args+=(--enable-producer-activity-composition-shift)
+      ;;
+  esac
+  case "${ENABLE_PRODUCTIVE_CREDIT_ON_DEBT_ORIGINATION:-0}" in
+    1|true|TRUE|yes|YES)
+      frontier_extra_args+=(--enable-productive-credit-on-debt-origination)
+      ;;
+  esac
+  if [[ -n "${PRODUCTIVE_CREDIT_DEBT_RETURN_SCHEDULE:-}" ]]; then
+    frontier_extra_args+=(--productive-credit-debt-return-schedule "$PRODUCTIVE_CREDIT_DEBT_RETURN_SCHEDULE")
+  fi
+  case "${ENABLE_PRODUCER_DEBT_CAPACITY_FEEDBACK:-0}" in
+    1|true|TRUE|yes|YES)
+      frontier_extra_args+=(--enable-producer-debt-capacity-feedback)
+      ;;
+  esac
+  case "${ENABLE_PRODUCER_DEBT_STABLE_REPAYMENT_RESERVE:-0}" in
+    1|true|TRUE|yes|YES)
+      frontier_extra_args+=(--enable-producer-debt-stable-repayment-reserve)
+      ;;
+  esac
+  case "${ENABLE_ORDINARY_OWN_VOUCHER_STABLE_BORROWING:-0}" in
+    1|true|TRUE|yes|YES)
+      frontier_extra_args+=(--enable-ordinary-own-voucher-stable-borrowing)
+      ;;
+  esac
+  if [[ -n "${ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY:-}" ]]; then
+    frontier_extra_args+=(
+      --ordinary-own-voucher-stable-borrowing-probability
+      "$ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY"
+    )
+  fi
   if [[ -n "${PRODUCTIVE_CREDIT_VOUCHER_DEPOSIT_SHARE:-}" ]]; then
     frontier_extra_args+=(--productive-credit-voucher-deposit-share "$PRODUCTIVE_CREDIT_VOUCHER_DEPOSIT_SHARE")
   fi
@@ -422,6 +506,9 @@ run_frontier() {
     --frontier-relationship-refresh-ticks "$frontier_relationship_refresh_ticks" \
     --route-success-mode "${ROUTE_SUCCESS_MODE:-diagnostic}" \
     --route-success-floor "${ROUTE_SUCCESS_FLOOR:-0.85}" \
+    --issuer-payment-stride "${ISSUER_PAYMENT_STRIDE:-26}" \
+    --pool-clearing-stride "${POOL_CLEARING_STRIDE:-13}" \
+    --producer-debt-maturity-ticks "${PRODUCER_DEBT_MATURITY_TICKS:-13}" \
     --bond-service-lockbox-mode "${BOND_SERVICE_LOCKBOX_MODE:-remaining_schedule}" \
     --bond-service-lockbox-coverage-ratio "${BOND_SERVICE_LOCKBOX_COVERAGE_RATIO:-1.25}" \
     --producer-debt-contract-service-margin-rate "$shared_debt_margin" \
@@ -537,6 +624,34 @@ case "$JOB" in
       PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
       run_frontier 20 260 bond_issuer_frontier_stress_pilot current 0.05,0.50,1.00,2.00 0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45 1.0
     ;;
+  frontier-capacity-mechanism-smoke)
+    FRONTIER_MODE="${FRONTIER_MODE:-grid}" \
+      FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}" \
+      ISSUER_PAYMENT_STRIDE="${ISSUER_PAYMENT_STRIDE:-26}" \
+      POOL_CLEARING_STRIDE="${POOL_CLEARING_STRIDE:-13}" \
+      PRODUCER_DEBT_PRESSURE_PERIOD_TICKS="${PRODUCER_DEBT_PRESSURE_PERIOD_TICKS:-4}" \
+      PRODUCER_DEBT_MATURITY_TICKS="${PRODUCER_DEBT_MATURITY_TICKS:-13}" \
+      ENABLE_PRODUCER_DEBT_ATTENTION_CROWDOUT="${ENABLE_PRODUCER_DEBT_ATTENTION_CROWDOUT:-1}" \
+      ENABLE_PRODUCER_BOND_ASSESSMENT_PRESSURE="${ENABLE_PRODUCER_BOND_ASSESSMENT_PRESSURE:-1}" \
+      ENABLE_PRODUCER_ACTIVITY_COMPOSITION_SHIFT="${ENABLE_PRODUCER_ACTIVITY_COMPOSITION_SHIFT:-1}" \
+      ENABLE_PRODUCTIVE_CREDIT_ON_DEBT_ORIGINATION="${ENABLE_PRODUCTIVE_CREDIT_ON_DEBT_ORIGINATION:-1}" \
+      PRODUCTIVE_CREDIT_DEBT_RETURN_SCHEDULE="${PRODUCTIVE_CREDIT_DEBT_RETURN_SCHEDULE:-amortized_monthly}" \
+      ENABLE_PRODUCER_DEBT_CAPACITY_FEEDBACK="${ENABLE_PRODUCER_DEBT_CAPACITY_FEEDBACK:-1}" \
+      ENABLE_PRODUCER_DEBT_STABLE_REPAYMENT_RESERVE="${ENABLE_PRODUCER_DEBT_STABLE_REPAYMENT_RESERVE:-1}" \
+      ENABLE_ORDINARY_OWN_VOUCHER_STABLE_BORROWING="${ENABLE_ORDINARY_OWN_VOUCHER_STABLE_BORROWING:-1}" \
+      ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY="${ORDINARY_OWN_VOUCHER_STABLE_BORROWING_PROBABILITY:-0.70}" \
+      VOUCHER_SETTLEMENT_MODE="${VOUCHER_SETTLEMENT_MODE:-redeem_outputs}" \
+      ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK="${ENABLE_PRODUCER_VOUCHER_LOAN_FALLBACK:-1}" \
+      ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST="${ENABLE_PRODUCER_VOUCHER_LOAN_ACTIVITY_BOOST:-1}" \
+      ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING="${ENABLE_PRODUCER_PRIMARY_VOUCHER_BORROWING:-1}" \
+      ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND="${ENABLE_LENDER_VOUCHER_PURCHASE_DEMAND:-1}" \
+      LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK="${LENDER_VOUCHER_PURCHASE_ATTEMPTS_PER_TICK:-5}" \
+      LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE="${LENDER_VOUCHER_PURCHASE_CONSUMER_SHARE:-0.75}" \
+      LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE="${LENDER_VOUCHER_PURCHASE_INVENTORY_SHARE:-0.05}" \
+      LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK="${LENDER_VOUCHER_PURCHASE_STABLE_BUDGET_USD_PER_TICK:-184.061305}" \
+      PRODUCER_VOUCHER_OVERLAP_MODE="${PRODUCER_VOUCHER_OVERLAP_MODE:-empirical_overlap}" \
+      run_frontier 3 52 bond_issuer_frontier_capacity_mechanism_smoke current 0.05,0.25,0.50,1.00,2.00 0,0.08,0.15,0.30 1.0
+    ;;
   frontier-publication)
     FRONTIER_MODE="${FRONTIER_MODE:-grid}" \
       FRONTIER_REFINEMENT_ROUNDS="${FRONTIER_REFINEMENT_ROUNDS:-0}" \
@@ -549,7 +664,7 @@ case "$JOB" in
     ;;
   *)
     echo "Unknown job: $JOB" >&2
-    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, validation-debt-pressure-sensitivity, validation-debt-pressure-sensitivity-full, frontier-smoke, frontier-maturity-smoke, frontier-feedback-probe, frontier-low-principal-probe, frontier-activity-ablation-probe, frontier-rola-regeneration-probe, frontier-pilot, frontier-current-grid-pilot, frontier-stress-pilot, frontier-publication" >&2
+    echo "Use one of: validation-1mo, validation-smoke, validation-pilot, validation-full, validation-debt-pressure-sensitivity, validation-debt-pressure-sensitivity-full, frontier-smoke, frontier-maturity-smoke, frontier-feedback-probe, frontier-low-principal-probe, frontier-activity-ablation-probe, frontier-rola-regeneration-probe, frontier-pilot, frontier-current-grid-pilot, frontier-stress-pilot, frontier-capacity-mechanism-smoke, frontier-publication" >&2
     exit 2
     ;;
 esac

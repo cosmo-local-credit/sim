@@ -244,8 +244,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--issuer-payment-stride",
         type=int,
-        default=13,
-        help="Issuer scheduled payment interval in weekly ticks.",
+        default=26,
+        help="Issuer scheduled payment interval in weekly ticks; paper-facing frontier default is semiannual.",
     )
     parser.add_argument(
         "--pool-clearing-stride",
@@ -472,6 +472,22 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--enable-productive-credit-on-debt-origination",
+        action="store_true",
+        help="Schedule productive-credit returns from every own-voucher debt origination.",
+    )
+    parser.add_argument(
+        "--disable-productive-credit-on-debt-origination",
+        action="store_true",
+        help="Ablation: keep productive-credit returns off debt origination in validation/frontier profiles.",
+    )
+    parser.add_argument(
+        "--productive-credit-debt-return-schedule",
+        default=None,
+        choices=("single_lag", "amortized_monthly"),
+        help="Productive-return schedule for debt-originated credit. Validation/frontier default to amortized_monthly.",
+    )
+    parser.add_argument(
         "--productive-credit-voucher-deposit-share",
         type=float,
         default=None,
@@ -558,6 +574,50 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="Maximum voucher target assets to try for experimental producer voucher-loan fallback.",
+    )
+    parser.add_argument(
+        "--enable-producer-debt-capacity-feedback",
+        action="store_true",
+        help="Suppress or clip producer own-voucher borrowing when lender/deposit capacity is consumed.",
+    )
+    parser.add_argument(
+        "--disable-producer-debt-capacity-feedback",
+        action="store_true",
+        help="Ablation: disable cap-utilization feedback in validation/frontier profiles.",
+    )
+    parser.add_argument(
+        "--producer-debt-capacity-soft-threshold",
+        type=float,
+        default=0.80,
+        help="Capacity utilization threshold where own-voucher borrowing suppression begins.",
+    )
+    parser.add_argument(
+        "--producer-debt-capacity-hard-threshold",
+        type=float,
+        default=0.98,
+        help="Capacity utilization threshold where own-voucher borrowing suppression reaches its cap.",
+    )
+    parser.add_argument(
+        "--producer-debt-capacity-borrowing-suppression-max-share",
+        type=float,
+        default=1.0,
+        help="Maximum probability of suppressing new own-voucher borrowing at the hard utilization threshold.",
+    )
+    parser.add_argument(
+        "--enable-producer-debt-stable-repayment-reserve",
+        action="store_true",
+        help="Protect producer stable balances needed for current debt service from ordinary stable spending.",
+    )
+    parser.add_argument(
+        "--disable-producer-debt-stable-repayment-reserve",
+        action="store_true",
+        help="Ablation: disable stable repayment reserve in validation/frontier profiles.",
+    )
+    parser.add_argument(
+        "--lender-voucher-cap-deposit-multiple",
+        type=float,
+        default=None,
+        help="Override lender producer-voucher cap as a multiple of producer deposited backing.",
     )
     parser.add_argument(
         "--producer-voucher-overlap-mode",
@@ -983,6 +1043,9 @@ SHARD_CONFIG_KEYS = (
     "producer_debt_penalty_rate_per_period",
     "enable_ordinary_own_voucher_stable_borrowing",
     "ordinary_own_voucher_stable_borrowing_probability",
+    "enable_productive_credit_on_debt_origination",
+    "disable_productive_credit_on_debt_origination",
+    "productive_credit_debt_return_schedule",
     "productive_credit_voucher_deposit_share",
     "productive_credit_voucher_deposit_cap_rate_per_month",
     "disable_productive_credit_voucher_activity_boost",
@@ -995,6 +1058,14 @@ SHARD_CONFIG_KEYS = (
     "producer_primary_voucher_borrowing_attempt_share",
     "producer_credit_request_budget_share",
     "producer_voucher_loan_max_target_candidates",
+    "enable_producer_debt_capacity_feedback",
+    "disable_producer_debt_capacity_feedback",
+    "producer_debt_capacity_soft_threshold",
+    "producer_debt_capacity_hard_threshold",
+    "producer_debt_capacity_borrowing_suppression_max_share",
+    "enable_producer_debt_stable_repayment_reserve",
+    "disable_producer_debt_stable_repayment_reserve",
+    "lender_voucher_cap_deposit_multiple",
     "producer_voucher_overlap_mode",
     "enable_lender_voucher_purchase_demand",
     "lender_voucher_purchase_attempts_per_tick",
@@ -2353,6 +2424,8 @@ def configure_producer_debt_pressure(
     bond_assessment_default: bool = False,
     bond_assessment_sustain_offset_default: bool = False,
     activity_composition_default: bool = False,
+    capacity_feedback_default: bool = False,
+    stable_repayment_reserve_default: bool = False,
 ) -> None:
     cfg.producer_debt_pressure_enabled = not bool(
         getattr(args, "disable_producer_debt_pressure", False)
@@ -2489,6 +2562,48 @@ def configure_producer_debt_pressure(
         and bool(bond_assessment_sustain_offset_default)
         and not bool(getattr(args, "disable_producer_bond_assessment_sustain_offset", False))
     )
+    capacity_feedback_enabled = (
+        bool(capacity_feedback_default)
+        or bool(getattr(args, "enable_producer_debt_capacity_feedback", False))
+    ) and not bool(getattr(args, "disable_producer_debt_capacity_feedback", False))
+    cfg.producer_debt_capacity_feedback_enabled = (
+        bool(cfg.producer_debt_pressure_enabled) and capacity_feedback_enabled
+    )
+    cfg.producer_debt_capacity_soft_threshold = max(
+        0.0,
+        min(
+            1.0,
+            float(getattr(args, "producer_debt_capacity_soft_threshold", 0.80) or 0.0),
+        ),
+    )
+    cfg.producer_debt_capacity_hard_threshold = max(
+        cfg.producer_debt_capacity_soft_threshold,
+        min(
+            1.0,
+            float(getattr(args, "producer_debt_capacity_hard_threshold", 0.98) or 0.0),
+        ),
+    )
+    cfg.producer_debt_capacity_borrowing_suppression_max_share = max(
+        0.0,
+        min(
+            1.0,
+            float(
+                getattr(
+                    args,
+                    "producer_debt_capacity_borrowing_suppression_max_share",
+                    1.0,
+                )
+                or 0.0
+            ),
+        ),
+    )
+    stable_repayment_reserve_enabled = (
+        bool(stable_repayment_reserve_default)
+        or bool(getattr(args, "enable_producer_debt_stable_repayment_reserve", False))
+    ) and not bool(getattr(args, "disable_producer_debt_stable_repayment_reserve", False))
+    cfg.producer_debt_stable_repayment_reserve_enabled = (
+        bool(cfg.producer_debt_pressure_enabled) and stable_repayment_reserve_enabled
+    )
 
 
 def apply_debt_pressure_min_swap_default(cfg: ScenarioConfig, args: argparse.Namespace) -> None:
@@ -2549,6 +2664,17 @@ def scenario_config(
         1e-12,
         float(getattr(args, "_voucher_unit_value_usd", 1.0)),
     )
+    cfg.productive_credit_schedule_on_debt_origination = (
+        bool(getattr(args, "enable_productive_credit_on_debt_origination", False))
+        and not bool(getattr(args, "disable_productive_credit_on_debt_origination", False))
+    )
+    if getattr(args, "productive_credit_debt_return_schedule", None):
+        cfg.productive_credit_debt_return_schedule = str(args.productive_credit_debt_return_schedule)
+    if getattr(args, "lender_voucher_cap_deposit_multiple", None) is not None:
+        cfg.lender_voucher_cap_deposit_multiple = max(
+            0.0,
+            float(getattr(args, "lender_voucher_cap_deposit_multiple")),
+        )
 
     if scenario == "mutual_aid_only":
         cfg.economics_enabled = False
@@ -2644,13 +2770,28 @@ def scenario_config(
             cfg.producer_deposits_enabled = True
             cfg.historical_voucher_backing_tick = 1
             cfg.historical_voucher_backing_total_usd = voucher_backing_total
-        cfg.lender_voucher_cap_deposit_multiple = 5.0
+        cfg.lender_voucher_cap_deposit_multiple = max(
+            0.0,
+            float(
+                getattr(args, "lender_voucher_cap_deposit_multiple", None)
+                if getattr(args, "lender_voucher_cap_deposit_multiple", None) is not None
+                else 5.0
+            ),
+        )
         cfg.productive_credit_enabled = True
         cfg.productive_credit_return_rate = max(
             0.0, float(getattr(args, "_validation_productive_credit_return_rate", 0.0) or 0.0)
         )
         cfg.productive_credit_lag_ticks = max(
             1, int(getattr(args, "_validation_productive_credit_lag_ticks", 2) or 2)
+        )
+        cfg.productive_credit_schedule_on_debt_origination = not bool(
+            getattr(args, "disable_productive_credit_on_debt_origination", False)
+        )
+        if getattr(args, "enable_productive_credit_on_debt_origination", False):
+            cfg.productive_credit_schedule_on_debt_origination = True
+        cfg.productive_credit_debt_return_schedule = str(
+            getattr(args, "productive_credit_debt_return_schedule", None) or "amortized_monthly"
         )
         cfg.productive_credit_voucher_feedback_enabled = True
         cfg.productive_credit_voucher_deposit_share = max(
@@ -2706,6 +2847,8 @@ def scenario_config(
             attention_default=True,
             bond_assessment_default=True,
             activity_composition_default=True,
+            capacity_feedback_default=True,
+            stable_repayment_reserve_default=True,
         )
         cfg.ordinary_own_voucher_stable_borrowing_enabled = True
         cfg.ordinary_own_voucher_stable_borrowing_probability = (
@@ -2868,7 +3011,7 @@ def scenario_config(
         cfg.bond_gross_principal_usd = gross_principal
         cfg.bond_deployed_principal_usd = deployed_principal
         cfg.issuer_reserve_share = reserve_share
-        cfg.issuer_payment_stride_ticks = max(1, int(getattr(args, "issuer_payment_stride", 13)))
+        cfg.issuer_payment_stride_ticks = max(1, int(getattr(args, "issuer_payment_stride", 26)))
         cfg.bond_return_mode = "issuer_cashflow"
         cfg.initial_lenders = int(getattr(args, "_current_initial_lenders", cfg.initial_lenders))
         cfg.initial_producers = int(getattr(args, "_current_initial_producers", cfg.initial_producers))
@@ -2912,7 +3055,14 @@ def scenario_config(
         cfg.producer_voucher_deposit_rate_per_month = max(
             0.0, float(getattr(args, "_frontier_producer_voucher_deposit_rate_per_month", 0.0))
         )
-        cfg.lender_voucher_cap_deposit_multiple = 5.0
+        cfg.lender_voucher_cap_deposit_multiple = max(
+            0.0,
+            float(
+                getattr(args, "lender_voucher_cap_deposit_multiple", None)
+                if getattr(args, "lender_voucher_cap_deposit_multiple", None) is not None
+                else 5.0
+            ),
+        )
         cfg.producer_voucher_overlap_mode = str(
             getattr(args, "producer_voucher_overlap_mode", "single_lender") or "single_lender"
         )
@@ -2927,6 +3077,14 @@ def scenario_config(
         )
         cfg.productive_credit_lag_ticks = max(
             1, int(getattr(args, "_frontier_productive_credit_lag_ticks", 2))
+        )
+        cfg.productive_credit_schedule_on_debt_origination = not bool(
+            getattr(args, "disable_productive_credit_on_debt_origination", False)
+        )
+        if getattr(args, "enable_productive_credit_on_debt_origination", False):
+            cfg.productive_credit_schedule_on_debt_origination = True
+        cfg.productive_credit_debt_return_schedule = str(
+            getattr(args, "productive_credit_debt_return_schedule", None) or "amortized_monthly"
         )
         cfg.productive_credit_voucher_feedback_enabled = True
         cfg.productive_credit_voucher_deposit_share = max(
@@ -2952,7 +3110,7 @@ def scenario_config(
             getattr(args, "disable_productive_credit_voucher_activity_boost", False)
         )
         cfg.productive_credit_voucher_activity_boost_window_ticks = max(
-            1, int(getattr(args, "issuer_payment_stride", 13))
+            1, int(getattr(args, "issuer_payment_stride", 26))
         )
         cfg.productive_credit_voucher_source_weight_boost = max(
             0.0,
@@ -3039,6 +3197,8 @@ def scenario_config(
             bond_assessment_default=True,
             bond_assessment_sustain_offset_default=True,
             activity_composition_default=True,
+            capacity_feedback_default=True,
+            stable_repayment_reserve_default=True,
         )
         cfg.ordinary_own_voucher_stable_borrowing_enabled = True
         cfg.ordinary_own_voucher_stable_borrowing_probability = (
@@ -4347,6 +4507,17 @@ def run_one(
                     1.0,
                 )
             ),
+            "configured_productive_credit_schedule_on_debt_origination": int(
+                bool(getattr(cfg, "productive_credit_schedule_on_debt_origination", False))
+            ),
+            "configured_productive_credit_debt_return_schedule": getattr(
+                cfg,
+                "productive_credit_debt_return_schedule",
+                "single_lag",
+            ),
+            "configured_lender_voucher_cap_deposit_multiple": safe_float(
+                getattr(cfg, "lender_voucher_cap_deposit_multiple", 0.0)
+            ),
             "configured_producer_debt_contract_service_margin_rate": safe_float(
                 getattr(cfg, "producer_debt_contract_service_margin_rate", 0.0)
             ),
@@ -4405,6 +4576,21 @@ def run_one(
             ),
             "configured_ordinary_own_voucher_stable_borrowing_probability": safe_float(
                 getattr(cfg, "ordinary_own_voucher_stable_borrowing_probability", 1.0)
+            ),
+            "configured_producer_debt_capacity_feedback_enabled": int(
+                bool(getattr(cfg, "producer_debt_capacity_feedback_enabled", False))
+            ),
+            "configured_producer_debt_capacity_soft_threshold": safe_float(
+                getattr(cfg, "producer_debt_capacity_soft_threshold", 0.80)
+            ),
+            "configured_producer_debt_capacity_hard_threshold": safe_float(
+                getattr(cfg, "producer_debt_capacity_hard_threshold", 0.98)
+            ),
+            "configured_producer_debt_capacity_borrowing_suppression_max_share": safe_float(
+                getattr(cfg, "producer_debt_capacity_borrowing_suppression_max_share", 1.0)
+            ),
+            "configured_producer_debt_stable_repayment_reserve_enabled": int(
+                bool(getattr(cfg, "producer_debt_stable_repayment_reserve_enabled", False))
             ),
             "configured_producer_activity_composition_shift_enabled": int(
                 bool(getattr(cfg, "producer_activity_composition_shift_enabled", False))
@@ -5618,8 +5804,58 @@ def run_one(
             "producer_deposit_voucher_usd": latest.get("producer_deposit_voucher_usd_tick", 0.0),
             "producer_deposit_voucher_usd_total": cumulative_float["producer_deposit_voucher_usd_tick"],
             "producer_deposit_credit_capacity_usd": latest.get("producer_deposit_credit_capacity_usd", 0.0),
+            "producer_borrowing_capacity_usd": latest.get("producer_borrowing_capacity_usd", 0.0),
+            "producer_borrowing_capacity_remaining_usd": latest.get(
+                "producer_borrowing_capacity_remaining_usd",
+                0.0,
+            ),
+            "producer_borrowing_capacity_utilization_p50": latest.get(
+                "producer_borrowing_capacity_utilization_p50",
+                0.0,
+            ),
+            "producer_borrowing_capacity_utilization_p95": latest.get(
+                "producer_borrowing_capacity_utilization_p95",
+                0.0,
+            ),
+            "producer_borrowing_capacity_used_share_p50": latest.get(
+                "producer_borrowing_capacity_used_share_p50",
+                latest.get("producer_borrowing_capacity_utilization_p50", 0.0),
+            ),
+            "producer_borrowing_capacity_used_share_p95": latest.get(
+                "producer_borrowing_capacity_used_share_p95",
+                latest.get("producer_borrowing_capacity_utilization_p95", 0.0),
+            ),
+            "producer_cap_bound_pool_count": latest.get("producer_cap_bound_pool_count", 0),
+            "cap_bound_producer_count": latest.get(
+                "cap_bound_producer_count",
+                latest.get("producer_cap_bound_pool_count", 0),
+            ),
             "productive_credit_inflow_usd": latest.get("productive_credit_inflow_usd_tick", 0.0),
             "productive_credit_inflow_usd_total": cumulative_float["productive_credit_inflow_usd_tick"],
+            "productive_credit_debt_return_scheduled_usd": latest.get(
+                "productive_credit_debt_return_scheduled_usd_tick", 0.0
+            ),
+            "productive_credit_debt_return_scheduled_usd_total": cumulative_float[
+                "productive_credit_debt_return_scheduled_usd_tick"
+            ],
+            "productive_credit_debt_return_received_usd": latest.get(
+                "productive_credit_debt_return_received_usd_tick", 0.0
+            ),
+            "productive_credit_debt_return_received_usd_total": cumulative_float[
+                "productive_credit_debt_return_received_usd_tick"
+            ],
+            "productive_credit_debt_return_scheduled_stable_usd_total": cumulative_float[
+                "productive_credit_debt_return_scheduled_stable_usd_tick"
+            ],
+            "productive_credit_debt_return_scheduled_voucher_usd_total": cumulative_float[
+                "productive_credit_debt_return_scheduled_voucher_usd_tick"
+            ],
+            "productive_credit_debt_return_received_stable_usd_total": cumulative_float[
+                "productive_credit_debt_return_received_stable_usd_tick"
+            ],
+            "productive_credit_debt_return_received_voucher_usd_total": cumulative_float[
+                "productive_credit_debt_return_received_voucher_usd_tick"
+            ],
             "productive_credit_stable_retained_usd": latest.get(
                 "productive_credit_stable_retained_usd_tick", 0.0
             ),
@@ -5644,6 +5880,38 @@ def run_one(
             ),
             "producer_debt_active_obligations": latest.get("producer_debt_active_obligations", 0),
             "producer_debt_active_usd": latest.get("producer_debt_active_usd", 0.0),
+            "producer_own_voucher_borrowing_suppressed_by_capacity_count": latest.get(
+                "producer_own_voucher_borrowing_suppressed_by_capacity_count_tick",
+                0,
+            ),
+            "producer_own_voucher_borrowing_suppressed_by_capacity_count_total": cumulative_float[
+                "producer_own_voucher_borrowing_suppressed_by_capacity_count_tick"
+            ],
+            "producer_own_voucher_borrowing_suppressed_by_capacity_usd": latest.get(
+                "producer_own_voucher_borrowing_suppressed_by_capacity_usd_tick",
+                0.0,
+            ),
+            "producer_own_voucher_borrowing_suppressed_by_capacity_usd_total": cumulative_float[
+                "producer_own_voucher_borrowing_suppressed_by_capacity_usd_tick"
+            ],
+            "cap_bound_own_voucher_route_suppressed_count_total": cumulative_float[
+                "cap_bound_own_voucher_route_suppressed_count_tick"
+            ],
+            "cap_bound_own_voucher_route_suppressed_usd_total": cumulative_float[
+                "cap_bound_own_voucher_route_suppressed_usd_tick"
+            ],
+            "own_voucher_v2v_blocked_by_debt_limit_count_total": cumulative_float[
+                "own_voucher_v2v_blocked_by_debt_limit_count_tick"
+            ],
+            "own_voucher_v2v_blocked_by_debt_limit_usd_total": cumulative_float[
+                "own_voucher_v2v_blocked_by_debt_limit_usd_tick"
+            ],
+            "own_voucher_v2s_blocked_by_debt_limit_count_total": cumulative_float[
+                "own_voucher_v2s_blocked_by_debt_limit_count_tick"
+            ],
+            "own_voucher_v2s_blocked_by_debt_limit_usd_total": cumulative_float[
+                "own_voucher_v2s_blocked_by_debt_limit_usd_tick"
+            ],
             "producer_debt_cash_service_due_usd": latest.get(
                 "producer_debt_cash_service_due_usd_tick", 0.0
             ),
@@ -5658,6 +5926,13 @@ def run_one(
             ],
             "producer_debt_service_capacity_balance_usd": latest.get(
                 "producer_debt_service_capacity_balance_usd", 0.0
+            ),
+            "stable_receipts_waiting_for_repayment_usd": latest.get(
+                "stable_receipts_waiting_for_repayment_usd", 0.0
+            ),
+            "producer_stable_receipts_waiting_for_repayment_usd": latest.get(
+                "producer_stable_receipts_waiting_for_repayment_usd",
+                latest.get("stable_receipts_waiting_for_repayment_usd", 0.0),
             ),
             "producer_debt_service_capacity_credited_usd": latest.get(
                 "producer_debt_service_capacity_credited_usd_tick", 0.0
@@ -8095,6 +8370,9 @@ def summarize_frontier_cell(
     producer_debt_service_capacity_balance_values = [
         safe_float(row.get("producer_debt_service_capacity_balance_usd")) for row in rows
     ]
+    stable_receipts_waiting_for_repayment_values = [
+        safe_float(row.get("stable_receipts_waiting_for_repayment_usd")) for row in rows
+    ]
     producer_debt_service_capacity_credited_values = [
         safe_float(row.get("producer_debt_service_capacity_credited_usd_total")) for row in rows
     ]
@@ -8204,6 +8482,21 @@ def summarize_frontier_cell(
     producer_credit_capacity_values = [
         safe_float(row.get("producer_deposit_credit_capacity_usd")) for row in rows
     ]
+    producer_borrowing_capacity_values = [
+        safe_float(row.get("producer_borrowing_capacity_usd")) for row in rows
+    ]
+    producer_borrowing_capacity_remaining_values = [
+        safe_float(row.get("producer_borrowing_capacity_remaining_usd")) for row in rows
+    ]
+    producer_borrowing_capacity_utilization_p50_values = [
+        safe_float(row.get("producer_borrowing_capacity_utilization_p50")) for row in rows
+    ]
+    producer_borrowing_capacity_utilization_p95_values = [
+        safe_float(row.get("producer_borrowing_capacity_utilization_p95")) for row in rows
+    ]
+    producer_cap_bound_pool_count_values = [
+        safe_float(row.get("producer_cap_bound_pool_count")) for row in rows
+    ]
     producer_deposit_stable_values = [
         safe_float(row.get("producer_deposit_stable_usd_total")) for row in rows
     ]
@@ -8212,6 +8505,24 @@ def summarize_frontier_cell(
     ]
     productive_credit_inflow_values = [
         safe_float(row.get("productive_credit_inflow_usd_total")) for row in rows
+    ]
+    productive_credit_debt_return_scheduled_values = [
+        safe_float(row.get("productive_credit_debt_return_scheduled_usd_total")) for row in rows
+    ]
+    productive_credit_debt_return_received_values = [
+        safe_float(row.get("productive_credit_debt_return_received_usd_total")) for row in rows
+    ]
+    productive_credit_debt_return_scheduled_stable_values = [
+        safe_float(row.get("productive_credit_debt_return_scheduled_stable_usd_total")) for row in rows
+    ]
+    productive_credit_debt_return_scheduled_voucher_values = [
+        safe_float(row.get("productive_credit_debt_return_scheduled_voucher_usd_total")) for row in rows
+    ]
+    productive_credit_debt_return_received_stable_values = [
+        safe_float(row.get("productive_credit_debt_return_received_stable_usd_total")) for row in rows
+    ]
+    productive_credit_debt_return_received_voucher_values = [
+        safe_float(row.get("productive_credit_debt_return_received_voucher_usd_total")) for row in rows
     ]
     productive_credit_stable_retained_values = [
         safe_float(row.get("productive_credit_stable_retained_usd_total")) for row in rows
@@ -8245,6 +8556,40 @@ def summarize_frontier_cell(
     ]
     producer_debt_originated_values = [
         safe_float(row.get("producer_debt_originated_usd_total")) for row in rows
+    ]
+    producer_own_voucher_borrowing_suppressed_by_capacity_count_values = [
+        safe_float(row.get("producer_own_voucher_borrowing_suppressed_by_capacity_count_total"))
+        for row in rows
+    ]
+    producer_own_voucher_borrowing_suppressed_by_capacity_usd_values = [
+        safe_float(row.get("producer_own_voucher_borrowing_suppressed_by_capacity_usd_total"))
+        for row in rows
+    ]
+    cap_bound_own_voucher_route_suppressed_count_values = [
+        safe_float(row.get(
+            "cap_bound_own_voucher_route_suppressed_count_total",
+            row.get("producer_own_voucher_borrowing_suppressed_by_capacity_count_total"),
+        ))
+        for row in rows
+    ]
+    cap_bound_own_voucher_route_suppressed_usd_values = [
+        safe_float(row.get(
+            "cap_bound_own_voucher_route_suppressed_usd_total",
+            row.get("producer_own_voucher_borrowing_suppressed_by_capacity_usd_total"),
+        ))
+        for row in rows
+    ]
+    own_voucher_v2v_blocked_by_debt_limit_count_values = [
+        safe_float(row.get("own_voucher_v2v_blocked_by_debt_limit_count_total")) for row in rows
+    ]
+    own_voucher_v2v_blocked_by_debt_limit_usd_values = [
+        safe_float(row.get("own_voucher_v2v_blocked_by_debt_limit_usd_total")) for row in rows
+    ]
+    own_voucher_v2s_blocked_by_debt_limit_count_values = [
+        safe_float(row.get("own_voucher_v2s_blocked_by_debt_limit_count_total")) for row in rows
+    ]
+    own_voucher_v2s_blocked_by_debt_limit_usd_values = [
+        safe_float(row.get("own_voucher_v2s_blocked_by_debt_limit_usd_total")) for row in rows
     ]
     loan_issuance_to_capacity_values = [
         loan / max(1e-9, capacity)
@@ -8804,6 +9149,38 @@ def summarize_frontier_cell(
             "configured_ordinary_own_voucher_stable_borrowing_probability",
             1.0,
         ),
+        "productive_credit_schedule_on_debt_origination": first.get(
+            "configured_productive_credit_schedule_on_debt_origination",
+            0,
+        ),
+        "productive_credit_debt_return_schedule": first.get(
+            "configured_productive_credit_debt_return_schedule",
+            "single_lag",
+        ),
+        "lender_voucher_cap_deposit_multiple": first.get(
+            "configured_lender_voucher_cap_deposit_multiple",
+            0.0,
+        ),
+        "producer_debt_capacity_feedback_enabled": first.get(
+            "configured_producer_debt_capacity_feedback_enabled",
+            0,
+        ),
+        "producer_debt_capacity_soft_threshold": first.get(
+            "configured_producer_debt_capacity_soft_threshold",
+            0.80,
+        ),
+        "producer_debt_capacity_hard_threshold": first.get(
+            "configured_producer_debt_capacity_hard_threshold",
+            0.98,
+        ),
+        "producer_debt_capacity_borrowing_suppression_max_share": first.get(
+            "configured_producer_debt_capacity_borrowing_suppression_max_share",
+            1.0,
+        ),
+        "producer_debt_stable_repayment_reserve_enabled": first.get(
+            "configured_producer_debt_stable_repayment_reserve_enabled",
+            0,
+        ),
         "producer_activity_composition_shift_enabled": first.get(
             "configured_producer_activity_composition_shift_enabled",
             0,
@@ -9043,6 +9420,12 @@ def summarize_frontier_cell(
         "producer_debt_service_capacity_balance_usd_p50": percentile(
             producer_debt_service_capacity_balance_values, 0.50
         ),
+        "stable_receipts_waiting_for_repayment_usd_p50": percentile(
+            stable_receipts_waiting_for_repayment_values, 0.50
+        ),
+        "producer_stable_receipts_waiting_for_repayment_usd_p50": percentile(
+            stable_receipts_waiting_for_repayment_values, 0.50
+        ),
         "producer_debt_service_capacity_credited_usd_total_p50": percentile(
             producer_debt_service_capacity_credited_values, 0.50
         ),
@@ -9151,6 +9534,29 @@ def summarize_frontier_cell(
             producer_debt_closed_not_held_at_maturity_values, 0.50
         ),
         "producer_deposit_credit_capacity_usd_p50": producer_credit_capacity_p50,
+        "producer_borrowing_capacity_usd_p50": percentile(producer_borrowing_capacity_values, 0.50),
+        "producer_borrowing_capacity_remaining_usd_p50": percentile(
+            producer_borrowing_capacity_remaining_values,
+            0.50,
+        ),
+        "producer_borrowing_capacity_utilization_p50_p50": percentile(
+            producer_borrowing_capacity_utilization_p50_values,
+            0.50,
+        ),
+        "producer_borrowing_capacity_utilization_p95_p50": percentile(
+            producer_borrowing_capacity_utilization_p95_values,
+            0.50,
+        ),
+        "producer_borrowing_capacity_used_share_p50": percentile(
+            producer_borrowing_capacity_utilization_p50_values,
+            0.50,
+        ),
+        "producer_borrowing_capacity_used_share_p95": percentile(
+            producer_borrowing_capacity_utilization_p95_values,
+            0.50,
+        ),
+        "producer_cap_bound_pool_count_p50": percentile(producer_cap_bound_pool_count_values, 0.50),
+        "cap_bound_producer_count_p50": percentile(producer_cap_bound_pool_count_values, 0.50),
         "producer_deposit_stable_usd_total_p50": percentile(producer_deposit_stable_values, 0.50),
         "producer_deposit_voucher_usd_total_p50": percentile(producer_deposit_voucher_values, 0.50),
         "producer_organic_voucher_deposit_usd_total_p50": percentile(
@@ -9160,6 +9566,30 @@ def summarize_frontier_cell(
             producer_deposit_voucher_share_values, 0.50
         ),
         "productive_credit_inflow_usd_total_p50": productive_credit_inflow_p50,
+        "productive_credit_debt_return_scheduled_usd_total_p50": percentile(
+            productive_credit_debt_return_scheduled_values,
+            0.50,
+        ),
+        "productive_credit_debt_return_received_usd_total_p50": percentile(
+            productive_credit_debt_return_received_values,
+            0.50,
+        ),
+        "productive_credit_debt_return_scheduled_stable_usd_total_p50": percentile(
+            productive_credit_debt_return_scheduled_stable_values,
+            0.50,
+        ),
+        "productive_credit_debt_return_scheduled_voucher_usd_total_p50": percentile(
+            productive_credit_debt_return_scheduled_voucher_values,
+            0.50,
+        ),
+        "productive_credit_debt_return_received_stable_usd_total_p50": percentile(
+            productive_credit_debt_return_received_stable_values,
+            0.50,
+        ),
+        "productive_credit_debt_return_received_voucher_usd_total_p50": percentile(
+            productive_credit_debt_return_received_voucher_values,
+            0.50,
+        ),
         "productive_credit_stable_retained_usd_total_p50": productive_credit_stable_retained_p50,
         "productive_credit_voucher_deposit_usd_total_p50": productive_credit_voucher_deposit_p50,
         "productive_credit_voucher_deposit_cap_clipped_usd_total_p50": percentile(
@@ -9187,6 +9617,38 @@ def summarize_frontier_cell(
         ),
         "loan_issuance_volume_usd_total_p50": percentile(loan_issuance_volume_values, 0.50),
         "producer_debt_originated_usd_total_p50": percentile(producer_debt_originated_values, 0.50),
+        "producer_own_voucher_borrowing_suppressed_by_capacity_count_total_p50": percentile(
+            producer_own_voucher_borrowing_suppressed_by_capacity_count_values,
+            0.50,
+        ),
+        "producer_own_voucher_borrowing_suppressed_by_capacity_usd_total_p50": percentile(
+            producer_own_voucher_borrowing_suppressed_by_capacity_usd_values,
+            0.50,
+        ),
+        "cap_bound_own_voucher_route_suppressed_count_total_p50": percentile(
+            cap_bound_own_voucher_route_suppressed_count_values,
+            0.50,
+        ),
+        "cap_bound_own_voucher_route_suppressed_usd_total_p50": percentile(
+            cap_bound_own_voucher_route_suppressed_usd_values,
+            0.50,
+        ),
+        "own_voucher_v2v_blocked_by_debt_limit_count_total_p50": percentile(
+            own_voucher_v2v_blocked_by_debt_limit_count_values,
+            0.50,
+        ),
+        "own_voucher_v2v_blocked_by_debt_limit_usd_total_p50": percentile(
+            own_voucher_v2v_blocked_by_debt_limit_usd_values,
+            0.50,
+        ),
+        "own_voucher_v2s_blocked_by_debt_limit_count_total_p50": percentile(
+            own_voucher_v2s_blocked_by_debt_limit_count_values,
+            0.50,
+        ),
+        "own_voucher_v2s_blocked_by_debt_limit_usd_total_p50": percentile(
+            own_voucher_v2s_blocked_by_debt_limit_usd_values,
+            0.50,
+        ),
         "loan_issuance_to_credit_capacity_p50": percentile(loan_issuance_to_capacity_values, 0.50),
         "bond_principal_to_credit_capacity_p50": percentile(principal_to_credit_capacity_values, 0.50),
         "producer_loan_attempts_total_p50": percentile(producer_loan_attempt_values, 0.50),
@@ -9874,6 +10336,8 @@ def write_frontier_notes(output_dir: Path, args: argparse.Namespace, summary_row
         f"- p05 route-success floor: {max(0.0, min(1.0, float(args.route_success_floor))):.1%}.",
         "- Gross bond principal is the bond amount; it is divided evenly across lender pools as lendable stable at initialization, bypassing the startup waterfall.",
         "- Strong pools are eligible at full weight; moderate pools are capped; weak pools are excluded from base runs unless another policy is explicitly selected.",
+        "- Producer own-voucher V2S and V2V borrowing are productive-credit events in paper-facing frontier runs; delayed stable returns can fund monthly stable-to-own-voucher self-repayment.",
+        "- Cap-bound producers suppress new own-voucher borrowing without recording artificial route failures. See `settlement_capacity_frontier_summary.csv` for borrowing-capacity utilization, blocked own-voucher routes, and stable receipts waiting for repayment.",
         "",
         "## Non-Extraction Gate",
         "",
@@ -9897,6 +10361,154 @@ def write_frontier_notes(output_dir: Path, args: argparse.Namespace, summary_row
             )
         )
     (output_dir / "paper_integration_notes.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def settlement_capacity_frontier_rows(safety_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    rows_out: list[dict[str, object]] = []
+    for row in sorted_frontier_safety_rows(safety_rows):
+        v2v_ratio = safe_float(row.get("voucher_to_voucher_volume_ratio_vs_baseline"))
+        used_p95 = safe_float(
+            row.get(
+                "producer_borrowing_capacity_used_share_p95",
+                row.get("producer_borrowing_capacity_utilization_p95_p50"),
+            )
+        )
+        cap_bound_count = safe_float(
+            row.get("cap_bound_producer_count_p50", row.get("producer_cap_bound_pool_count_p50"))
+        )
+        suppressed_count = safe_float(
+            row.get(
+                "cap_bound_own_voucher_route_suppressed_count_total_p50",
+                row.get("producer_own_voucher_borrowing_suppressed_by_capacity_count_total_p50"),
+            )
+        )
+        stable_waiting = safe_float(row.get("stable_receipts_waiting_for_repayment_usd_p50"))
+        rows_out.append(
+            {
+                "scenario": row.get("scenario", "bond_issuer_frontier"),
+                "network_scale": row.get("network_scale", ""),
+                "coupon_target_annual": row.get("coupon_target_annual", 0.0),
+                "principal_ratio": row.get("principal_ratio", 0.0),
+                "runs": row.get("runs", 0),
+                "safe": row.get("safe", 0),
+                "strong_success": row.get("strong_success", 0),
+                "binding_constraint": row.get("binding_constraint", ""),
+                "scheduled_payment_coverage_p05": row.get("scheduled_payment_coverage_p05", 0.0),
+                "issuer_unpaid_scheduled_claim_p95": row.get(
+                    "issuer_unpaid_scheduled_claim_p95",
+                    0.0,
+                ),
+                "voucher_to_voucher_volume_ratio_vs_baseline": v2v_ratio,
+                "voucher_to_voucher_share_p50": row.get("voucher_to_voucher_share_p50", 0.0),
+                "v2s_to_v2v_volume_ratio_p50": row.get("v2s_to_v2v_volume_ratio_p50", 0.0),
+                "s2v_to_v2v_volume_ratio_p50": row.get("s2v_to_v2v_volume_ratio_p50", 0.0),
+                "active_routable_producer_voucher_float_ratio_vs_baseline": row.get(
+                    "active_routable_producer_voucher_float_ratio_vs_baseline",
+                    0.0,
+                ),
+                "producer_borrowing_capacity_used_share_p95": used_p95,
+                "producer_borrowing_capacity_remaining_usd_p50": row.get(
+                    "producer_borrowing_capacity_remaining_usd_p50",
+                    0.0,
+                ),
+                "cap_bound_producer_count_p50": cap_bound_count,
+                "cap_bound_own_voucher_route_suppressed_count_total_p50": suppressed_count,
+                "own_voucher_v2v_blocked_by_debt_limit_count_total_p50": row.get(
+                    "own_voucher_v2v_blocked_by_debt_limit_count_total_p50",
+                    0.0,
+                ),
+                "own_voucher_v2s_blocked_by_debt_limit_count_total_p50": row.get(
+                    "own_voucher_v2s_blocked_by_debt_limit_count_total_p50",
+                    0.0,
+                ),
+                "stable_receipts_waiting_for_repayment_usd_p50": stable_waiting,
+                "producer_debt_arrears_usd_p50": row.get("producer_debt_arrears_usd_p50", 0.0),
+                "productive_credit_debt_return_scheduled_usd_total_p50": row.get(
+                    "productive_credit_debt_return_scheduled_usd_total_p50",
+                    0.0,
+                ),
+                "productive_credit_debt_return_received_usd_total_p50": row.get(
+                    "productive_credit_debt_return_received_usd_total_p50",
+                    0.0,
+                ),
+                "mechanism_capacity_pressure_present": int(
+                    used_p95 >= 0.80 or cap_bound_count > 0.0 or suppressed_count > 0.0
+                ),
+                "mechanism_v2v_decline_present": int(v2v_ratio > 0.0 and v2v_ratio < 0.98),
+                "mechanism_repayment_waiting_present": int(stable_waiting > 1e-9),
+            }
+        )
+    return rows_out
+
+
+def write_settlement_capacity_frontier_notes(
+    output_dir: Path,
+    rows: list[dict[str, object]],
+) -> None:
+    if not rows:
+        return
+    positive_rows = [row for row in rows if safe_float(row.get("principal_ratio")) > 0.0]
+    low = min(
+        positive_rows or rows,
+        key=lambda row: (
+            safe_float(row.get("coupon_target_annual")),
+            safe_float(row.get("principal_ratio")),
+        ),
+    )
+    high = max(
+        positive_rows or rows,
+        key=lambda row: (
+            safe_float(row.get("coupon_target_annual")),
+            safe_float(row.get("principal_ratio")),
+        ),
+    )
+    lines = [
+        "# Settlement-Capacity Frontier Diagnostics",
+        "",
+        "These diagnostics treat settlement-capacity capture as a testable frontier mechanism, not as a settled result.",
+        "The intended causal chain is: catalytic or bond liquidity expands lender liquidity; producers borrow only when own-voucher caps allow; borrowing creates delayed productive stable receipts; repayment pressure and cap utilization then change producer attention, target choice, and capacity to continue ROLA-like voucher-to-voucher exchange.",
+        "",
+        "## Directional Smoke Checks",
+        "",
+        "- Capacity pressure is present when p95 borrowing-capacity utilization reaches the soft threshold, producers become cap-bound, or own-voucher borrowing is suppressed by debt limits.",
+        "- V2V decline is present when voucher-to-voucher volume falls below 98% of the matched no-bond baseline.",
+        "- Repayment waiting is present when stable receipts or off-network debt-service capacity are reserved for borrower self-repayment.",
+        "",
+        "## Low-Stress Reference",
+        "",
+        (
+            "- coupon={coupon:.2%}, principal_ratio={principal:.2f}, V2V ratio={v2v:.3f}, "
+            "capacity used p95={used:.3f}, cap-bound producers={bound:.1f}."
+        ).format(
+            coupon=safe_float(low.get("coupon_target_annual")),
+            principal=safe_float(low.get("principal_ratio")),
+            v2v=safe_float(low.get("voucher_to_voucher_volume_ratio_vs_baseline")),
+            used=safe_float(low.get("producer_borrowing_capacity_used_share_p95")),
+            bound=safe_float(low.get("cap_bound_producer_count_p50")),
+        ),
+        "",
+        "## High-Stress Reference",
+        "",
+        (
+            "- coupon={coupon:.2%}, principal_ratio={principal:.2f}, V2V ratio={v2v:.3f}, "
+            "capacity used p95={used:.3f}, cap-bound producers={bound:.1f}, "
+            "own-voucher blocks={blocked:.1f}, stable waiting={waiting:,.2f}."
+        ).format(
+            coupon=safe_float(high.get("coupon_target_annual")),
+            principal=safe_float(high.get("principal_ratio")),
+            v2v=safe_float(high.get("voucher_to_voucher_volume_ratio_vs_baseline")),
+            used=safe_float(high.get("producer_borrowing_capacity_used_share_p95")),
+            bound=safe_float(high.get("cap_bound_producer_count_p50")),
+            blocked=safe_float(high.get("cap_bound_own_voucher_route_suppressed_count_total_p50")),
+            waiting=safe_float(high.get("stable_receipts_waiting_for_repayment_usd_p50")),
+        ),
+        "",
+        "Interpretation should be updated after larger frontier runs; this file is designed for fast mechanism smoke tests and edge finding.",
+    ]
+    (output_dir / "settlement_capacity_frontier_notes.md").write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
 
 
 def issuer_cashflow_summary_rows(safety_rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -10770,6 +11382,18 @@ def frontier_summary_rows(
                 "liquidity_leakage_delta_p95": safe_float(best.get("liquidity_leakage_delta_p95")),
                 "unpaid_claims_ratio_p95": safe_float(best.get("unpaid_claims_ratio_p95")),
                 "realized_edge_concentration_p95": safe_float(best.get("realized_edge_concentration_p95")),
+                "producer_borrowing_capacity_used_share_p95": safe_float(
+                    best.get("producer_borrowing_capacity_used_share_p95")
+                ),
+                "cap_bound_producer_count_p50": safe_float(
+                    best.get("cap_bound_producer_count_p50")
+                ),
+                "cap_bound_own_voucher_route_suppressed_count_total_p50": safe_float(
+                    best.get("cap_bound_own_voucher_route_suppressed_count_total_p50")
+                ),
+                "stable_receipts_waiting_for_repayment_usd_p50": safe_float(
+                    best.get("stable_receipts_waiting_for_repayment_usd_p50")
+                ),
             }
         )
     headline_rows = []
@@ -10849,6 +11473,18 @@ def frontier_summary_rows(
                 "liquidity_leakage_delta_p95": safe_float(best.get("liquidity_leakage_delta_p95")),
                 "unpaid_claims_ratio_p95": safe_float(best.get("unpaid_claims_ratio_p95")),
                 "realized_edge_concentration_p95": safe_float(best.get("realized_edge_concentration_p95")),
+                "producer_borrowing_capacity_used_share_p95": safe_float(
+                    best.get("producer_borrowing_capacity_used_share_p95")
+                ),
+                "cap_bound_producer_count_p50": safe_float(
+                    best.get("cap_bound_producer_count_p50")
+                ),
+                "cap_bound_own_voucher_route_suppressed_count_total_p50": safe_float(
+                    best.get("cap_bound_own_voucher_route_suppressed_count_total_p50")
+                ),
+                "stable_receipts_waiting_for_repayment_usd_p50": safe_float(
+                    best.get("stable_receipts_waiting_for_repayment_usd_p50")
+                ),
             }
         )
     return frontier_rows, headline_rows
@@ -10914,6 +11550,7 @@ def write_frontier_aggregate(
     frontier_rows, headline_rows = frontier_summary_rows(network_scales, safety_rows)
     headroom_rows = issuer_headroom_frontier_rows(safety_rows)
     issuer_rows = issuer_cashflow_summary_rows(safety_rows)
+    settlement_capacity_rows = settlement_capacity_frontier_rows(safety_rows)
     suffix = ".partial.csv" if partial else ".csv"
     write_csv(output_dir / f"bond_issuer_frontier_runs{suffix}", list(all_run_rows[0].keys()) if all_run_rows else [], all_run_rows)
     write_csv(output_dir / f"bond_issuer_frontier_safety{suffix}", list(safety_rows[0].keys()) if safety_rows else [], safety_rows)
@@ -10921,6 +11558,11 @@ def write_frontier_aggregate(
     write_csv(output_dir / f"issuer_operating_headroom_frontier{suffix}", list(headroom_rows[0].keys()) if headroom_rows else [], headroom_rows)
     write_csv(output_dir / f"network_scaling_summary{suffix}", list(headline_rows[0].keys()) if headline_rows else [], headline_rows)
     write_csv(output_dir / f"issuer_cashflow_summary{suffix}", list(issuer_rows[0].keys()) if issuer_rows else [], issuer_rows)
+    write_csv(
+        output_dir / f"settlement_capacity_frontier_summary{suffix}",
+        list(settlement_capacity_rows[0].keys()) if settlement_capacity_rows else [],
+        settlement_capacity_rows,
+    )
     audit_rows = calibration_activity_audit_rows(
         args,
         calibration,
@@ -10938,6 +11580,7 @@ def write_frontier_aggregate(
         if not args.no_png:
             write_frontier_figures(output_dir, headline_rows, safety_rows)
         write_frontier_notes(output_dir, args, headline_rows)
+        write_settlement_capacity_frontier_notes(output_dir, settlement_capacity_rows)
 
 
 def run_bond_issuer_frontier(args: argparse.Namespace, calibration: Calibration, output_dir: Path) -> int:

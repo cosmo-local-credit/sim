@@ -2634,6 +2634,13 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertTrue(cfg.producer_bond_assessment_sustain_offset_enabled)
         self.assertTrue(cfg.ordinary_own_voucher_stable_borrowing_enabled)
         self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.70)
+        self.assertTrue(cfg.productive_credit_schedule_on_debt_origination)
+        self.assertEqual(cfg.productive_credit_debt_return_schedule, "amortized_monthly")
+        self.assertTrue(cfg.producer_debt_capacity_feedback_enabled)
+        self.assertAlmostEqual(cfg.producer_debt_capacity_soft_threshold, 0.80)
+        self.assertAlmostEqual(cfg.producer_debt_capacity_hard_threshold, 0.98)
+        self.assertAlmostEqual(cfg.producer_debt_capacity_borrowing_suppression_max_share, 1.0)
+        self.assertTrue(cfg.producer_debt_stable_repayment_reserve_enabled)
         self.assertTrue(cfg.producer_activity_composition_shift_enabled)
         self.assertAlmostEqual(cfg.producer_activity_composition_shift_scale, 1.0)
         self.assertAlmostEqual(cfg.producer_activity_composition_shift_max_share, 0.60)
@@ -2802,6 +2809,17 @@ class RegenBondRevisionTests(unittest.TestCase):
             "producer_debt_penalty_rate_per_period",
             "enable_ordinary_own_voucher_stable_borrowing",
             "ordinary_own_voucher_stable_borrowing_probability",
+            "enable_productive_credit_on_debt_origination",
+            "disable_productive_credit_on_debt_origination",
+            "productive_credit_debt_return_schedule",
+            "enable_producer_debt_capacity_feedback",
+            "disable_producer_debt_capacity_feedback",
+            "producer_debt_capacity_soft_threshold",
+            "producer_debt_capacity_hard_threshold",
+            "producer_debt_capacity_borrowing_suppression_max_share",
+            "enable_producer_debt_stable_repayment_reserve",
+            "disable_producer_debt_stable_repayment_reserve",
+            "lender_voucher_cap_deposit_multiple",
         ):
             self.assertIn(key, SHARD_CONFIG_KEYS)
 
@@ -2863,6 +2881,12 @@ class RegenBondRevisionTests(unittest.TestCase):
         self.assertFalse(cfg.producer_bond_assessment_sustain_offset_enabled)
         self.assertTrue(cfg.ordinary_own_voucher_stable_borrowing_enabled)
         self.assertAlmostEqual(cfg.ordinary_own_voucher_stable_borrowing_probability, 0.70)
+        self.assertTrue(cfg.productive_credit_schedule_on_debt_origination)
+        self.assertEqual(cfg.productive_credit_debt_return_schedule, "amortized_monthly")
+        self.assertTrue(cfg.producer_debt_capacity_feedback_enabled)
+        self.assertAlmostEqual(cfg.producer_debt_capacity_soft_threshold, 0.80)
+        self.assertAlmostEqual(cfg.producer_debt_capacity_hard_threshold, 0.98)
+        self.assertTrue(cfg.producer_debt_stable_repayment_reserve_enabled)
         self.assertTrue(cfg.producer_activity_composition_shift_enabled)
         self.assertAlmostEqual(cfg.producer_activity_composition_shift_scale, 1.0)
         self.assertAlmostEqual(cfg.producer_activity_composition_shift_max_share, 0.60)
@@ -3094,6 +3118,277 @@ class RegenBondRevisionTests(unittest.TestCase):
 
         self.assertAlmostEqual(producer_pool.vault.get(engine.cfg.stable_symbol) - before, 270.0)
         self.assertAlmostEqual(engine._productive_credit_inflow_usd_tick, 270.0)
+
+    def test_debt_origination_schedules_productive_returns_for_stable_and_voucher_debt(self):
+        engine = SimulationEngine(
+            small_config(
+                productive_credit_enabled=True,
+                productive_credit_return_rate=0.0,
+                productive_credit_lag_ticks=0,
+                productive_credit_schedule_on_debt_origination=True,
+                productive_credit_debt_return_schedule="single_lag",
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+                producer_debt_contract_revenue_rate=1.0,
+                producer_debt_maturity_ticks=8,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            10.0,
+            10.0,
+            debt_kind="stable",
+        )
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            20.0,
+            20.0,
+            debt_kind="voucher",
+        )
+
+        self.assertEqual(len(engine._producer_debt_obligations), 2)
+        self.assertEqual(len(engine._productive_credit_queue[0]), 2)
+        self.assertAlmostEqual(engine._productive_credit_debt_return_scheduled_usd_total, 30.0)
+        self.assertAlmostEqual(engine._productive_credit_debt_return_scheduled_stable_usd_total, 10.0)
+        self.assertAlmostEqual(engine._productive_credit_debt_return_scheduled_voucher_usd_total, 20.0)
+
+    def test_debt_originated_productive_returns_amortize_monthly(self):
+        engine = SimulationEngine(
+            small_config(
+                productive_credit_enabled=True,
+                productive_credit_return_rate=0.0,
+                productive_credit_lag_ticks=1,
+                productive_credit_schedule_on_debt_origination=True,
+                productive_credit_debt_return_schedule="amortized_monthly",
+                producer_debt_pressure_period_ticks=4,
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+                producer_debt_contract_revenue_rate=1.0,
+                producer_debt_maturity_ticks=9,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            voucher_id,
+            90.0,
+            90.0,
+            debt_kind="stable",
+        )
+
+        self.assertEqual(sorted(engine._productive_credit_queue.keys()), [1, 5, 9])
+        for due_tick in (1, 5, 9):
+            self.assertAlmostEqual(engine._productive_credit_queue[due_tick][0][1], 30.0)
+
+    def test_disabled_debt_origination_does_not_schedule_productive_return(self):
+        engine = SimulationEngine(
+            small_config(
+                productive_credit_enabled=True,
+                productive_credit_return_rate=1.0,
+                productive_credit_schedule_on_debt_origination=False,
+                producer_debt_maturity_enabled=True,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            producer.voucher_spec.voucher_id,
+            10.0,
+            10.0,
+            debt_kind="stable",
+        )
+
+        self.assertEqual(engine._productive_credit_queue, {})
+        self.assertAlmostEqual(engine._productive_credit_debt_return_scheduled_usd_total, 0.0)
+
+    def test_capacity_feedback_clips_partial_own_voucher_borrowing(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_deposits_enabled=True,
+                producer_debt_capacity_feedback_enabled=True,
+                lender_voucher_cap_deposit_multiple=1.0,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        stable_id = engine.cfg.stable_symbol
+        voucher_id = producer.voucher_spec.voucher_id
+        lender_pool.values.set_value(voucher_id, 1.0)
+        producer_pool.values.set_value(voucher_id, 1.0)
+        engine._assign_producer_voucher_to_lender(voucher_id)
+        engine._producer_deposit_value_by_voucher[voucher_id] = 10.0
+        engine._lender_producer_voucher_exposure_usd_by_pool_voucher[
+            (lender_pool.pool_id, voucher_id)
+        ] = 4.0
+        engine._vault_add(lender_pool, stable_id, 100.0, "test_seed", "test")
+
+        clipped, suppressed = engine._clip_own_voucher_borrow_amount_for_capacity(
+            producer_pool,
+            voucher_id,
+            stable_id,
+            20.0,
+            "ordinary",
+        )
+
+        self.assertFalse(suppressed)
+        self.assertAlmostEqual(clipped, 6.0)
+
+    def test_capacity_feedback_suppresses_exhausted_own_voucher_borrowing_without_route_failure(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_deposits_enabled=True,
+                producer_debt_capacity_feedback_enabled=True,
+                lender_voucher_cap_deposit_multiple=1.0,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        stable_id = engine.cfg.stable_symbol
+        voucher_id = producer.voucher_spec.voucher_id
+        lender_pool.values.set_value(voucher_id, 1.0)
+        producer_pool.values.set_value(voucher_id, 1.0)
+        engine._assign_producer_voucher_to_lender(voucher_id)
+        engine._producer_deposit_value_by_voucher[voucher_id] = 10.0
+        engine._lender_producer_voucher_exposure_usd_by_pool_voucher[
+            (lender_pool.pool_id, voucher_id)
+        ] = 10.0
+
+        clipped, suppressed = engine._clip_own_voucher_borrow_amount_for_capacity(
+            producer_pool,
+            voucher_id,
+            stable_id,
+            5.0,
+            "ordinary",
+        )
+
+        self.assertTrue(suppressed)
+        self.assertAlmostEqual(clipped, 0.0)
+        self.assertEqual(engine._producer_own_voucher_borrowing_suppressed_by_capacity_count_total, 1)
+        self.assertEqual(engine._own_voucher_v2s_blocked_by_debt_limit_count_total, 1)
+        self.assertEqual(engine._own_voucher_v2v_blocked_by_debt_limit_count_total, 0)
+        self.assertFalse(any(e.event_type == "ROUTE_FAILED" for e in engine.log.events))
+
+    def test_capacity_feedback_splits_voucher_and_stable_debt_limit_blocks(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_deposits_enabled=True,
+                producer_debt_capacity_feedback_enabled=True,
+                lender_voucher_cap_deposit_multiple=1.0,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        voucher_id = producer.voucher_spec.voucher_id
+        other_voucher = "VCHR:other"
+        lender_pool.values.set_value(voucher_id, 1.0)
+        lender_pool.values.set_value(other_voucher, 1.0)
+        lender_pool.list_asset_with_value_and_limit(other_voucher, value=1.0, window_len=10, cap_in=500.0)
+        producer_pool.values.set_value(voucher_id, 1.0)
+        engine._assign_producer_voucher_to_lender(voucher_id)
+        engine._producer_deposit_value_by_voucher[voucher_id] = 10.0
+        engine._lender_producer_voucher_exposure_usd_by_pool_voucher[
+            (lender_pool.pool_id, voucher_id)
+        ] = 10.0
+
+        clipped, suppressed = engine._clip_own_voucher_borrow_amount_for_capacity(
+            producer_pool,
+            voucher_id,
+            other_voucher,
+            5.0,
+            "ordinary",
+        )
+
+        self.assertTrue(suppressed)
+        self.assertAlmostEqual(clipped, 0.0)
+        self.assertEqual(engine._own_voucher_v2v_blocked_by_debt_limit_count_total, 1)
+        self.assertEqual(engine._own_voucher_v2s_blocked_by_debt_limit_count_total, 0)
+
+    def test_stable_repayment_reserve_protects_current_due_from_ordinary_spend(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_debt_pressure_enabled=True,
+                producer_debt_stable_repayment_reserve_enabled=True,
+                producer_debt_pressure_period_ticks=4,
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+                producer_debt_contract_service_margin_rate=0.0,
+                producer_debt_maturity_ticks=8,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        stable_id = engine.cfg.stable_symbol
+        engine._vault_add(producer_pool, stable_id, 100.0, "test_seed", "test")
+
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            producer.voucher_spec.voucher_id,
+            80.0,
+            80.0,
+            debt_kind="stable",
+        )
+
+        spendable = engine._ordinary_source_spendable_amount(producer_pool, stable_id)
+        self.assertLess(spendable, producer_pool.vault.get(stable_id))
+        self.assertGreater(engine._producer_debt_repayment_reserve_usd(producer_pool), 0.0)
+
+    def test_stable_receipts_waiting_for_repayment_tracks_reserved_stable_and_capacity(self):
+        engine = SimulationEngine(
+            small_config(
+                producer_debt_pressure_enabled=True,
+                producer_debt_stable_repayment_reserve_enabled=True,
+                producer_debt_pressure_period_ticks=4,
+                producer_debt_maturity_enabled=True,
+                producer_debt_contract_repayment_enabled=True,
+                producer_debt_contract_service_margin_rate=0.0,
+                producer_debt_maturity_ticks=8,
+            )
+        )
+        producer = next(agent for agent in engine.agents.values() if agent.role == "producer")
+        producer_pool = engine.pools[producer.pool_id]
+        lender_pool = next(pool for pool in engine.pools.values() if pool.policy.role == "lender")
+        stable_id = engine.cfg.stable_symbol
+        current_stable = producer_pool.vault.get(stable_id)
+        if current_stable > 0.0:
+            engine._vault_sub(producer_pool, stable_id, current_stable, "test_clear", "test")
+        engine._vault_add(producer_pool, stable_id, 5.0, "test_seed", "test")
+        engine._producer_debt_service_capacity_by_pool[producer_pool.pool_id] = 8.0
+        engine._register_producer_debt_obligation(
+            producer_pool.pool_id,
+            lender_pool.pool_id,
+            producer.voucher_spec.voucher_id,
+            80.0,
+            80.0,
+            debt_kind="stable",
+        )
+
+        waiting = engine._stable_receipts_waiting_for_repayment_usd()
+
+        self.assertGreater(waiting, 0.0)
+        self.assertLessEqual(waiting, 13.0)
 
     def test_productive_credit_voucher_feedback_splits_inflow_without_double_counting(self):
         engine = SimulationEngine(

@@ -313,6 +313,8 @@ class ScenarioConfig:
     productive_credit_enabled: bool = False
     productive_credit_return_rate: float = 0.0
     productive_credit_lag_ticks: int = 2
+    productive_credit_schedule_on_debt_origination: bool = False
+    productive_credit_debt_return_schedule: str = "single_lag"  # "single_lag" or "amortized_monthly"
     productive_credit_voucher_feedback_enabled: bool = False
     productive_credit_voucher_deposit_share: float = 0.0
     productive_credit_voucher_deposit_cap_rate_per_month: float = 0.0
@@ -345,6 +347,11 @@ class ScenarioConfig:
     producer_bond_assessment_pressure_enabled: bool = False
     producer_bond_assessment_pressure_scale: float = 1.0
     producer_bond_assessment_sustain_offset_enabled: bool = False
+    producer_debt_capacity_feedback_enabled: bool = False
+    producer_debt_capacity_soft_threshold: float = 0.80
+    producer_debt_capacity_hard_threshold: float = 0.98
+    producer_debt_capacity_borrowing_suppression_max_share: float = 1.0
+    producer_debt_stable_repayment_reserve_enabled: bool = False
 
     # Swap sizing (share of pool value, per attempt)
     swap_size_mean_frac: float = 0.02
