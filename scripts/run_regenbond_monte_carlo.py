@@ -182,7 +182,7 @@ class Calibration:
     unit_normalization: dict[str, float]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run regenerative-bond Monte Carlo scenarios and write paper artifacts."
     )
@@ -931,7 +931,7 @@ def parse_args() -> argparse.Namespace:
         default=260,
         help="Bond term in ticks used for headline PNG figures when present in the output.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def parse_float_list(text: str) -> list[float]:

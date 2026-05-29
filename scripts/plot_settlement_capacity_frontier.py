@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate settlement-capacity frontier smoke figures from frontier CSVs.
+"""Generate settlement-capacity frontier diagnostic figures from frontier CSVs.
 
 The script intentionally writes SVG directly with the Python standard library so
 the figures remain reproducible on remote batch hosts that do not have plotting
@@ -12,8 +12,10 @@ from __future__ import annotations
 import argparse
 import csv
 import html
+import math
 import shutil
 import subprocess
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Iterable
@@ -32,6 +34,40 @@ def safe_float(row: Row, key: str, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def pass_flag(row: Row, key: str, fallback: bool = False) -> bool:
+    value = row.get(key, "")
+    if value == "" or value is None:
+        return fallback
+    return safe_float(row, key) >= 0.5
+
+
+def guardrail_flags(summary_row: Row, safety_row: Row) -> dict[str, bool]:
+    service_pass = pass_flag(
+        safety_row,
+        "repayment_pass",
+        safe_float(safety_row, "scheduled_payment_coverage_p05") >= 1.0
+        and safe_float(safety_row, "issuer_unpaid_scheduled_claim_p95") <= 0.0,
+    )
+    v2v_pass = pass_flag(
+        safety_row,
+        "v2v_float_pass",
+        safe_float(summary_row, "voucher_to_voucher_volume_ratio_vs_baseline") >= 0.95,
+    )
+    headroom_pass = pass_flag(
+        safety_row,
+        "headroom_pass",
+        pass_flag(safety_row, "issuer_operating_risk_headroom_ge_125"),
+    )
+
+    return {"svc": service_pass, "V2V": v2v_pass, "head": headroom_pass}
+
+
+def guardrail_cell_label(summary_row: Row, safety_row: Row, *, failed: bool) -> str:
+    flags = guardrail_flags(summary_row, safety_row)
+    selected = [token for token, passed in flags.items() if passed != failed]
+    return "+".join(selected) if selected else "none"
 
 
 def median(values: Iterable[float]) -> float:
@@ -67,8 +103,26 @@ def text(
     transform = f' transform="rotate({rotate} {x:.2f} {y:.2f})"' if rotate is not None else ""
     return (
         f'<text x="{x:.2f}" y="{y:.2f}" font-size="{size}" fill="{fill}" '
-        f'text-anchor="{anchor}" font-family="Inter, Arial, sans-serif" '
+        f'text-anchor="{anchor}" font-family="Arial, Helvetica, sans-serif" '
         f'font-weight="{weight}"{transform}>{esc(value)}</text>'
+    )
+
+
+def rotated_text(
+    x: float,
+    y: float,
+    value: object,
+    *,
+    size: int = 12,
+    fill: str = "#222",
+    anchor: str = "middle",
+    weight: str = "normal",
+    angle: float = -90,
+) -> str:
+    return (
+        f'<text x="{x:.2f}" y="{y:.2f}" font-size="{size}" fill="{fill}" '
+        f'text-anchor="{anchor}" font-family="Arial, Helvetica, sans-serif" '
+        f'font-weight="{weight}" transform="rotate({angle:.2f} {x:.2f} {y:.2f})">{esc(value)}</text>'
     )
 
 
@@ -106,10 +160,9 @@ def circle(x: float, y: float, radius: float, fill: str, stroke: str = "white") 
 def svg_start(title: str, subtitle: str, *, width: int = 760, height: int = 540) -> list[str]:
     return [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
-        '<rect width="100%" height="100%" fill="#f7f9fb"/>',
-        text(32, 40, title, size=21, weight="700"),
-        text(32, 64, subtitle, size=12, fill="#4b5563"),
-        rect(32, 86, width - 64, height - 124, "#ffffff", "#d7dde2", 1.0),
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        text(44, 38, title, size=19, weight="700"),
+        text(44, 61, subtitle, size=11, fill="#4b5563"),
     ]
 
 
@@ -135,37 +188,49 @@ def add_plot_axes(
     yticks: list[float],
     xlabel: str,
     ylabel: str,
+    x_scale: str = "linear",
+    x_tail_offset: float = 5.0,
+    stagger_xtick_labels: bool = False,
 ) -> tuple[Callable[[float], float], Callable[[float], float], tuple[float, float, float, float]]:
-    left, top, right, bottom = x + 82, y + 48, x + width - 34, y + height - 72
+    left, top, right, bottom = x + 120, y + 48, x + width - 36, y + height - 78
     plot_width = right - left
     plot_height = bottom - top
 
     def sx(value: float) -> float:
+        if x_scale == "log":
+            return (
+                left
+                + (math.log(value) - math.log(xmin)) / (math.log(xmax) - math.log(xmin)) * plot_width
+                if xmax != xmin and value > 0 and xmin > 0
+                else left
+            )
+        if x_scale == "tail_log":
+            denominator = math.log((xmax + x_tail_offset - xmin) / x_tail_offset)
+            position = 1.0 - math.log((xmax + x_tail_offset - value) / x_tail_offset) / denominator
+            return left + position * plot_width
         return left + (value - xmin) / (xmax - xmin) * plot_width if xmax != xmin else left
 
     def sy(value: float) -> float:
         return bottom - (value - ymin) / (ymax - ymin) * plot_height if ymax != ymin else bottom
 
-    elements.append(f'<line x1="{left}" y1="{bottom}" x2="{right}" y2="{bottom}" stroke="#333" stroke-width="1"/>')
-    elements.append(f'<line x1="{left}" y1="{top}" x2="{left}" y2="{bottom}" stroke="#333" stroke-width="1"/>')
+    elements.append(f'<line x1="{left}" y1="{bottom}" x2="{right}" y2="{bottom}" stroke="#222" stroke-width="1"/>')
+    elements.append(f'<line x1="{left}" y1="{top}" x2="{left}" y2="{bottom}" stroke="#222" stroke-width="1"/>')
 
-    for tick in xticks:
+    for idx, tick in enumerate(xticks):
         tx = sx(tick)
-        elements.append(f'<line x1="{tx:.2f}" y1="{bottom}" x2="{tx:.2f}" y2="{bottom + 5}" stroke="#333"/>')
-        elements.append(text(tx, bottom + 23, f"{tick:g}", size=10, anchor="middle"))
-        elements.append(f'<line x1="{tx:.2f}" y1="{top}" x2="{tx:.2f}" y2="{bottom}" stroke="#e9edf0"/>')
+        elements.append(f'<line x1="{tx:.2f}" y1="{bottom}" x2="{tx:.2f}" y2="{bottom + 5}" stroke="#222"/>')
+        label_y = bottom + 23 + (13 if stagger_xtick_labels and idx % 2 else 0)
+        elements.append(text(tx, label_y, f"{tick:g}", size=10, anchor="middle"))
+        elements.append(f'<line x1="{tx:.2f}" y1="{top}" x2="{tx:.2f}" y2="{bottom}" stroke="#e5e7eb" stroke-width="0.8"/>')
 
     for tick in yticks:
         ty = sy(tick)
         label = f"{tick:.2g}" if abs(tick) < 1 else f"{tick:g}"
-        elements.append(f'<line x1="{left - 5}" y1="{ty:.2f}" x2="{left}" y2="{ty:.2f}" stroke="#333"/>')
+        elements.append(f'<line x1="{left - 5}" y1="{ty:.2f}" x2="{left}" y2="{ty:.2f}" stroke="#222"/>')
         elements.append(text(left - 8, ty + 3.5, label, size=10, anchor="end"))
-        elements.append(f'<line x1="{left}" y1="{ty:.2f}" x2="{right}" y2="{ty:.2f}" stroke="#e9edf0"/>')
+        elements.append(f'<line x1="{left}" y1="{ty:.2f}" x2="{right}" y2="{ty:.2f}" stroke="#e5e7eb" stroke-width="0.8"/>')
 
-    elements.append(text((left + right) / 2, y + height - 24, xlabel, size=12, anchor="middle"))
-    # Horizontal y-axis titles survive SVG->PNG conversion more reliably than
-    # rotated text across minimal remote hosts.
-    elements.append(text(left, top - 16, f"Y-axis: {ylabel}", size=12, anchor="start", weight="600"))
+    elements.append(text((left + right) / 2, y + height - 28, xlabel, size=12, anchor="middle"))
     return sx, sy, (left, top, right, bottom)
 
 
@@ -188,7 +253,7 @@ def write_svg(path: Path, elements: list[str], note: str | None = None) -> None:
     path.write_text(svg_finish(elements, note), encoding="utf-8")
 
 
-def maybe_write_png(svg_path: Path, *, enabled: bool) -> None:
+def maybe_write_png(svg_path: Path, *, enabled: bool, rotated_y_label: str | None = None) -> None:
     if not enabled:
         return
     converter = shutil.which("convert")
@@ -196,6 +261,44 @@ def maybe_write_png(svg_path: Path, *, enabled: bool) -> None:
         return
     png_path = svg_path.with_suffix(".png")
     subprocess.run([converter, str(svg_path), str(png_path)], check=True)
+    if rotated_y_label:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            label_path = Path(tmpdir) / "ylabel.png"
+            subprocess.run(
+                [
+                    converter,
+                    "-background",
+                    "none",
+                    "-font",
+                    "DejaVu-Sans-Bold",
+                    "-pointsize",
+                    "12",
+                    "-fill",
+                    "#222222",
+                    f"label:{rotated_y_label}",
+                    str(label_path),
+                ],
+                check=True,
+            )
+            subprocess.run([converter, str(label_path), "-rotate", "-90", str(label_path)], check=True)
+            dims = subprocess.check_output(
+                ["identify", "-format", "%w %h", str(label_path)],
+                text=True,
+            ).strip()
+            _label_width, label_height = [int(part) for part in dims.split()]
+            label_y = max(0, int(279 - label_height / 2))
+            subprocess.run(
+                [
+                    converter,
+                    str(png_path),
+                    str(label_path),
+                    "-geometry",
+                    f"+34+{label_y}",
+                    "-composite",
+                    str(png_path),
+                ],
+                check=True,
+            )
 
 
 def plot_observed_motif_shift(
@@ -209,23 +312,28 @@ def plot_observed_motif_shift(
 ) -> Path:
     path = output_dir / "fig_observed_settlement_motif_shift.svg"
     elements = svg_start(
-        "Observed Settlement Motifs Shift With Stress",
-        "Median route shares by coupon and principal ratio; 52-week smoke, 3 seeds per cell.",
+        "Simulated Settlement Motif Shares",
+        "Median route shares by coupon and principal ratio in the final settlement-capacity grid.",
+        width=920,
+        height=560,
     )
     sx, sy, _ = add_plot_axes(
         elements,
         32,
         86,
-        696,
+        650,
         416,
         xmin=min(principals),
         xmax=max(principals),
-        ymin=0.35,
-        ymax=0.60,
+        ymin=0.40,
+        ymax=0.55,
         xticks=principals,
-        yticks=[0.35, 0.40, 0.45, 0.50, 0.55, 0.60],
+        yticks=[0.40, 0.45, 0.50, 0.55],
         xlabel="Gross principal ratio (principal / certified backing capacity)",
-        ylabel="Median share of observed ledger routes",
+        ylabel="Median share of simulated routes",
+        x_scale="tail_log",
+        x_tail_offset=5.0,
+        stagger_xtick_labels=True,
     )
     for coupon in coupons:
         v2v_points: list[Point] = []
@@ -246,8 +354,8 @@ def plot_observed_motif_shift(
                 f'fill="{colors[coupon]}" stroke="white" stroke-width="1.2"/>'
             )
 
-    lx, ly = 525, 124
-    elements.append(rect(lx - 12, ly - 24, 170, 136, "#ffffff", "#dde3e8"))
+    lx, ly = 720, 116
+    elements.append(rect(lx - 12, ly - 24, 166, 222, "#ffffff", "#d1d5db"))
     elements.append(polyline([(lx, ly), (lx + 28, ly)], "#555", width=2.2))
     elements.append(circle(lx + 14, ly, 3.8, "#555"))
     elements.append(text(lx + 38, ly + 4, "V2V route share", size=10))
@@ -259,14 +367,15 @@ def plot_observed_motif_shift(
         elements.append(f'<line x1="{lx}" y1="{yy}" x2="{lx + 28}" y2="{yy}" stroke="{colors[coupon]}" stroke-width="4"/>')
         elements.append(text(lx + 38, yy + 4, f"{coupon_label(coupon)} coupon", size=10))
 
-    write_svg(path, elements, "Result: stress shifts settlement composition gradually; this is not a collapse claim.")
-    maybe_write_png(path, enabled=png)
+    write_svg(path, elements)
+    maybe_write_png(path, enabled=png, rotated_y_label="Median share of simulated routes")
     return path
 
 
 def plot_outcome_grid(
     output_dir: Path,
     summary_by_key: dict[tuple[float, float], Row],
+    safety_by_key: dict[tuple[float, float], Row],
     coupons: list[float],
     principals: list[float],
     *,
@@ -275,14 +384,16 @@ def plot_outcome_grid(
     path = output_dir / "fig_frontier_outcome_grid.svg"
     elements = svg_start(
         "Frontier Outcome Grid",
-        "Green cells pass strongly; red cells fail service/headroom in the smoke run.",
+        "Strong, weak, and failed cells by coupon and principal ratio; cell text lists pass or fail guardrails.",
+        width=920,
+        height=560,
     )
-    grid_x, grid_y = 126, 132
-    grid_width, grid_height = 570, 292
+    grid_x, grid_y = 140, 128
+    grid_width, grid_height = 660, 304
     cell_width = grid_width / len(principals)
     cell_height = grid_height / len(coupons)
     status_color = {0: "#b94a48", 1: "#e0a43a", 2: "#3f8f5a"}
-    status_word = {0: "fail", 1: "safe", 2: "strong"}
+    status_word = {0: "failed", 1: "weak", 2: "strong"}
 
     for j, principal in enumerate(principals):
         elements.append(
@@ -308,9 +419,11 @@ def plot_outcome_grid(
         )
         for j, principal in enumerate(principals):
             row = summary_by_key[(coupon, principal)]
-            safe = int(safe_float(row, "safe"))
-            strong = int(safe_float(row, "strong_success"))
+            safety_row = safety_by_key.get((coupon, principal), row)
+            safe = int(safe_float(safety_row, "safe", safe_float(row, "safe")))
+            strong = int(safe_float(safety_row, "strong_success", safe_float(row, "strong_success")))
             status = 2 if strong else (1 if safe else 0)
+            guardrail_label = guardrail_cell_label(row, safety_row, failed=(status == 0))
             rx = grid_x + j * cell_width
             ry = grid_y + i * cell_height
             fill = "white" if status == 0 else "#18202a"
@@ -318,7 +431,7 @@ def plot_outcome_grid(
             elements.append(
                 text(
                     rx + cell_width / 2,
-                    ry + cell_height / 2 - 7,
+                    ry + cell_height / 2 - 8,
                     status_word[status],
                     size=13,
                     fill=fill,
@@ -330,7 +443,7 @@ def plot_outcome_grid(
                 text(
                     rx + cell_width / 2,
                     ry + cell_height / 2 + 13,
-                    f"V2V {safe_float(row, 'voucher_to_voucher_volume_ratio_vs_baseline'):.2f}",
+                    guardrail_label,
                     size=10,
                     fill=fill,
                     anchor="middle",
@@ -340,15 +453,16 @@ def plot_outcome_grid(
     elements.append(
         text(
             grid_x + grid_width / 2,
-            grid_y + grid_height + 38,
+            grid_y - 42,
             "Gross principal ratio (principal / certified backing capacity)",
             size=12,
             anchor="middle",
+            weight="600",
         )
     )
-    elements.append(text(grid_x, grid_y - 42, "Y-axis: Annual coupon target", size=12, anchor="start", weight="600"))
-    write_svg(path, elements, "Result: the first boundary is repayment/headroom, not disappearance of voucher circulation.")
-    maybe_write_png(path, enabled=png)
+    elements.append(rotated_text(grid_x - 56, grid_y + grid_height / 2, "Annual coupon target", size=12, weight="600"))
+    write_svg(path, elements)
+    maybe_write_png(path, enabled=png, rotated_y_label="Annual coupon target")
     return path
 
 
@@ -365,21 +479,26 @@ def plot_scheduled_payment_coverage(
     elements = svg_start(
         "Scheduled Payment Coverage Boundary",
         "Fifth-percentile scheduled payment coverage by coupon and principal ratio.",
+        width=920,
+        height=560,
     )
     sx, sy, bounds = add_plot_axes(
         elements,
         32,
         86,
-        696,
+        650,
         416,
         xmin=min(principals),
         xmax=max(principals),
-        ymin=0.0,
-        ymax=1.05,
+        ymin=0.50,
+        ymax=1.0,
         xticks=principals,
-        yticks=[0.0, 0.25, 0.50, 0.75, 1.0],
+        yticks=[0.50, 0.60, 0.70, 0.80, 0.90, 1.0],
         xlabel="Gross principal ratio (principal / certified backing capacity)",
         ylabel="p05 scheduled payment coverage ratio",
+        x_scale="tail_log",
+        x_tail_offset=5.0,
+        stagger_xtick_labels=True,
     )
     elements.append(polyline([(bounds[0], sy(1.0)), (bounds[2], sy(1.0))], "#111", width=1.4, dash="3 4"))
     elements.append(text(bounds[2] - 5, sy(1.0) - 7, "full scheduled coverage", size=10, anchor="end"))
@@ -392,14 +511,14 @@ def plot_scheduled_payment_coverage(
         for px, py in points:
             elements.append(circle(px, py, 4.2, colors[coupon]))
 
-    lx, ly = 526, 346
-    elements.append(rect(lx - 12, ly - 24, 160, 92, "#ffffff", "#dde3e8"))
+    lx, ly = 720, 134
+    elements.append(rect(lx - 12, ly - 24, 166, 162, "#ffffff", "#d1d5db"))
     for idx, coupon in enumerate(coupons):
         yy = ly + idx * 18
         elements.append(f'<line x1="{lx}" y1="{yy}" x2="{lx + 28}" y2="{yy}" stroke="{colors[coupon]}" stroke-width="4"/>')
         elements.append(text(lx + 38, yy + 4, f"{coupon_label(coupon)} coupon", size=10))
-    write_svg(path, elements, "Result: scheduled service coverage deteriorates sharply with larger principal and coupon.")
-    maybe_write_png(path, enabled=png)
+    write_svg(path, elements)
+    maybe_write_png(path, enabled=png, rotated_y_label="p05 scheduled payment coverage ratio")
     return path
 
 
@@ -445,7 +564,7 @@ def plot_capacity_caps(
     elements.append(rect(bounds[0] + 16, bounds[1] + 14, 252, 38, "#ffffff", "#dde3e8"))
     elements.append(text(bounds[0] + 30, bounds[1] + 38, "cap-bound producers = 0 in all cells", size=12, fill="#374151"))
     write_svg(path, elements, "Result: cap-bound suppression is not the active failure mechanism under this cap calibration.")
-    maybe_write_png(path, enabled=png)
+    maybe_write_png(path, enabled=png, rotated_y_label="p95 producer borrowing-capacity utilization")
     return path
 
 
@@ -482,7 +601,7 @@ def generate_figures(
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = [
         plot_observed_motif_shift(output_dir, by_run, coupons, principals, colors, png=png),
-        plot_outcome_grid(output_dir, summary_by_key, coupons, principals, png=png),
+        plot_outcome_grid(output_dir, summary_by_key, safety_by_key, coupons, principals, png=png),
         plot_scheduled_payment_coverage(output_dir, safety_by_key, coupons, principals, colors, png=png),
     ]
     if include_cap_nonbinding:
