@@ -116,6 +116,11 @@ tail -f analysis/monte_carlo/validation-full.log
 The full runbook, including `tmux`, `tail -f`, and expected output files, is in
 `docs/regenbond_remote_batches.md`.
 
+The publication-facing aggregate artifacts for the Regenerative Bonds paper are
+tracked under `analysis/monte_carlo/bond_issuer_frontier_publication_v2/`. That
+directory includes the reported frontier summary, selected figures, checksums,
+and a reproduction README for the public `cosmo-local-credit/sim` repository.
+
 Use `--scenario all` for the older baseline, regenerative-bond, and stress-test
 suite. For longer runs, `--analysis-stride N` records expensive paper
 diagnostics every `N` ticks while still simulating every tick.

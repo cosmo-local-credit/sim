@@ -356,7 +356,7 @@ Current topology and flow semantics:
 Empirical integrity audit:
 
 ```bash
-cd /home/wor/src/ge/clc
+cd $WORKDIR
 python3 RegenBonds/analysis/producer_voucher_integrity_audit.py \
   --sim-output-dir sim/analysis/monte_carlo/behavior_alignment_smoke52
 ```
@@ -1043,7 +1043,7 @@ Run these from your local machine after each remote job finishes. Create the
 local parent directory first:
 
 ```bash
-mkdir -p /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo
+mkdir -p $WORKDIR/RegenBonds/analysis/monte_carlo
 ```
 
 Use `rsync` instead of `scp -r` for normal review/paper pulls. The commands
@@ -1056,7 +1056,7 @@ rsync -av \
   --exclude '*.partial.csv' \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation_20run/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_20run/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/engine_validation_20run/
 ```
 
 Only use `scp -r` if you intentionally want to copy `_shards/` too.
@@ -1088,11 +1088,11 @@ Pull `validation-1mo`:
 rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation_1mo_test/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_1mo_test/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/engine_validation_1mo_test/
 
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/validation-1mo.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_1mo_test/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/engine_validation_1mo_test/
 ```
 
 Pull `validation-smoke`:
@@ -1101,11 +1101,11 @@ Pull `validation-smoke`:
 rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation_smoke/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_smoke/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/engine_validation_smoke/
 
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/validation-smoke.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_smoke/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/engine_validation_smoke/
 ```
 
 Pull `validation-pilot`:
@@ -1114,11 +1114,11 @@ Pull `validation-pilot`:
 rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation_20run/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_20run/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/engine_validation_20run/
 
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/validation-pilot.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation_20run/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/engine_validation_20run/
 ```
 
 Pull `validation-full`:
@@ -1127,11 +1127,11 @@ Pull `validation-full`:
 rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/engine_validation/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/engine_validation/
 
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/validation-full.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/engine_validation/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/engine_validation/
 ```
 
 ### Frontier Outputs
@@ -1142,11 +1142,11 @@ Pull `frontier-smoke`:
 rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier_smoke/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_smoke/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_smoke/
 
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-smoke.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_smoke/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_smoke/
 ```
 
 Pull `frontier-maturity-smoke`:
@@ -1155,11 +1155,11 @@ Pull `frontier-maturity-smoke`:
 rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/
 
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-maturity-smoke.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_maturity_smoke/
 ```
 
 Pull `frontier-feedback-probe`:
@@ -1168,11 +1168,11 @@ Pull `frontier-feedback-probe`:
 rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier_feedback_probe/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_feedback_probe/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_feedback_probe/
 
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-feedback-probe.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_feedback_probe/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_feedback_probe/
 ```
 
 Pull `frontier-rola-regeneration-probe`:
@@ -1181,11 +1181,11 @@ Pull `frontier-rola-regeneration-probe`:
 rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/
 
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-rola-regeneration-probe.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_rola_regeneration_probe/
 ```
 
 Pull `frontier-pilot`:
@@ -1194,11 +1194,11 @@ Pull `frontier-pilot`:
 rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier_pilot/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
 
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-pilot.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
 ```
 
 Pull `frontier-publication`:
@@ -1207,11 +1207,11 @@ Pull `frontier-publication`:
 rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/bond_issuer_frontier/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier/
 
 rsync -av -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:~/sim/analysis/monte_carlo/frontier-publication.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier/
 ```
 
 If the remote job wrote to the sibling `~/RegenBonds` checkout with
@@ -1222,12 +1222,12 @@ pull the paper-facing current-grid artifacts instead:
 rsync -avh --progress --exclude '_shards/' --exclude '*.partial.csv' \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:/root/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_current_grid/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_current_grid/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_current_grid/
 
 rsync -avh --progress \
   -e 'ssh -i ~/.ssh/id_ed25519' \
   root@128.140.120.36:/root/RegenBonds/analysis/monte_carlo/frontier-current-publication.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/frontier-current-publication.log
+  $WORKDIR/RegenBonds/analysis/monte_carlo/frontier-current-publication.log
 ```
 
 ### SSH Alias Form
@@ -1238,10 +1238,10 @@ If `wor-testing` is configured as an SSH alias for
 ```bash
 rsync -av --exclude '_shards/' --exclude '*.partial.csv' \
   root@wor-testing:~/sim/analysis/monte_carlo/bond_issuer_frontier_pilot/ \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
 
 rsync -av root@wor-testing:~/sim/analysis/monte_carlo/frontier-pilot.log \
-  /home/wor/src/ge/clc/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
+  $WORKDIR/RegenBonds/analysis/monte_carlo/bond_issuer_frontier_pilot/
 ```
 
 ## Expected Outputs

@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="560" viewBox="0 0 920 560">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="44.00" y="38.00" font-size="19" fill="#222" text-anchor="start" font-family="Arial, Helvetica, sans-serif" font-weight="700">Scheduled Payment Coverage Boundary</text>
+<text x="44.00" y="61.00" font-size="11" fill="#4b5563" text-anchor="start" font-family="Arial, Helvetica, sans-serif" font-weight="normal">Fifth-percentile scheduled payment coverage by coupon and principal ratio.</text>
+<line x1="152" y1="424" x2="646" y2="424" stroke="#222" stroke-width="1"/>
+<line x1="152" y1="134" x2="152" y2="424" stroke="#222" stroke-width="1"/>
+<line x1="152.00" y1="424" x2="152.00" y2="429" stroke="#222"/>
+<text x="152.00" y="447.00" font-size="10" fill="#222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="normal">0.05</text>
+<line x1="152.00" y1="134" x2="152.00" y2="424" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="162.83" y1="424" x2="162.83" y2="429" stroke="#222"/>
+<text x="162.83" y="460.00" font-size="10" fill="#222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="normal">0.1</text>
+<line x1="162.83" y1="134" x2="162.83" y2="424" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="195.80" y1="424" x2="195.80" y2="429" stroke="#222"/>
+<text x="195.80" y="447.00" font-size="10" fill="#222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="normal">0.25</text>
+<line x1="195.80" y1="134" x2="195.80" y2="424" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="252.42" y1="424" x2="252.42" y2="429" stroke="#222"/>
+<text x="252.42" y="460.00" font-size="10" fill="#222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="normal">0.5</text>
+<line x1="252.42" y1="134" x2="252.42" y2="424" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="311.25" y1="424" x2="311.25" y2="429" stroke="#222"/>
+<text x="311.25" y="447.00" font-size="10" fill="#222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="normal">0.75</text>
+<line x1="311.25" y1="134" x2="311.25" y2="424" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="372.49" y1="424" x2="372.49" y2="429" stroke="#222"/>
+<text x="372.49" y="460.00" font-size="10" fill="#222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="normal">1</text>
+<line x1="372.49" y1="134" x2="372.49" y2="424" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="503.02" y1="424" x2="503.02" y2="429" stroke="#222"/>
+<text x="503.02" y="447.00" font-size="10" fill="#222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="normal">1.5</text>
+<line x1="503.02" y1="134" x2="503.02" y2="424" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="646.00" y1="424" x2="646.00" y2="429" stroke="#222"/>
+<text x="646.00" y="460.00" font-size="10" fill="#222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="normal">2</text>
+<line x1="646.00" y1="134" x2="646.00" y2="424" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="147" y1="424.00" x2="152" y2="424.00" stroke="#222"/>
+<text x="144.00" y="427.50" font-size="10" fill="#222" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-weight="normal">0.5</text>
+<line x1="152" y1="424.00" x2="646" y2="424.00" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="147" y1="366.00" x2="152" y2="366.00" stroke="#222"/>
+<text x="144.00" y="369.50" font-size="10" fill="#222" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-weight="normal">0.6</text>
+<line x1="152" y1="366.00" x2="646" y2="366.00" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="147" y1="308.00" x2="152" y2="308.00" stroke="#222"/>
+<text x="144.00" y="311.50" font-size="10" fill="#222" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-weight="normal">0.7</text>
+<line x1="152" y1="308.00" x2="646" y2="308.00" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="147" y1="250.00" x2="152" y2="250.00" stroke="#222"/>
+<text x="144.00" y="253.50" font-size="10" fill="#222" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-weight="normal">0.8</text>
+<line x1="152" y1="250.00" x2="646" y2="250.00" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="147" y1="192.00" x2="152" y2="192.00" stroke="#222"/>
+<text x="144.00" y="195.50" font-size="10" fill="#222" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-weight="normal">0.9</text>
+<line x1="152" y1="192.00" x2="646" y2="192.00" stroke="#e5e7eb" stroke-width="0.8"/>
+<line x1="147" y1="134.00" x2="152" y2="134.00" stroke="#222"/>
+<text x="144.00" y="137.50" font-size="10" fill="#222" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-weight="normal">1</text>
+<line x1="152" y1="134.00" x2="646" y2="134.00" stroke="#e5e7eb" stroke-width="0.8"/>
+<text x="399.00" y="474.00" font-size="12" fill="#222" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="normal">Gross principal ratio (principal / certified backing capacity)</text>
+<polyline points="152.00,134.00 646.00,134.00" fill="none" stroke="#111" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="3 4"/>
+<text x="641.00" y="127.00" font-size="10" fill="#222" text-anchor="end" font-family="Arial, Helvetica, sans-serif" font-weight="normal">full scheduled coverage</text>
+<polyline points="152.00,134.00 162.83,134.00 195.80,134.00 252.42,134.00 311.25,134.00 372.49,134.00 503.02,134.00 646.00,134.00" fill="none" stroke="#2c7fb8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="152.00" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="162.83" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="195.80" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="252.42" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="311.25" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="372.49" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="503.02" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="646.00" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<polyline points="152.00,134.00 162.83,134.00 195.80,134.00 252.42,134.00 311.25,134.00 372.49,134.00 503.02,134.00 646.00,134.00" fill="none" stroke="#41ab5d" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="152.00" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="162.83" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="195.80" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="252.42" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="311.25" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="372.49" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="503.02" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="646.00" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<polyline points="152.00,134.00 162.83,134.00 195.80,134.00 252.42,134.00 311.25,134.00 372.49,134.00 503.02,134.00 646.00,134.00" fill="none" stroke="#41ab5d" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="152.00" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="162.83" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="195.80" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="252.42" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="311.25" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="372.49" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="503.02" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="646.00" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<polyline points="152.00,134.00 162.83,134.00 195.80,134.00 252.42,134.00 311.25,134.00 372.49,134.00 503.02,134.00 646.00,147.76" fill="none" stroke="#b23a48" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="152.00" cy="134.00" r="4.2" fill="#b23a48" stroke="white" stroke-width="1.2"/>
+<circle cx="162.83" cy="134.00" r="4.2" fill="#b23a48" stroke="white" stroke-width="1.2"/>
+<circle cx="195.80" cy="134.00" r="4.2" fill="#b23a48" stroke="white" stroke-width="1.2"/>
+<circle cx="252.42" cy="134.00" r="4.2" fill="#b23a48" stroke="white" stroke-width="1.2"/>
+<circle cx="311.25" cy="134.00" r="4.2" fill="#b23a48" stroke="white" stroke-width="1.2"/>
+<circle cx="372.49" cy="134.00" r="4.2" fill="#b23a48" stroke="white" stroke-width="1.2"/>
+<circle cx="503.02" cy="134.00" r="4.2" fill="#b23a48" stroke="white" stroke-width="1.2"/>
+<circle cx="646.00" cy="147.76" r="4.2" fill="#b23a48" stroke="white" stroke-width="1.2"/>
+<polyline points="152.00,134.00 162.83,134.00 195.80,134.00 252.42,134.00 311.25,134.00 372.49,134.00 503.02,134.00 646.00,182.42" fill="none" stroke="#f0a202" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="152.00" cy="134.00" r="4.2" fill="#f0a202" stroke="white" stroke-width="1.2"/>
+<circle cx="162.83" cy="134.00" r="4.2" fill="#f0a202" stroke="white" stroke-width="1.2"/>
+<circle cx="195.80" cy="134.00" r="4.2" fill="#f0a202" stroke="white" stroke-width="1.2"/>
+<circle cx="252.42" cy="134.00" r="4.2" fill="#f0a202" stroke="white" stroke-width="1.2"/>
+<circle cx="311.25" cy="134.00" r="4.2" fill="#f0a202" stroke="white" stroke-width="1.2"/>
+<circle cx="372.49" cy="134.00" r="4.2" fill="#f0a202" stroke="white" stroke-width="1.2"/>
+<circle cx="503.02" cy="134.00" r="4.2" fill="#f0a202" stroke="white" stroke-width="1.2"/>
+<circle cx="646.00" cy="182.42" r="4.2" fill="#f0a202" stroke="white" stroke-width="1.2"/>
+<polyline points="152.00,134.00 162.83,134.00 195.80,134.00 252.42,134.00 311.25,134.00 372.49,134.00 503.02,134.00 646.00,267.29" fill="none" stroke="#6f4e37" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="152.00" cy="134.00" r="4.2" fill="#6f4e37" stroke="white" stroke-width="1.2"/>
+<circle cx="162.83" cy="134.00" r="4.2" fill="#6f4e37" stroke="white" stroke-width="1.2"/>
+<circle cx="195.80" cy="134.00" r="4.2" fill="#6f4e37" stroke="white" stroke-width="1.2"/>
+<circle cx="252.42" cy="134.00" r="4.2" fill="#6f4e37" stroke="white" stroke-width="1.2"/>
+<circle cx="311.25" cy="134.00" r="4.2" fill="#6f4e37" stroke="white" stroke-width="1.2"/>
+<circle cx="372.49" cy="134.00" r="4.2" fill="#6f4e37" stroke="white" stroke-width="1.2"/>
+<circle cx="503.02" cy="134.00" r="4.2" fill="#6f4e37" stroke="white" stroke-width="1.2"/>
+<circle cx="646.00" cy="267.29" r="4.2" fill="#6f4e37" stroke="white" stroke-width="1.2"/>
+<polyline points="152.00,134.00 162.83,134.00 195.80,134.00 252.42,134.00 311.25,134.00 372.49,134.00 503.02,203.68 646.00,328.58" fill="none" stroke="#2c7fb8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="152.00" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="162.83" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="195.80" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="252.42" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="311.25" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="372.49" cy="134.00" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="503.02" cy="203.68" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<circle cx="646.00" cy="328.58" r="4.2" fill="#2c7fb8" stroke="white" stroke-width="1.2"/>
+<polyline points="152.00,134.00 162.83,134.00 195.80,134.00 252.42,134.00 311.25,134.00 372.49,134.00 503.02,266.11 646.00,377.69" fill="none" stroke="#41ab5d" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="152.00" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="162.83" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="195.80" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="252.42" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="311.25" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="372.49" cy="134.00" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="503.02" cy="266.11" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<circle cx="646.00" cy="377.69" r="4.2" fill="#41ab5d" stroke="white" stroke-width="1.2"/>
+<rect x="708.00" y="110.00" width="166.00" height="162.00" fill="#ffffff" stroke="#d1d5db" stroke-width="1.0"/>
+<line x1="720" y1="134" x2="748" y2="134" stroke="#2c7fb8" stroke-width="4"/>
+<text x="758.00" y="138.00" font-size="10" fill="#222" text-anchor="start" font-family="Arial, Helvetica, sans-serif" font-weight="normal">0% coupon</text>
+<line x1="720" y1="152" x2="748" y2="152" stroke="#41ab5d" stroke-width="4"/>
+<text x="758.00" y="156.00" font-size="10" fill="#222" text-anchor="start" font-family="Arial, Helvetica, sans-serif" font-weight="normal">4% coupon</text>
+<line x1="720" y1="170" x2="748" y2="170" stroke="#41ab5d" stroke-width="4"/>
+<text x="758.00" y="174.00" font-size="10" fill="#222" text-anchor="start" font-family="Arial, Helvetica, sans-serif" font-weight="normal">8% coupon</text>
+<line x1="720" y1="188" x2="748" y2="188" stroke="#b23a48" stroke-width="4"/>
+<text x="758.00" y="192.00" font-size="10" fill="#222" text-anchor="start" font-family="Arial, Helvetica, sans-serif" font-weight="normal">12% coupon</text>
+<line x1="720" y1="206" x2="748" y2="206" stroke="#f0a202" stroke-width="4"/>
+<text x="758.00" y="210.00" font-size="10" fill="#222" text-anchor="start" font-family="Arial, Helvetica, sans-serif" font-weight="normal">15% coupon</text>
+<line x1="720" y1="224" x2="748" y2="224" stroke="#6f4e37" stroke-width="4"/>
+<text x="758.00" y="228.00" font-size="10" fill="#222" text-anchor="start" font-family="Arial, Helvetica, sans-serif" font-weight="normal">25% coupon</text>
+<line x1="720" y1="242" x2="748" y2="242" stroke="#2c7fb8" stroke-width="4"/>
+<text x="758.00" y="246.00" font-size="10" fill="#222" text-anchor="start" font-family="Arial, Helvetica, sans-serif" font-weight="normal">35% coupon</text>
+<line x1="720" y1="260" x2="748" y2="260" stroke="#41ab5d" stroke-width="4"/>
+<text x="758.00" y="264.00" font-size="10" fill="#222" text-anchor="start" font-family="Arial, Helvetica, sans-serif" font-weight="normal">45% coupon</text>
+</svg>

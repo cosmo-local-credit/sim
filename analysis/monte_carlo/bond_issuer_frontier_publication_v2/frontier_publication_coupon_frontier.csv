@@ -1,0 +1,9 @@
+network_scale,coupon_target_annual,max_safe_principal_ratio,max_safe_principal_usd,max_strong_principal_ratio,max_strong_principal_usd,max_headroom_principal_ratio,max_headroom_principal_usd,first_failed_principal_ratio,first_failed_binding_constraint
+current,0.0,2.0,36471.898666999994,2.0,36471.898666999994,2.0,36471.898666999994,,
+current,0.04,2.0,36471.898666999994,1.5,27353.924000249994,1.5,27353.924000249994,,
+current,0.08,2.0,36471.898666999994,1.5,27353.924000249994,1.5,27353.924000249994,,
+current,0.12,1.5,27353.924000249994,1.5,27353.924000249994,1.5,27353.924000249994,2.0,p50_scheduled_payment_coverage;p05_scheduled_payment_coverage;p95_unpaid_claims
+current,0.15,1.5,27353.924000249994,1.0,18235.949333499997,1.0,18235.949333499997,2.0,p50_scheduled_payment_coverage;p05_scheduled_payment_coverage;p95_unpaid_claims
+current,0.25,1.5,27353.924000249994,1.0,18235.949333499997,1.0,18235.949333499997,2.0,p50_scheduled_payment_coverage;p05_scheduled_payment_coverage;p95_unpaid_claims
+current,0.35,1.0,18235.949333499997,1.0,18235.949333499997,1.0,18235.949333499997,1.5,p50_scheduled_payment_coverage;p05_scheduled_payment_coverage;p95_unpaid_claims
+current,0.45,1.0,18235.949333499997,0.75,13676.962000124997,0.75,13676.962000124997,1.5,p50_scheduled_payment_coverage;p05_scheduled_payment_coverage;p95_unpaid_claims

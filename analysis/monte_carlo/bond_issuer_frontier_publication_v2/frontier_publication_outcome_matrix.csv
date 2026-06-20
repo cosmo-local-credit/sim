@@ -1,0 +1,9 @@
+network_scale,coupon_target_annual,principal_ratio_0.05,principal_ratio_0.1,principal_ratio_0.25,principal_ratio_0.5,principal_ratio_0.75,principal_ratio_1,principal_ratio_1.5,principal_ratio_2
+current,0.0,strong,strong,strong,strong,strong,strong,strong,strong
+current,0.04,strong,strong,strong,strong,strong,strong,strong,safe_low_headroom
+current,0.08,strong,strong,strong,strong,strong,strong,strong,safe_low_headroom
+current,0.12,strong,strong,strong,strong,strong,strong,strong,fail
+current,0.15,strong,strong,strong,strong,strong,strong,safe_low_headroom,fail
+current,0.25,strong,strong,strong,strong,strong,strong,safe_low_headroom,fail
+current,0.35,strong,strong,strong,strong,strong,strong,fail,fail
+current,0.45,strong,strong,strong,strong,strong,safe_low_headroom,fail,fail
